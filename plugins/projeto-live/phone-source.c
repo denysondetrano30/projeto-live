@@ -30,6 +30,7 @@
 
 #include "net-info.h"
 #include "qrcodegen.h"
+#include "usb-relay.h"
 
 #define PHONE_SOURCE_ID "projeto_live_phone_source"
 
@@ -39,6 +40,10 @@
 #define S_HOW "how_to_pair"
 #define S_ADDRESSES "this_computer"
 #define S_NEW_KEY "new_qr_code"
+#define S_CONNECTION "connection"
+#define S_USB_HELP "usb_help"
+#define MODE_WIFI "wifi"
+#define MODE_USB "usb"
 
 #define PHONE_LISTEN_PORT 9000
 #define PORT_MIN 20000
@@ -61,6 +66,8 @@ struct phone_source {
 
 	int port;
 	char key[KEY_LEN + 1];
+	bool usb_mode;
+	struct pl_usb_relay *usb;
 	char *manual_address;
 	uint64_t manual_changed_ns;
 	char current_url[URL_MAX];
@@ -258,14 +265,22 @@ static bool manual_address_complete(const char *text)
 	return p[1 + used] == 0;
 }
 
+/* O endereço digitado (plano B) só vale no modo Wi-Fi. */
 static bool has_manual_address(const struct phone_source *ps)
 {
-	return ps->manual_address && *ps->manual_address;
+	return !ps->usb_mode && ps->manual_address && *ps->manual_address;
 }
 
 static void build_url(struct phone_source *ps, char *url, size_t size)
 {
 	url[0] = 0;
+
+	if (ps->usb_mode) {
+		/* Cabo USB: a Fonte de mídia lê do relé local, que busca o vídeo no iPhone pelo cabo. */
+		if (ps->usb)
+			snprintf(url, size, "tcp://127.0.0.1:%d", pl_usb_relay_local_port(ps->usb));
+		return;
+	}
 
 	if (has_manual_address(ps)) {
 		const char *manual = ps->manual_address;
@@ -306,7 +321,9 @@ static void apply_url(struct phone_source *ps, const char *url)
 	obs_source_update(ps->media, settings);
 	obs_data_release(settings);
 
-	if (has_manual_address(ps))
+	if (ps->usb_mode)
+		blog(LOG_INFO, "[projeto-live] '%s' esperando o iPhone pelo cabo USB", obs_source_get_name(ps->source));
+	else if (has_manual_address(ps))
 		blog(LOG_INFO, "[projeto-live] '%s' ligando para o celular em %s", obs_source_get_name(ps->source),
 		     url);
 	else
@@ -374,6 +391,20 @@ static void phone_update(void *data, obs_data_t *settings)
 	ps->port = port;
 	snprintf(ps->key, sizeof(ps->key), "%s", key);
 
+	bool usb_mode = strcmp(obs_data_get_string(settings, S_CONNECTION), MODE_USB) == 0;
+	bool mode_changed = usb_mode != ps->usb_mode;
+	ps->usb_mode = usb_mode;
+	struct pl_usb_relay *old_relay = NULL;
+	if (usb_mode && !ps->usb) {
+		ps->usb = pl_usb_relay_create(obs_source_get_name(ps->source));
+		if (!ps->usb)
+			blog(LOG_WARNING, "[projeto-live] Não consegui preparar o cabo USB");
+	} else if (!usb_mode && ps->usb) {
+		/* Fecha o relé só depois de a Fonte de mídia mudar de endereço (logo abaixo). */
+		old_relay = ps->usb;
+		ps->usb = NULL;
+	}
+
 	const char *new_manual = obs_data_get_string(settings, S_MANUAL);
 	bool manual_changed = !ps->manual_address || strcmp(ps->manual_address, new_manual) != 0;
 	bfree(ps->manual_address);
@@ -382,8 +413,9 @@ static void phone_update(void *data, obs_data_t *settings)
 	rebuild_qr(ps);
 
 	/* Endereço digitado: quem conecta é o refresh, quando a digitação parar. */
-	if (manual_changed && has_manual_address(ps)) {
+	if (manual_changed && !mode_changed && has_manual_address(ps)) {
 		ps->manual_changed_ns = os_gettime_ns();
+		pl_usb_relay_destroy(old_relay);
 		return;
 	}
 
@@ -391,6 +423,7 @@ static void phone_update(void *data, obs_data_t *settings)
 	build_url(ps, url, sizeof(url));
 	if (*url)
 		apply_url(ps, url);
+	pl_usb_relay_destroy(old_relay);
 }
 
 static void *phone_create(obs_data_t *settings, obs_source_t *source)
@@ -423,6 +456,7 @@ static void phone_destroy(void *data)
 		obs_source_remove_active_child(ps->source, ps->media);
 		obs_source_release(ps->media);
 	}
+	pl_usb_relay_destroy(ps->usb);
 	if (ps->qr_texture) {
 		obs_enter_graphics();
 		gs_texture_destroy(ps->qr_texture);
@@ -439,6 +473,24 @@ static void phone_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, S_PORT, 0);
 	obs_data_set_default_string(settings, S_KEY, "");
 	obs_data_set_default_string(settings, S_MANUAL, "");
+	obs_data_set_default_string(settings, S_CONNECTION, MODE_WIFI);
+}
+
+/* Mostra só os campos do modo escolhido (Wi-Fi ou cabo USB). */
+static bool connection_modified(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+	bool usb = strcmp(obs_data_get_string(settings, S_CONNECTION), MODE_USB) == 0;
+	const char *wifi_only[] = {S_HOW, S_ADDRESSES, S_NEW_KEY, S_MANUAL};
+	for (size_t i = 0; i < sizeof(wifi_only) / sizeof(wifi_only[0]); i++) {
+		obs_property_t *p = obs_properties_get(props, wifi_only[i]);
+		if (p)
+			obs_property_set_visible(p, !usb);
+	}
+	obs_property_t *usb_help = obs_properties_get(props, S_USB_HELP);
+	if (usb_help)
+		obs_property_set_visible(usb_help, usb);
+	return true;
 }
 
 static bool new_key_clicked(obs_properties_t *props, obs_property_t *property, void *data)
@@ -465,6 +517,13 @@ static obs_properties_t *phone_properties(void *data)
 	struct phone_source *ps = data;
 	obs_properties_t *props = obs_properties_create();
 
+	obs_property_t *connection = obs_properties_add_list(props, S_CONNECTION, obs_module_text("Connection"),
+							     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_list_add_string(connection, obs_module_text("Connection.Wifi"), MODE_WIFI);
+	obs_property_list_add_string(connection, obs_module_text("Connection.Usb"), MODE_USB);
+	obs_property_set_modified_callback(connection, connection_modified);
+
+	obs_properties_add_text(props, S_USB_HELP, obs_module_text("UsbHelp"), OBS_TEXT_INFO);
 	obs_properties_add_text(props, S_HOW, obs_module_text("HowToPair"), OBS_TEXT_INFO);
 	if (ps)
 		obs_properties_add_text(props, S_ADDRESSES, ps->addresses_text, OBS_TEXT_INFO);
@@ -535,7 +594,7 @@ static void draw_background(void)
 static void draw_waiting_screen(struct phone_source *ps)
 {
 	draw_background();
-	if (has_manual_address(ps))
+	if (has_manual_address(ps) || ps->usb_mode)
 		return;
 
 	pthread_mutex_lock(&ps->qr_mutex);
