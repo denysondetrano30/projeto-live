@@ -112,6 +112,7 @@ check_obs_websocket()
 
 add_core_module(obs-x264)
 add_core_module(oss-audio PLATFORMS FREEBSD OPENBSD)
+add_core_module(projeto-live)
 add_core_module(rtmp-services)
 add_core_module(sndio PLATFORMS LINUX FREEBSD OPENBSD)
 add_core_module(text-freetype2)
