@@ -15,6 +15,10 @@
  * O canal de controle (Wi-Fi) e o relé do cabo USB leem esse estado e avisam o app, que pinta
  * a borda da tela de vermelho.
  *
+ * Avisos do diretor: o painel "Diretor (Projeto Live)" e os atalhos de teclado chamam
+ * pl_phone_send_command, que manda "CMD <número> <texto>" pelo mesmo caminho; o app responde
+ * "ACK <número>" quando o operador toca em "Entendi".
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 2 of the License, or
@@ -34,10 +38,12 @@
 
 #include "control-server.h"
 #include "net-info.h"
+#include "phone-source.h"
 #include "qrcodegen.h"
 #include "usb-relay.h"
 
-#define PHONE_SOURCE_ID "projeto_live_phone_source"
+#define PHONE_SOURCE_ID PL_PHONE_SOURCE_ID
+#define PL_COMMAND_KEYS 4
 
 #define S_PORT "pair_port"
 #define S_KEY "pair_key"
@@ -75,6 +81,11 @@ struct phone_source {
 	struct pl_usb_relay *usb;
 	struct pl_control *control;
 	volatile bool on_air;
+
+	/* Avisos do diretor (só na thread da interface). */
+	uint32_t last_sent;
+	char last_text[PL_COMMAND_MAX + 1];
+	obs_hotkey_id hotkeys[PL_COMMAND_KEYS];
 	char *manual_address;
 	uint64_t manual_changed_ns;
 	char current_url[URL_MAX];
@@ -371,6 +382,157 @@ static void refresh_task(void *param)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Avisos do diretor                                                         */
+
+static const char *command_keys[] = {"Command.Open", "Command.Close", "Command.Preacher", "Command.OnAir"};
+#define COMMAND_COUNT (sizeof(command_keys) / sizeof(command_keys[0]))
+
+size_t pl_phone_command_count(void)
+{
+	return COMMAND_COUNT;
+}
+
+const char *pl_phone_command_text(size_t index)
+{
+	return index < COMMAND_COUNT ? obs_module_text(command_keys[index]) : "";
+}
+
+bool pl_phone_is_source(obs_source_t *source)
+{
+	return source && strcmp(obs_source_get_id(source), PHONE_SOURCE_ID) == 0;
+}
+
+/* Uma linha só, sem caracteres de controle e sem cortar uma letra acentuada no meio. */
+static void clean_command(const char *text, char *out, size_t size)
+{
+	size_t len = 0;
+	for (const unsigned char *p = (const unsigned char *)text; *p && len + 1 < size; p++)
+		out[len++] = *p < 0x20 || *p == 0x7F ? ' ' : (char)*p;
+	if (text[len] != 0) {
+		/* Cortou: se a última letra ficou pela metade, tira ela (bytes 10xxxxxx continuam uma letra). */
+		size_t lead = len;
+		while (lead > 0 && ((unsigned char)out[lead - 1] & 0xC0) == 0x80)
+			lead--;
+		if (lead > 0) {
+			unsigned char c = (unsigned char)out[lead - 1];
+			size_t need = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+			if (len - (lead - 1) < need)
+				len = lead - 1;
+		}
+	}
+	while (len && out[len - 1] == ' ')
+		len--;
+	out[len] = 0;
+	size_t start = 0;
+	while (out[start] == ' ')
+		start++;
+	if (start)
+		memmove(out, out + start, len - start + 1);
+}
+
+bool pl_phone_get_status(obs_source_t *source, struct pl_phone_status *status)
+{
+	memset(status, 0, sizeof(*status));
+	if (!pl_phone_is_source(source))
+		return false;
+	struct phone_source *ps = obs_obj_get_data(source);
+	if (!ps)
+		return false;
+
+	struct pl_link_status link;
+	if (ps->usb_mode)
+		pl_usb_relay_get_status(ps->usb, &link);
+	else
+		pl_control_get_status(ps->control, &link);
+
+	status->connected = link.connected;
+	status->on_air = os_atomic_load_bool(&ps->on_air);
+	status->usb = ps->usb_mode;
+	snprintf(status->camera, sizeof(status->camera), "%s", link.camera);
+	status->last_sent = ps->last_sent;
+	status->last_acked = link.last_ack;
+	snprintf(status->last_text, sizeof(status->last_text), "%s", ps->last_text);
+	return true;
+}
+
+uint32_t pl_phone_send_command(obs_source_t *source, const char *text)
+{
+	if (!pl_phone_is_source(source) || !text)
+		return 0;
+	struct phone_source *ps = obs_obj_get_data(source);
+	if (!ps)
+		return 0;
+
+	char clean[PL_COMMAND_MAX + 1];
+	clean_command(text, clean, sizeof(clean));
+	if (!*clean)
+		return 0;
+
+	uint32_t id = ps->last_sent + 1;
+	char line[PL_COMMAND_MAX + 32];
+	snprintf(line, sizeof(line), "CMD %u %s", id, clean);
+	bool sent = ps->usb_mode ? pl_usb_relay_send(ps->usb, line) : pl_control_send(ps->control, line);
+	if (!sent) {
+		blog(LOG_INFO, "[projeto-live] '%s': aviso \"%s\" não enviado (sem celular conectado)",
+		     obs_source_get_name(source), clean);
+		return 0;
+	}
+
+	ps->last_sent = id;
+	snprintf(ps->last_text, sizeof(ps->last_text), "%s", clean);
+	blog(LOG_INFO, "[projeto-live] '%s': aviso do diretor \"%s\"", obs_source_get_name(source), clean);
+	return id;
+}
+
+struct hotkey_task {
+	obs_weak_source_t *weak;
+	size_t command;
+};
+
+static void hotkey_task(void *param)
+{
+	struct hotkey_task *task = param;
+	obs_source_t *source = obs_weak_source_get_source(task->weak);
+	obs_weak_source_release(task->weak);
+	if (source) {
+		pl_phone_send_command(source, pl_phone_command_text(task->command));
+		obs_source_release(source);
+	}
+	bfree(task);
+}
+
+/* Atalho de teclado (thread dos atalhos): o envio em si é feito na thread da interface. */
+static void hotkey_pressed(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	struct phone_source *ps = data;
+	UNUSED_PARAMETER(hotkey);
+	if (!pressed)
+		return;
+
+	for (size_t i = 0; i < COMMAND_COUNT; i++) {
+		if (ps->hotkeys[i] != id)
+			continue;
+		struct hotkey_task *task = bzalloc(sizeof(*task));
+		task->weak = obs_source_get_weak_source(ps->source);
+		task->command = i;
+		obs_queue_task(OBS_TASK_UI, hotkey_task, task, false);
+		return;
+	}
+}
+
+static void register_hotkeys(struct phone_source *ps)
+{
+	for (size_t i = 0; i < COMMAND_COUNT; i++) {
+		char name[64];
+		char description[256];
+		snprintf(name, sizeof(name), "projeto_live.command.%zu", i);
+		snprintf(description, sizeof(description), "%s: %s", obs_module_text("Hotkey.Send"),
+			 pl_phone_command_text(i));
+		ps->hotkeys[i] = obs_hotkey_register_source(ps->source, name, description, hotkey_pressed, ps);
+	}
+}
+
+/* ------------------------------------------------------------------------- */
 /* Fonte do OBS                                                              */
 
 static const char *phone_get_name(void *unused)
@@ -460,13 +622,21 @@ static void *phone_create(obs_data_t *settings, obs_source_t *source)
 	else
 		blog(LOG_WARNING, "[projeto-live] Não consegui criar a Fonte de mídia interna");
 
+	for (size_t i = 0; i < COMMAND_COUNT; i++)
+		ps->hotkeys[i] = OBS_INVALID_HOTKEY_ID;
 	phone_update(ps, settings);
+	register_hotkeys(ps);
 	return ps;
 }
 
 static void phone_destroy(void *data)
 {
 	struct phone_source *ps = data;
+
+	/* Antes de liberar a fonte, para um atalho apertado agora não achar a memória já solta. */
+	for (size_t i = 0; i < COMMAND_COUNT; i++)
+		if (ps->hotkeys[i] != OBS_INVALID_HOTKEY_ID)
+			obs_hotkey_unregister(ps->hotkeys[i]);
 
 	if (ps->media) {
 		obs_source_remove_active_child(ps->source, ps->media);

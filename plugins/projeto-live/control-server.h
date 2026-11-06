@@ -7,10 +7,12 @@
  *   OBS     -> celular: "PL1 <desafio>"
  *   celular -> OBS:     "HELLO <HMAC-SHA256(senha do QR code, desafio) em hex> <nome da câmera>"
  *   OBS     -> celular: "OK", depois "TALLY on" (no ar) ou "TALLY off" sempre que mudar
+ *   OBS     -> celular: "CMD <número> <texto>" (aviso do diretor, como "CMD 3 Abre")
+ *   celular -> OBS:     "ACK <número>" quando o operador toca em "Entendi"
  *   os dois lados:      "PING" a cada 2 segundos; 6 segundos sem nada = conexão caiu
  *
  * Assim a senha nunca passa pela rede. Uma câmera por fonte: um celular novo que prove a senha
- * substitui o anterior. Pelo cabo USB, as mesmas linhas "TALLY" vão pelo próprio túnel do cabo
+ * substitui o anterior. Pelo cabo USB, as mesmas linhas vão por um túnel do cabo
  * (veja usb-relay.c), sem desafio.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -22,6 +24,8 @@
 #pragma once
 
 #include <stdbool.h>
+
+#include "pl-link.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +39,13 @@ struct pl_control *pl_control_create(const char *source_name, int port, const ch
 
 /* true se o canal já está aberto com esta porta e esta senha. */
 bool pl_control_matches(const struct pl_control *control, int port, const char *key);
+
+/* Manda uma linha ao celular (sem o "\n"). Devolve false se não houver celular conectado.
+ * Pode ser chamada de qualquer thread. */
+bool pl_control_send(struct pl_control *control, const char *line);
+
+/* O que o painel do diretor mostra: celular conectado, nome e último "Entendi". */
+void pl_control_get_status(struct pl_control *control, struct pl_link_status *status);
 
 void pl_control_destroy(struct pl_control *control);
 

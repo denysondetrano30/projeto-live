@@ -9,6 +9,8 @@
 
 #include <obs-module.h>
 
+#include "director-dock.h"
+
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("projeto-live", "en-US")
 
@@ -22,5 +24,6 @@ MODULE_EXPORT const char *obs_module_description(void)
 bool obs_module_load(void)
 {
 	obs_register_source(&projeto_live_phone_source);
+	pl_director_dock_load();
 	return true;
 }

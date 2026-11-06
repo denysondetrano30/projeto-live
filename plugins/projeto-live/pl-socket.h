@@ -34,6 +34,7 @@ typedef int pl_socket_t;
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 
 /* Não derrubar o OBS (SIGPIPE) quando o outro lado fecha a conexão no meio do envio. */
 #ifdef MSG_NOSIGNAL
@@ -113,4 +114,55 @@ static inline void pl_no_delay(pl_socket_t sock)
 {
 	int one = 1;
 	setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
+}
+
+/* ------------------------------------------------------------------------- */
+/* Linhas de texto ("TALLY on", "ACK 3"...) chegando aos pedaços pela rede.  */
+
+#define PL_LINE_MAX 512
+
+struct pl_line_buffer {
+	char data[PL_LINE_MAX];
+	size_t used;
+};
+
+/* Chamado para cada linha completa (sem o "\n"). Devolver false fecha a conexão. */
+typedef bool (*pl_line_func)(void *param, const char *line);
+
+/* Lê o que chegou no socket e trata cada linha completa. Devolve false se a conexão fechou,
+ * se `handle` recusou uma linha ou se chegou uma linha comprida demais. */
+static inline bool pl_read_lines(pl_socket_t sock, struct pl_line_buffer *buffer, pl_line_func handle, void *param)
+{
+	size_t room = sizeof(buffer->data) - buffer->used;
+	int got = (int)recv(sock, buffer->data + buffer->used, (int)room, 0);
+	if (got <= 0) {
+		return false;
+	}
+	buffer->used += (size_t)got;
+
+	char *start = buffer->data;
+	char *end = buffer->data + buffer->used;
+	char *newline;
+	while ((newline = (char *)memchr(start, '\n', (size_t)(end - start))) != NULL) {
+		*newline = 0;
+		if (newline > start && newline[-1] == '\r') {
+			newline[-1] = 0;
+		}
+		if (!handle(param, start)) {
+			return false;
+		}
+		start = newline + 1;
+	}
+
+	size_t rest = (size_t)(end - start);
+	memmove(buffer->data, start, rest);
+	buffer->used = rest;
+	return buffer->used < sizeof(buffer->data);
+}
+
+/* Manda uma linha de texto (o "\n" é posto aqui). */
+static inline bool pl_send_line(pl_socket_t sock, const char *text)
+{
+	size_t len = strlen(text);
+	return pl_send_all(sock, text, len) && pl_send_all(sock, "\n", 1);
 }

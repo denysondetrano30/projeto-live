@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.28...3.30)
 
+find_package(Qt6 REQUIRED Widgets)
+
 add_library(projeto-live MODULE)
 add_library(OBS::projeto-live ALIAS projeto-live)
 
@@ -8,9 +10,13 @@ target_sources(
   PRIVATE
     control-server.c
     control-server.h
+    director-dock.cpp
+    director-dock.h
     net-info.c
     net-info.h
     phone-source.c
+    phone-source.h
+    pl-link.h
     pl-socket.h
     projeto-live.c
     qrcodegen.c
@@ -24,11 +30,15 @@ target_sources(
 target_link_libraries(
   projeto-live
   PRIVATE
+    OBS::frontend-api
     OBS::libobs
+    Qt::Widgets
     $<$<PLATFORM_ID:Windows>:OBS::w32-pthreads>
     $<$<PLATFORM_ID:Windows>:ws2_32>
     $<$<PLATFORM_ID:Windows>:iphlpapi>
 )
+
+target_compile_options(projeto-live PRIVATE $<$<PLATFORM_ID:Darwin>:-Wno-quoted-include-in-framework-header>)
 
 if(OS_WINDOWS)
   configure_file(cmake/windows/obs-module.rc.in projeto-live.rc)

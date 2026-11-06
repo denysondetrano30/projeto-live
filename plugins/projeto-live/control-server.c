@@ -16,16 +16,15 @@
 
 #include <obs-module.h>
 #include <util/bmem.h>
+#include <util/dstr.h>
 #include <util/platform.h>
 #include <util/threading.h>
 
 #include "control-server.h"
 #include "sha256.h"
 
-#define PL_LINE_MAX 512
 #define NONCE_CHARS 32
 #define KEY_MAX 64
-#define CAMERA_MAX 128
 #define WAIT_MS 100
 #define SECOND_NS 1000000000ULL
 #define HELLO_TIMEOUT_NS (5 * SECOND_NS)
@@ -35,14 +34,13 @@
 
 struct peer {
 	pl_socket_t sock;
-	char buffer[PL_LINE_MAX];
-	size_t used;
+	struct pl_line_buffer lines;
 	uint64_t last_recv_ns;
 	uint64_t last_send_ns;
 	char nonce[NONCE_CHARS + 1];
 	bool authed;
 	int sent_tally; /* -1 = ainda não mandou, 0 = fora do ar, 1 = no ar */
-	char camera[CAMERA_MAX];
+	char camera[PL_CAMERA_NAME_MAX];
 };
 
 struct pl_control {
@@ -54,6 +52,11 @@ struct pl_control {
 	bool thread_created;
 	volatile bool stop;
 	uint64_t nonce_counter;
+
+	/* Compartilhado com a thread da interface (painel do diretor). */
+	pthread_mutex_t mutex;
+	struct pl_link_status status;
+	struct dstr outbox; /* linhas esperando para ir ao celular, cada uma com "\n" */
 };
 
 /* ------------------------------------------------------------------------- */
@@ -75,12 +78,29 @@ static void peer_close(struct peer *peer)
 
 static bool send_line(struct peer *peer, const char *text, uint64_t now)
 {
-	char line[PL_LINE_MAX];
-	int len = snprintf(line, sizeof(line), "%s\n", text);
-	if (len <= 0 || (size_t)len >= sizeof(line))
-		return false;
 	peer->last_send_ns = now;
-	return pl_send_all(peer->sock, line, (size_t)len);
+	return pl_send_line(peer->sock, text);
+}
+
+/* Atualiza o que o painel do diretor enxerga sobre o celular conectado. */
+static void publish_client(struct pl_control *control, const struct peer *client)
+{
+	pthread_mutex_lock(&control->mutex);
+	bool connected = client && client->sock != PL_INVALID_SOCKET;
+	control->status.connected = connected;
+	snprintf(control->status.camera, sizeof(control->status.camera), "%s", connected ? client->camera : "");
+	/* Comando que ficou na fila sem celular não vale para o próximo que conectar. */
+	dstr_free(&control->outbox);
+	pthread_mutex_unlock(&control->mutex);
+}
+
+static void drop_client(struct pl_control *control, struct peer *client, const char *why)
+{
+	if (client->sock == PL_INVALID_SOCKET)
+		return;
+	blog(LOG_INFO, "[projeto-live] '%s': %s %s", control->name, client->camera, why);
+	peer_close(client);
+	publish_client(control, NULL);
 }
 
 /* Desafio novo a cada conexão, para uma resposta gravada não servir de novo. */
@@ -112,8 +132,17 @@ static bool same_text(const char *a, const char *b, size_t size)
 	return diff == 0;
 }
 
-static bool handle_line(struct pl_control *control, struct peer *peer, const char *line)
+struct line_context {
+	struct pl_control *control;
+	struct peer *peer;
+};
+
+static bool handle_line(void *param, const char *line)
 {
+	struct line_context *ctx = param;
+	struct pl_control *control = ctx->control;
+	struct peer *peer = ctx->peer;
+
 	if (!peer->authed) {
 		if (strncmp(line, "HELLO ", 6) != 0)
 			return false;
@@ -128,7 +157,7 @@ static bool handle_line(struct pl_control *control, struct peer *peer, const cha
 		pl_hex(mac, sizeof(mac), expected);
 
 		if (proof_len != PL_SHA256_SIZE * 2 || !same_text(expected, proof, proof_len)) {
-			pl_send_all(peer->sock, "ERR key\n", 8);
+			pl_send_line(peer->sock, "ERR key");
 			blog(LOG_WARNING,
 			     "[projeto-live] '%s': um celular tentou o canal de controle com a senha errada "
 			     "(QR code antigo?)",
@@ -141,37 +170,24 @@ static bool handle_line(struct pl_control *control, struct peer *peer, const cha
 		return true;
 	}
 
-	/* Por enquanto o celular só manda PING. Os comandos do diretor e o intercom entram aqui. */
+	/* O operador tocou em "Entendi" no aviso do diretor. */
+	if (strncmp(line, "ACK ", 4) == 0) {
+		uint32_t id = (uint32_t)strtoul(line + 4, NULL, 10);
+		pthread_mutex_lock(&control->mutex);
+		if (id > control->status.last_ack)
+			control->status.last_ack = id;
+		pthread_mutex_unlock(&control->mutex);
+	}
+
+	/* "PING" e linhas de versões futuras do app: nada a fazer. */
 	return true;
 }
 
-/* Lê o que chegou e trata cada linha. Devolve false se a conexão fechou ou mandou algo inválido. */
 static bool read_peer(struct pl_control *control, struct peer *peer, uint64_t now)
 {
-	size_t room = sizeof(peer->buffer) - peer->used;
-	int got = (int)recv(peer->sock, peer->buffer + peer->used, (int)room, 0);
-	if (got <= 0)
-		return false;
-	peer->used += (size_t)got;
+	struct line_context ctx = {control, peer};
 	peer->last_recv_ns = now;
-
-	char *start = peer->buffer;
-	char *end = peer->buffer + peer->used;
-	char *newline;
-	while ((newline = memchr(start, '\n', (size_t)(end - start))) != NULL) {
-		*newline = 0;
-		if (newline > start && newline[-1] == '\r')
-			newline[-1] = 0;
-		if (!handle_line(control, peer, start))
-			return false;
-		start = newline + 1;
-	}
-
-	size_t rest = (size_t)(end - start);
-	memmove(peer->buffer, start, rest);
-	peer->used = rest;
-	/* Linha comprida demais: não é o app. */
-	return peer->used < sizeof(peer->buffer);
+	return pl_read_lines(peer->sock, &peer->lines, handle_line, &ctx);
 }
 
 static void accept_peer(struct pl_control *control, pl_socket_t listener, struct peer *pending, uint64_t now)
@@ -216,6 +232,24 @@ static pl_socket_t open_listener(int port)
 		return PL_INVALID_SOCKET;
 	}
 	return sock;
+}
+
+/* Manda ao celular o que o painel deixou na fila. */
+static bool flush_outbox(struct pl_control *control, struct peer *client, uint64_t now)
+{
+	struct dstr pending = {0};
+	pthread_mutex_lock(&control->mutex);
+	pending = control->outbox;
+	memset(&control->outbox, 0, sizeof(control->outbox));
+	pthread_mutex_unlock(&control->mutex);
+
+	bool ok = true;
+	if (pending.len) {
+		client->last_send_ns = now;
+		ok = pl_send_all(client->sock, pending.array, pending.len);
+	}
+	dstr_free(&pending);
+	return ok;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -291,51 +325,48 @@ static void *control_thread(void *data)
 		}
 
 		if (ready > 0 && client.sock != PL_INVALID_SOCKET && FD_ISSET(client.sock, &readable)) {
-			if (!read_peer(control, &client, now)) {
-				blog(LOG_INFO, "[projeto-live] '%s': %s desconectou do canal de controle",
-				     control->name, client.camera);
-				peer_close(&client);
-			}
+			if (!read_peer(control, &client, now))
+				drop_client(control, &client, "desconectou do canal de controle");
 		}
 
 		/* Provou a senha: vira a câmera desta fonte (substitui a anterior, se houver). */
 		if (pending.sock != PL_INVALID_SOCKET && pending.authed) {
 			if (client.sock != PL_INVALID_SOCKET)
-				peer_close(&client);
+				drop_client(control, &client, "foi substituído por outro celular");
 			client = pending;
 			peer_reset(&pending);
 			client.last_recv_ns = now;
 			blog(LOG_INFO, "[projeto-live] '%s': %s conectou no canal de controle", control->name,
 			     client.camera);
-			if (!send_line(&client, "OK", now))
+			if (send_line(&client, "OK", now))
+				publish_client(control, &client);
+			else
 				peer_close(&client);
 		}
 
 		if (pending.sock != PL_INVALID_SOCKET && now - pending.last_recv_ns > HELLO_TIMEOUT_NS)
 			peer_close(&pending);
 
-		if (client.sock != PL_INVALID_SOCKET && now - client.last_recv_ns > SILENCE_TIMEOUT_NS) {
-			blog(LOG_INFO, "[projeto-live] '%s': %s parou de responder no canal de controle", control->name,
-			     client.camera);
-			peer_close(&client);
-		}
+		if (client.sock != PL_INVALID_SOCKET && now - client.last_recv_ns > SILENCE_TIMEOUT_NS)
+			drop_client(control, &client, "parou de responder no canal de controle");
 
 		if (client.sock != PL_INVALID_SOCKET) {
 			int tally = control->on_air && os_atomic_load_bool(control->on_air) ? 1 : 0;
-			bool ok = true;
-			if (tally != client.sent_tally) {
+			bool ok = flush_outbox(control, &client, now);
+			if (ok && tally != client.sent_tally) {
 				ok = send_line(&client, tally ? "TALLY on" : "TALLY off", now);
 				client.sent_tally = tally;
-			} else if (now - client.last_send_ns >= PING_INTERVAL_NS) {
+			} else if (ok && now - client.last_send_ns >= PING_INTERVAL_NS) {
 				ok = send_line(&client, "PING", now);
 			}
 			if (!ok)
-				peer_close(&client);
+				drop_client(control, &client, "desconectou do canal de controle");
 		}
 	}
 
 	peer_close(&pending);
 	peer_close(&client);
+	publish_client(control, NULL);
 	if (listener != PL_INVALID_SOCKET)
 		pl_close_socket(listener);
 	return NULL;
@@ -355,8 +386,10 @@ struct pl_control *pl_control_create(const char *source_name, int port, const ch
 	control->port = port;
 	snprintf(control->key, sizeof(control->key), "%s", key);
 	control->on_air = on_air;
+	pthread_mutex_init(&control->mutex, NULL);
 
 	if (pthread_create(&control->thread, NULL, control_thread, control) != 0) {
+		pthread_mutex_destroy(&control->mutex);
 		bfree(control->name);
 		bfree(control);
 		pl_socket_cleanup();
@@ -371,6 +404,31 @@ bool pl_control_matches(const struct pl_control *control, int port, const char *
 	return control && control->port == port && key && strcmp(control->key, key) == 0;
 }
 
+bool pl_control_send(struct pl_control *control, const char *line)
+{
+	if (!control || !line || !*line)
+		return false;
+
+	pthread_mutex_lock(&control->mutex);
+	bool connected = control->status.connected;
+	if (connected) {
+		dstr_cat(&control->outbox, line);
+		dstr_cat(&control->outbox, "\n");
+	}
+	pthread_mutex_unlock(&control->mutex);
+	return connected;
+}
+
+void pl_control_get_status(struct pl_control *control, struct pl_link_status *status)
+{
+	memset(status, 0, sizeof(*status));
+	if (!control)
+		return;
+	pthread_mutex_lock(&control->mutex);
+	*status = control->status;
+	pthread_mutex_unlock(&control->mutex);
+}
+
 void pl_control_destroy(struct pl_control *control)
 {
 	if (!control)
@@ -378,6 +436,8 @@ void pl_control_destroy(struct pl_control *control)
 	control->stop = true;
 	if (control->thread_created)
 		pthread_join(control->thread, NULL);
+	dstr_free(&control->outbox);
+	pthread_mutex_destroy(&control->mutex);
 	bfree(control->name);
 	bfree(control);
 	pl_socket_cleanup();
