@@ -1,0 +1,1 @@
+Versão do OBS Studio adaptada para transmissões em igrejas. Em desenvolvimento.
