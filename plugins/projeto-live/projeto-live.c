@@ -9,8 +9,6 @@
 
 #include <obs-module.h>
 
-#include "phone-discovery.h"
-
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("projeto-live", "en-US")
 
@@ -24,11 +22,5 @@ MODULE_EXPORT const char *obs_module_description(void)
 bool obs_module_load(void)
 {
 	obs_register_source(&projeto_live_phone_source);
-	pl_discovery_start();
 	return true;
-}
-
-void obs_module_unload(void)
-{
-	pl_discovery_stop();
 }

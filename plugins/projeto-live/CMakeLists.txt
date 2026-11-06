@@ -5,7 +5,7 @@ add_library(OBS::projeto-live ALIAS projeto-live)
 
 target_sources(
   projeto-live
-  PRIVATE mdns.h phone-discovery.c phone-discovery.h phone-source.c projeto-live.c
+  PRIVATE net-info.c net-info.h phone-source.c projeto-live.c qrcodegen.c qrcodegen.h
 )
 
 target_link_libraries(
@@ -24,5 +24,5 @@ endif()
 
 set_target_properties_obs(projeto-live PROPERTIES FOLDER plugins PREFIX "")
 
-# mdns.h is a third-party public domain header; its warnings must not stop the build.
+# qrcodegen.c is a third-party MIT library; its warnings must not stop the build.
 set_target_properties(projeto-live PROPERTIES COMPILE_WARNING_AS_ERROR OFF)
