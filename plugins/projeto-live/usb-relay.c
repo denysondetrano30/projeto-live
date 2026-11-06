@@ -7,35 +7,7 @@
  * (at your option) any later version.
  */
 
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
-typedef SOCKET pl_socket_t;
-#define PL_INVALID_SOCKET INVALID_SOCKET
-#define pl_close_socket closesocket
-#else
-#include <sys/types.h>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-typedef int pl_socket_t;
-#define PL_INVALID_SOCKET (-1)
-#define pl_close_socket close
-#endif
-
-/* Não derrubar o OBS (SIGPIPE) quando a Fonte de mídia fecha a conexão no meio do envio. */
-#ifdef MSG_NOSIGNAL
-#define PL_SEND_FLAGS MSG_NOSIGNAL
-#else
-#define PL_SEND_FLAGS 0
-#endif
+#include "pl-socket.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -63,6 +35,7 @@ struct pl_usb_relay {
 	pl_socket_t listen_sock;
 	int local_port;
 	char *name;
+	const volatile bool *on_air;
 	pthread_t thread;
 	bool thread_created;
 	volatile bool stop;
@@ -70,56 +43,7 @@ struct pl_usb_relay {
 };
 
 /* ------------------------------------------------------------------------- */
-/* Ajudantes de socket                                                       */
-
-static bool send_all(pl_socket_t sock, const char *data, size_t size)
-{
-	while (size) {
-		int chunk = size > 0x7FFFFFFF ? 0x7FFFFFFF : (int)size;
-		int sent = (int)send(sock, data, chunk, PL_SEND_FLAGS);
-		if (sent <= 0)
-			return false;
-		data += sent;
-		size -= (size_t)sent;
-	}
-	return true;
-}
-
-static bool recv_all(pl_socket_t sock, char *data, size_t size)
-{
-	while (size) {
-		int chunk = size > 0x7FFFFFFF ? 0x7FFFFFFF : (int)size;
-		int got = (int)recv(sock, data, chunk, 0);
-		if (got <= 0)
-			return false;
-		data += got;
-		size -= (size_t)got;
-	}
-	return true;
-}
-
-/* Espera até `ms` milissegundos para o socket ter dados. 1 = pronto, 0 = tempo esgotado, -1 = erro. */
-static int wait_readable(pl_socket_t sock, int ms)
-{
-	fd_set readable;
-	FD_ZERO(&readable);
-	FD_SET(sock, &readable);
-	struct timeval timeout;
-	timeout.tv_sec = ms / 1000;
-	timeout.tv_usec = (ms % 1000) * 1000;
-	int ret = select((int)sock + 1, &readable, NULL, NULL, &timeout);
-	return ret < 0 ? -1 : (ret > 0 ? 1 : 0);
-}
-
-static void no_sigpipe(pl_socket_t sock)
-{
-#ifdef SO_NOSIGPIPE
-	int one = 1;
-	setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
-#else
-	UNUSED_PARAMETER(sock);
-#endif
-}
+/* Ajudantes                                                                 */
 
 static void set_status(struct pl_usb_relay *relay, const char *status)
 {
@@ -152,7 +76,7 @@ static pl_socket_t connect_usbmuxd(void)
 	pl_socket_t sock = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (sock == PL_INVALID_SOCKET)
 		return PL_INVALID_SOCKET;
-	no_sigpipe(sock);
+	pl_no_sigpipe(sock);
 	struct sockaddr_un addr;
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
@@ -197,7 +121,7 @@ static bool send_plist(pl_socket_t sock, const char *body_keys)
 	put_le32(header + 8, 8);  /* mensagem: plist */
 	put_le32(header + 12, 1); /* etiqueta */
 
-	bool ok = send_all(sock, (const char *)header, sizeof(header)) && send_all(sock, plist.array, plist.len);
+	bool ok = pl_send_all(sock, (const char *)header, sizeof(header)) && pl_send_all(sock, plist.array, plist.len);
 	dstr_free(&plist);
 	return ok;
 }
@@ -205,11 +129,11 @@ static bool send_plist(pl_socket_t sock, const char *body_keys)
 /* Lê uma resposta. Devolve o XML (liberar com bfree) ou NULL. */
 static char *read_plist(pl_socket_t sock, int timeout_ms)
 {
-	if (wait_readable(sock, timeout_ms) != 1)
+	if (pl_wait_readable(sock, timeout_ms) != 1)
 		return NULL;
 
 	unsigned char header[MUX_HEADER_SIZE];
-	if (!recv_all(sock, (char *)header, sizeof(header)))
+	if (!pl_recv_all(sock, (char *)header, sizeof(header)))
 		return NULL;
 	uint32_t length = get_le32(header);
 	if (length < MUX_HEADER_SIZE || length > MUX_MAX_REPLY)
@@ -217,7 +141,7 @@ static char *read_plist(pl_socket_t sock, int timeout_ms)
 
 	size_t body = length - MUX_HEADER_SIZE;
 	char *xml = bmalloc(body + 1);
-	if (!recv_all(sock, xml, body)) {
+	if (!pl_recv_all(sock, xml, body)) {
 		bfree(xml);
 		return NULL;
 	}
@@ -272,7 +196,9 @@ static pl_socket_t connect_phone(struct pl_usb_relay *relay)
 	long long ids[MAX_DEVICES];
 	size_t count = list_devices(ids, MAX_DEVICES);
 	if (count == (size_t)-1) {
-		set_status(relay, "serviço da Apple (Apple Mobile Device) não encontrado; instale o iTunes");
+		set_status(
+			relay,
+			"serviço da Apple (Apple Mobile Device) não encontrado; instale o iTunes ou o app Dispositivos Apple");
 		return PL_INVALID_SOCKET;
 	}
 	if (count == 0) {
@@ -317,17 +243,32 @@ static pl_socket_t connect_phone(struct pl_usb_relay *relay)
 /* ------------------------------------------------------------------------- */
 /* Relé                                                                      */
 
+/* Avisa o app, pelo mesmo túnel do cabo, se esta câmera está no ar ("TALLY on" / "TALLY off"). */
+static bool send_tally(struct pl_usb_relay *relay, pl_socket_t phone, int *sent)
+{
+	int tally = relay->on_air && os_atomic_load_bool(relay->on_air) ? 1 : 0;
+	if (tally == *sent)
+		return true;
+	*sent = tally;
+	const char *line = tally ? "TALLY on\n" : "TALLY off\n";
+	return pl_send_all(phone, line, strlen(line));
+}
+
 /* Repassa o vídeo do iPhone para a Fonte de mídia até um dos lados fechar. */
 static void pump(struct pl_usb_relay *relay, pl_socket_t phone, pl_socket_t media)
 {
 	char *buffer = bmalloc(PUMP_BUFFER);
+	int sent_tally = -1;
 	while (!relay->stop) {
-		int ready = wait_readable(phone, 200);
+		if (!send_tally(relay, phone, &sent_tally))
+			break;
+
+		int ready = pl_wait_readable(phone, 100);
 		if (ready < 0)
 			break;
 		if (ready == 0) {
 			/* Confere se a Fonte de mídia desistiu (ela não manda nada; recv 0 = fechou). */
-			if (wait_readable(media, 0) == 1) {
+			if (pl_wait_readable(media, 0) == 1) {
 				char probe;
 				if (recv(media, &probe, 1, 0) <= 0)
 					break;
@@ -335,7 +276,7 @@ static void pump(struct pl_usb_relay *relay, pl_socket_t phone, pl_socket_t medi
 			continue;
 		}
 		int got = (int)recv(phone, buffer, PUMP_BUFFER, 0);
-		if (got <= 0 || !send_all(media, buffer, (size_t)got))
+		if (got <= 0 || !pl_send_all(media, buffer, (size_t)got))
 			break;
 	}
 	bfree(buffer);
@@ -347,16 +288,18 @@ static void *relay_thread(void *data)
 	os_set_thread_name("projeto-live: cabo USB");
 
 	while (!relay->stop) {
-		if (wait_readable(relay->listen_sock, 200) != 1)
+		if (pl_wait_readable(relay->listen_sock, 200) != 1)
 			continue;
 
 		pl_socket_t media = accept(relay->listen_sock, NULL, NULL);
 		if (media == PL_INVALID_SOCKET)
 			continue;
-		no_sigpipe(media);
+		pl_no_sigpipe(media);
 
 		pl_socket_t phone = connect_phone(relay);
 		if (phone != PL_INVALID_SOCKET) {
+			pl_no_sigpipe(phone);
+			pl_no_delay(phone);
 			pump(relay, phone, media);
 			pl_close_socket(phone);
 			set_status(relay, "conexão pelo cabo encerrada");
@@ -367,16 +310,15 @@ static void *relay_thread(void *data)
 	return NULL;
 }
 
-struct pl_usb_relay *pl_usb_relay_create(const char *source_name)
+struct pl_usb_relay *pl_usb_relay_create(const char *source_name, const volatile bool *on_air)
 {
-#ifdef _WIN32
-	WSADATA wsa;
-	WSAStartup(MAKEWORD(2, 2), &wsa);
-#endif
+	pl_socket_startup();
 
 	pl_socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (sock == PL_INVALID_SOCKET)
+	if (sock == PL_INVALID_SOCKET) {
+		pl_socket_cleanup();
 		return NULL;
+	}
 
 	struct sockaddr_in addr;
 	memset(&addr, 0, sizeof(addr));
@@ -387,6 +329,7 @@ struct pl_usb_relay *pl_usb_relay_create(const char *source_name)
 	if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) != 0 || listen(sock, 1) != 0 ||
 	    getsockname(sock, (struct sockaddr *)&addr, &len) != 0) {
 		pl_close_socket(sock);
+		pl_socket_cleanup();
 		return NULL;
 	}
 
@@ -394,6 +337,7 @@ struct pl_usb_relay *pl_usb_relay_create(const char *source_name)
 	relay->listen_sock = sock;
 	relay->local_port = ntohs(addr.sin_port);
 	relay->name = bstrdup(source_name);
+	relay->on_air = on_air;
 
 	if (pthread_create(&relay->thread, NULL, relay_thread, relay) == 0) {
 		relay->thread_created = true;
@@ -401,6 +345,7 @@ struct pl_usb_relay *pl_usb_relay_create(const char *source_name)
 		pl_close_socket(sock);
 		bfree(relay->name);
 		bfree(relay);
+		pl_socket_cleanup();
 		return NULL;
 	}
 	return relay;
@@ -421,8 +366,5 @@ void pl_usb_relay_destroy(struct pl_usb_relay *relay)
 	pl_close_socket(relay->listen_sock);
 	bfree(relay->name);
 	bfree(relay);
-
-#ifdef _WIN32
-	WSACleanup();
-#endif
+	pl_socket_cleanup();
 }

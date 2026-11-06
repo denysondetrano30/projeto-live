@@ -5,7 +5,20 @@ add_library(OBS::projeto-live ALIAS projeto-live)
 
 target_sources(
   projeto-live
-  PRIVATE net-info.c net-info.h phone-source.c projeto-live.c qrcodegen.c qrcodegen.h usb-relay.c usb-relay.h
+  PRIVATE
+    control-server.c
+    control-server.h
+    net-info.c
+    net-info.h
+    phone-source.c
+    pl-socket.h
+    projeto-live.c
+    qrcodegen.c
+    qrcodegen.h
+    sha256.c
+    sha256.h
+    usb-relay.c
+    usb-relay.h
 )
 
 target_link_libraries(

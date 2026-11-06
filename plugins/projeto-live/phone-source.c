@@ -11,6 +11,10 @@
  * Plano B: com um endereço digitado, a fonte é quem liga para o celular (o app sem pareamento
  * fica esperando na porta 9000).
  *
+ * "No ar" (tally): quando a fonte entra no Programa, o OBS chama activate; ao sair, deactivate.
+ * O canal de controle (Wi-Fi) e o relé do cabo USB leem esse estado e avisam o app, que pinta
+ * a borda da tela de vermelho.
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 2 of the License, or
@@ -28,6 +32,7 @@
 #include <util/platform.h>
 #include <util/threading.h>
 
+#include "control-server.h"
 #include "net-info.h"
 #include "qrcodegen.h"
 #include "usb-relay.h"
@@ -68,6 +73,8 @@ struct phone_source {
 	char key[KEY_LEN + 1];
 	bool usb_mode;
 	struct pl_usb_relay *usb;
+	struct pl_control *control;
+	volatile bool on_air;
 	char *manual_address;
 	uint64_t manual_changed_ns;
 	char current_url[URL_MAX];
@@ -396,13 +403,22 @@ static void phone_update(void *data, obs_data_t *settings)
 	ps->usb_mode = usb_mode;
 	struct pl_usb_relay *old_relay = NULL;
 	if (usb_mode && !ps->usb) {
-		ps->usb = pl_usb_relay_create(obs_source_get_name(ps->source));
+		ps->usb = pl_usb_relay_create(obs_source_get_name(ps->source), &ps->on_air);
 		if (!ps->usb)
 			blog(LOG_WARNING, "[projeto-live] Não consegui preparar o cabo USB");
 	} else if (!usb_mode && ps->usb) {
 		/* Fecha o relé só depois de a Fonte de mídia mudar de endereço (logo abaixo). */
 		old_relay = ps->usb;
 		ps->usb = NULL;
+	}
+
+	/* Canal de controle (aviso de "no ar" pelo Wi-Fi): reabre se a porta ou a senha mudarem. */
+	if (usb_mode) {
+		pl_control_destroy(ps->control);
+		ps->control = NULL;
+	} else if (!pl_control_matches(ps->control, ps->port, ps->key)) {
+		pl_control_destroy(ps->control);
+		ps->control = pl_control_create(obs_source_get_name(ps->source), ps->port, ps->key, &ps->on_air);
 	}
 
 	const char *new_manual = obs_data_get_string(settings, S_MANUAL);
@@ -457,6 +473,7 @@ static void phone_destroy(void *data)
 		obs_source_release(ps->media);
 	}
 	pl_usb_relay_destroy(ps->usb);
+	pl_control_destroy(ps->control);
 	if (ps->qr_texture) {
 		obs_enter_graphics();
 		gs_texture_destroy(ps->qr_texture);
@@ -537,6 +554,21 @@ static obs_properties_t *phone_properties(void *data)
 	obs_property_set_long_description(manual, obs_module_text("ManualAddress.ToolTip"));
 
 	return props;
+}
+
+/* A fonte entrou no Programa (o que está saindo na transmissão). */
+static void phone_activate(void *data)
+{
+	struct phone_source *ps = data;
+	os_atomic_set_bool(&ps->on_air, true);
+	blog(LOG_INFO, "[projeto-live] '%s' no ar", obs_source_get_name(ps->source));
+}
+
+static void phone_deactivate(void *data)
+{
+	struct phone_source *ps = data;
+	os_atomic_set_bool(&ps->on_air, false);
+	blog(LOG_INFO, "[projeto-live] '%s' saiu do ar", obs_source_get_name(ps->source));
 }
 
 static void phone_tick(void *data, float seconds)
@@ -651,6 +683,8 @@ struct obs_source_info projeto_live_phone_source = {
 	.update = phone_update,
 	.get_defaults = phone_defaults,
 	.get_properties = phone_properties,
+	.activate = phone_activate,
+	.deactivate = phone_deactivate,
 	.video_tick = phone_tick,
 	.video_render = phone_render,
 	.get_width = phone_width,
