@@ -56,6 +56,9 @@ struct dest {
 static DARRAY(struct dest *) dests;
 static pthread_mutex_t state_mutex;
 static bool loaded;
+/* A saída de transmissão do OBS só existe depois que ele termina de abrir e até começar a fechar;
+ * antes disso, obs_frontend_get_streaming_output() derruba o OBS. */
+static bool frontend_ready;
 
 /* ------------------------------------------------------------------------- */
 /* Plataformas                                                                */
@@ -253,7 +256,7 @@ static void dest_start(struct dest *d)
 		return;
 	}
 
-	obs_output_t *main_output = obs_frontend_get_streaming_output();
+	obs_output_t *main_output = frontend_ready ? obs_frontend_get_streaming_output() : NULL;
 	if (!main_output || !obs_output_active(main_output)) {
 		obs_output_release(main_output);
 		set_state(d, PL_DEST_WAITING, NULL);
@@ -350,6 +353,9 @@ static void frontend_event(enum obs_frontend_event event, void *param)
 {
 	UNUSED_PARAMETER(param);
 	switch (event) {
+	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+		frontend_ready = true;
+		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		start_all();
 		break;
@@ -358,6 +364,7 @@ static void frontend_event(enum obs_frontend_event event, void *param)
 		stop_all();
 		break;
 	case OBS_FRONTEND_EVENT_EXIT:
+		frontend_ready = false;
 		for (size_t i = 0; i < dests.num; i++) {
 			dest_release(dests.array[i]);
 		}
@@ -573,11 +580,14 @@ void pl_multistream_set_enabled(size_t index, bool enabled)
 
 bool pl_multistream_main_live(void)
 {
-	return obs_frontend_streaming_active();
+	return frontend_ready && obs_frontend_streaming_active();
 }
 
 int pl_multistream_main_kbps(void)
 {
+	if (!frontend_ready) {
+		return 0;
+	}
 	obs_output_t *main_output = obs_frontend_get_streaming_output();
 	int kbps = main_output ? encoder_kbps(obs_output_get_video_encoder(main_output)) : 0;
 	obs_output_release(main_output);
