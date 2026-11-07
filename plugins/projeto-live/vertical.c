@@ -16,6 +16,9 @@
  * case com outra (configuração privada "pl_vertical_pair", com o uuid da outra) ou diga que ela
  * não vai ao vertical ("pl_vertical_hide").
  *
+ * Grupos: um grupo da cena horizontal vai para a gêmea como as fontes dele, cada uma no lugar
+ * certo. Aparecer/sumir o grupo ou uma fonte dentro dele também vale no vertical.
+ *
  * Por enquanto o vertical corta seco (sem transição).
  *
  * This program is free software: you can redistribute it and/or modify
@@ -187,11 +190,23 @@ void pl_vertical_fit_item(obs_sceneitem_t *item, enum pl_vertical_fit fit)
 	pl_vertical_touch();
 }
 
+/* Matriz da caixa de um item na tela horizontal; dentro de um grupo, já somada à do grupo. */
+static void horizontal_transform(obs_sceneitem_t *item, obs_sceneitem_t *group, struct matrix4 *transform)
+{
+	obs_sceneitem_get_box_transform(item, transform);
+	if (group) {
+		struct matrix4 group_transform;
+		obs_sceneitem_get_draw_transform(group, &group_transform);
+		matrix4_mul(transform, transform, &group_transform);
+	}
+}
+
 /* Retângulo que o item ocupa na tela horizontal. */
-static void item_box(obs_sceneitem_t *item, float *min_x, float *min_y, float *max_x, float *max_y)
+static void item_box(obs_sceneitem_t *item, obs_sceneitem_t *group, float *min_x, float *min_y, float *max_x,
+		     float *max_y)
 {
 	struct matrix4 transform;
-	obs_sceneitem_get_box_transform(item, &transform);
+	horizontal_transform(item, group, &transform);
 	*min_x = *min_y = INFINITY;
 	*max_x = *max_y = -INFINITY;
 	for (int corner = 0; corner < 4; corner++) {
@@ -206,7 +221,7 @@ static void item_box(obs_sceneitem_t *item, float *min_x, float *min_y, float *m
 }
 
 /* Enquadramento automático na gêmea, a partir de onde o item está na cena horizontal. */
-static void auto_frame(obs_sceneitem_t *vertical_item, obs_sceneitem_t *horizontal_item)
+static void auto_frame(obs_sceneitem_t *vertical_item, obs_sceneitem_t *horizontal_item, obs_sceneitem_t *group)
 {
 	obs_source_t *source = obs_sceneitem_get_source(vertical_item);
 	if (!horizontal_item) {
@@ -223,7 +238,7 @@ static void auto_frame(obs_sceneitem_t *vertical_item, obs_sceneitem_t *horizont
 	float height = (float)ovi.base_height;
 
 	float min_x, min_y, max_x, max_y;
-	item_box(horizontal_item, &min_x, &min_y, &max_x, &max_y);
+	item_box(horizontal_item, group, &min_x, &min_y, &max_x, &max_y);
 
 	struct obs_sceneitem_crop crop;
 	obs_sceneitem_get_crop(horizontal_item, &crop);
@@ -268,7 +283,7 @@ obs_sceneitem_t *pl_vertical_add_source(obs_source_t *scene_source, obs_source_t
 	}
 	obs_sceneitem_t *item = obs_scene_add(scene, source);
 	if (item) {
-		auto_frame(item, NULL);
+		auto_frame(item, NULL, NULL);
 	}
 	return item;
 }
@@ -356,11 +371,30 @@ static void free_twin_items(struct twin_items *found)
 	da_free(found->items);
 }
 
-/* Põe na gêmea a par vertical de um item horizontal (se ainda não estiver lá). */
-static void add_twin_item(obs_source_t *twin, obs_sceneitem_t *horizontal_item)
+static void add_twin_item(obs_source_t *twin, obs_sceneitem_t *horizontal_item, obs_sceneitem_t *group);
+
+struct group_fill {
+	obs_source_t *twin;
+	obs_sceneitem_t *group;
+};
+
+static bool group_fill_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+{
+	UNUSED_PARAMETER(scene);
+	struct group_fill *fill = param;
+	add_twin_item(fill->twin, item, fill->group);
+	return true;
+}
+
+/*
+ * Põe na gêmea a par vertical de um item horizontal (se ainda não estiver lá). `group`: o grupo
+ * em que o item está, ou NULL. Um grupo entra como as fontes dele.
+ */
+static void add_twin_item(obs_source_t *twin, obs_sceneitem_t *horizontal_item, obs_sceneitem_t *group)
 {
 	if (obs_sceneitem_is_group(horizontal_item)) {
-		blog(LOG_INFO, "[projeto-live] vertical: grupos ainda não vão para a gêmea sozinhos");
+		struct group_fill fill = {twin, horizontal_item};
+		obs_sceneitem_group_enum_items(horizontal_item, group_fill_cb, &fill);
 		return;
 	}
 	obs_source_t *pair = vertical_pair(obs_sceneitem_get_source(horizontal_item));
@@ -373,8 +407,10 @@ static void add_twin_item(obs_source_t *twin, obs_sceneitem_t *horizontal_item)
 		obs_sceneitem_t *item = obs_scene_add(obs_scene_from_source(twin), pair);
 		if (item) {
 			bool paired = pair != obs_sceneitem_get_source(horizontal_item);
-			auto_frame(item, paired ? NULL : horizontal_item);
-			obs_sceneitem_set_visible(item, obs_sceneitem_visible(horizontal_item));
+			auto_frame(item, paired ? NULL : horizontal_item, group);
+			bool visible = obs_sceneitem_visible(horizontal_item) &&
+				       (!group || obs_sceneitem_visible(group));
+			obs_sceneitem_set_visible(item, visible);
 		}
 	}
 	free_twin_items(&found);
@@ -384,7 +420,7 @@ static void add_twin_item(obs_source_t *twin, obs_sceneitem_t *horizontal_item)
 static bool fill_twin_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
 {
 	UNUSED_PARAMETER(scene);
-	add_twin_item(param, item);
+	add_twin_item(param, item, NULL);
 	return true;
 }
 
@@ -413,6 +449,85 @@ static void create_twin(obs_source_t *horizontal)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Procurar fontes também dentro dos grupos                                   */
+
+struct has_source {
+	obs_source_t *source;
+	bool found;
+};
+
+static bool has_source_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+{
+	UNUSED_PARAMETER(scene);
+	struct has_source *search = param;
+	if (obs_sceneitem_get_source(item) == search->source) {
+		search->found = true;
+	} else if (obs_sceneitem_is_group(item)) {
+		obs_sceneitem_group_enum_items(item, has_source_cb, search);
+	}
+	return !search->found;
+}
+
+/* A fonte está na cena horizontal (solta ou dentro de um grupo)? */
+static bool scene_contains(obs_scene_t *scene, obs_source_t *source)
+{
+	struct has_source search = {source, false};
+	if (scene && source) {
+		obs_scene_enum_items(scene, has_source_cb, &search);
+	}
+	return search.found;
+}
+
+struct item_ref {
+	obs_sceneitem_t *item;
+	obs_sceneitem_t *group;
+};
+
+struct item_refs {
+	DARRAY(struct item_ref) refs;
+	obs_sceneitem_t *group;
+};
+
+static bool collect_refs_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+{
+	UNUSED_PARAMETER(scene);
+	struct item_refs *list = param;
+	if (obs_sceneitem_is_group(item)) {
+		obs_sceneitem_t *outer = list->group;
+		list->group = item;
+		obs_sceneitem_group_enum_items(item, collect_refs_cb, list);
+		list->group = outer;
+		return true;
+	}
+	struct item_ref ref = {item, list->group};
+	obs_sceneitem_addref(item);
+	if (ref.group) {
+		obs_sceneitem_addref(ref.group);
+	}
+	da_push_back(list->refs, &ref);
+	return true;
+}
+
+/* Todos os itens da cena horizontal, com o grupo de cada um (referências novas). */
+static void collect_refs(obs_scene_t *scene, struct item_refs *list)
+{
+	da_init(list->refs);
+	list->group = NULL;
+	if (scene) {
+		obs_scene_enum_items(scene, collect_refs_cb, list);
+	}
+}
+
+static void free_refs(struct item_refs *list)
+{
+	for (size_t i = 0; i < list->refs.num; i++) {
+		obs_sceneitem_release(list->refs.array[i].item);
+		obs_sceneitem_release(list->refs.array[i].group);
+	}
+	da_free(list->refs);
+}
+
+/* ------------------------------------------------------------------------- */
 /* Casar fontes                                                               */
 
 enum pl_vertical_pair_mode pl_vertical_get_pair(obs_source_t *source, obs_source_t **other)
@@ -434,15 +549,6 @@ enum pl_vertical_pair_mode pl_vertical_get_pair(obs_source_t *source, obs_source
 	return PL_PAIR_SAME;
 }
 
-static bool repair_items_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
-{
-	UNUSED_PARAMETER(scene);
-	DARRAY(obs_sceneitem_t *) *items = param;
-	obs_sceneitem_addref(item);
-	da_push_back(*items, &item);
-	return true;
-}
-
 /* Troca, nas gêmeas, a par antiga da fonte pela nova. */
 static void repair_twins(obs_source_t *source, obs_source_t *old_pair)
 {
@@ -457,12 +563,11 @@ static void repair_twins(obs_source_t *source, obs_source_t *old_pair)
 			continue;
 		}
 
-		DARRAY(obs_sceneitem_t *) items;
-		da_init(items);
-		obs_scene_enum_items(scene, repair_items_cb, &items);
+		struct item_refs list;
+		collect_refs(scene, &list);
 		bool uses_source = false;
-		for (size_t j = 0; j < items.num; j++) {
-			uses_source = uses_source || obs_sceneitem_get_source(items.array[j]) == source;
+		for (size_t j = 0; j < list.refs.num; j++) {
+			uses_source = uses_source || obs_sceneitem_get_source(list.refs.array[j].item) == source;
 		}
 
 		if (uses_source) {
@@ -474,17 +579,13 @@ static void repair_twins(obs_source_t *source, obs_source_t *old_pair)
 				}
 				free_twin_items(&found);
 			}
-			for (size_t j = 0; j < items.num; j++) {
-				if (obs_sceneitem_get_source(items.array[j]) == source) {
-					add_twin_item(twin, items.array[j]);
+			for (size_t j = 0; j < list.refs.num; j++) {
+				if (obs_sceneitem_get_source(list.refs.array[j].item) == source) {
+					add_twin_item(twin, list.refs.array[j].item, list.refs.array[j].group);
 				}
 			}
 		}
-
-		for (size_t j = 0; j < items.num; j++) {
-			obs_sceneitem_release(items.array[j]);
-		}
-		da_free(items);
+		free_refs(&list);
 		obs_source_release(twin);
 	}
 	obs_frontend_source_list_free(&scenes);
@@ -517,23 +618,62 @@ void pl_vertical_set_pair(obs_source_t *source, enum pl_vertical_pair_mode mode,
 
 enum item_event { ITEM_ADDED, ITEM_REMOVED, ITEM_VISIBLE };
 
+struct child_state {
+	obs_weak_source_t *source;
+	bool visible;
+};
+
 struct item_task {
 	enum item_event event;
 	obs_weak_source_t *scene;
 	obs_weak_source_t *source;
 	int64_t item_id;
 	bool visible;
+	/* Quando o item é um grupo: as fontes dele, guardadas na hora do aviso (o grupo pode sumir). */
+	DARRAY(struct child_state) children;
 };
 
-static bool scene_has_source_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+static void rewatch_all(void);
+
+/* Grupo: a cena horizontal em que ele está (nova referência) e o item dele. */
+static obs_source_t *group_parent(obs_source_t *group, obs_sceneitem_t **group_item)
 {
-	UNUSED_PARAMETER(scene);
-	obs_source_t **source = param;
-	if (obs_sceneitem_get_source(item) == *source) {
-		*source = NULL;
-		return false;
+	*group_item = NULL;
+	obs_source_t *parent = NULL;
+	struct obs_frontend_source_list scenes = {0};
+	obs_frontend_get_scenes(&scenes);
+	for (size_t i = 0; !parent && i < scenes.sources.num; i++) {
+		obs_scene_t *scene = obs_scene_from_source(scenes.sources.array[i]);
+		obs_sceneitem_t *item = scene ? obs_scene_get_group(scene, obs_source_get_name(group)) : NULL;
+		if (item && obs_sceneitem_get_source(item) == group) {
+			*group_item = item;
+			parent = obs_source_get_ref(scenes.sources.array[i]);
+		}
 	}
-	return true;
+	obs_frontend_source_list_free(&scenes);
+	return parent;
+}
+
+/* Aparecer/sumir ou tirar da gêmea as pares de uma fonte. */
+static void apply_to_pairs(obs_source_t *twin, obs_scene_t *top_scene, obs_source_t *source, enum item_event event,
+			   bool visible)
+{
+	if (event == ITEM_REMOVED && scene_contains(top_scene, source)) {
+		/* A fonte continua na cena horizontal em outro lugar (ex.: saiu de um grupo). */
+		return;
+	}
+	obs_source_t *pair = vertical_pair(source);
+	struct twin_items found;
+	collect_twin_items(twin, pair, &found);
+	for (size_t i = 0; i < found.items.num; i++) {
+		if (event == ITEM_VISIBLE) {
+			obs_sceneitem_set_visible(found.items.array[i], visible);
+		} else {
+			obs_sceneitem_remove(found.items.array[i]);
+		}
+	}
+	free_twin_items(&found);
+	obs_source_release(pair);
 }
 
 static void item_task_run(void *param)
@@ -541,45 +681,73 @@ static void item_task_run(void *param)
 	struct item_task *task = param;
 	obs_source_t *horizontal = obs_weak_source_get_source(task->scene);
 	obs_source_t *source = obs_weak_source_get_source(task->source);
-	obs_source_t *twin = (ready && horizontal) ? find_twin(horizontal) : NULL;
+	bool rewatch = false;
 
-	if (twin && source) {
-		obs_scene_t *scene = obs_scene_from_source(horizontal);
-		if (task->event == ITEM_ADDED) {
-			obs_sceneitem_t *item = obs_scene_find_sceneitem_by_id(scene, task->item_id);
-			if (item) {
-				add_twin_item(twin, item);
-			}
-		} else {
-			obs_source_t *pair = vertical_pair(source);
-			struct twin_items found;
-			collect_twin_items(twin, pair, &found);
+	/* O aviso pode vir de dentro de um grupo: o que vale é a cena horizontal em volta dele. */
+	obs_sceneitem_t *group = NULL;
+	obs_source_t *top = NULL;
+	if (horizontal && obs_source_is_group(horizontal)) {
+		top = group_parent(horizontal, &group);
+	} else if (horizontal) {
+		top = obs_source_get_ref(horizontal);
+	}
+	obs_source_t *twin = (ready && top) ? find_twin(top) : NULL;
+	obs_scene_t *top_scene = top ? obs_scene_from_source(top) : NULL;
+	obs_scene_t *scene = NULL;
+	if (horizontal) {
+		scene = obs_source_is_group(horizontal) ? obs_group_from_source(horizontal)
+							: obs_scene_from_source(horizontal);
+	}
 
-			bool still_there = false;
-			if (task->event == ITEM_REMOVED) {
-				obs_source_t *probe = source;
-				obs_scene_enum_items(scene, scene_has_source_cb, &probe);
-				still_there = probe == NULL;
-			}
-			for (size_t i = 0; i < found.items.num; i++) {
-				if (task->event == ITEM_VISIBLE) {
-					obs_sceneitem_set_visible(found.items.array[i], task->visible);
-				} else if (!still_there) {
-					obs_sceneitem_remove(found.items.array[i]);
-				}
-			}
-			free_twin_items(&found);
-			obs_source_release(pair);
+	if (twin && task->event == ITEM_ADDED && source) {
+		obs_sceneitem_t *item = obs_scene_find_sceneitem_by_id(scene, task->item_id);
+		if (item) {
+			add_twin_item(twin, item, group);
+			rewatch = obs_sceneitem_is_group(item);
 		}
+	} else if (twin && task->children.num) {
+		/* Um grupo inteiro apareceu, sumiu ou saiu. */
+		for (size_t i = 0; i < task->children.num; i++) {
+			obs_source_t *child = obs_weak_source_get_source(task->children.array[i].source);
+			if (child) {
+				bool visible = task->visible && task->children.array[i].visible;
+				apply_to_pairs(twin, top_scene, child, task->event, visible);
+			}
+			obs_source_release(child);
+		}
+		rewatch = task->event == ITEM_REMOVED;
+	} else if (twin && source) {
+		bool visible = task->visible && (!group || obs_sceneitem_visible(group));
+		apply_to_pairs(twin, top_scene, source, task->event, visible);
+	}
+	if (twin) {
 		pl_vertical_touch();
+	}
+	if (rewatch) {
+		rewatch_all();
 	}
 
 	obs_source_release(twin);
+	obs_source_release(top);
 	obs_source_release(source);
 	obs_source_release(horizontal);
 	obs_weak_source_release(task->scene);
 	obs_weak_source_release(task->source);
+	for (size_t i = 0; i < task->children.num; i++) {
+		obs_weak_source_release(task->children.array[i].source);
+	}
+	da_free(task->children);
 	bfree(task);
+}
+
+static bool task_children_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+{
+	UNUSED_PARAMETER(scene);
+	struct item_task *task = param;
+	struct child_state child = {obs_source_get_weak_source(obs_sceneitem_get_source(item)),
+				    obs_sceneitem_visible(item)};
+	da_push_back(task->children, &child);
+	return true;
 }
 
 static void queue_item_task(enum item_event event, calldata_t *data, bool visible)
@@ -595,6 +763,10 @@ static void queue_item_task(enum item_event event, calldata_t *data, bool visibl
 	task->source = obs_source_get_weak_source(obs_sceneitem_get_source(item));
 	task->item_id = obs_sceneitem_get_id(item);
 	task->visible = visible;
+	da_init(task->children);
+	if (event != ITEM_ADDED && obs_sceneitem_is_group(item)) {
+		obs_sceneitem_group_enum_items(item, task_children_cb, task);
+	}
 	obs_queue_task(OBS_TASK_UI, item_task_run, task, false);
 }
 
@@ -638,6 +810,35 @@ static void watch(obs_source_t *horizontal)
 	da_push_back(watched, &ref);
 }
 
+static bool watch_groups_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+{
+	UNUSED_PARAMETER(scene);
+	UNUSED_PARAMETER(param);
+	if (obs_sceneitem_is_group(item)) {
+		watch(obs_sceneitem_get_source(item));
+	}
+	return true;
+}
+
+/* Liga os avisos de todas as cenas horizontais e dos grupos dentro delas. */
+static void rewatch_all(void)
+{
+	unwatch_all();
+	if (!ready) {
+		return;
+	}
+	struct obs_frontend_source_list scenes = {0};
+	obs_frontend_get_scenes(&scenes);
+	for (size_t i = 0; i < scenes.sources.num; i++) {
+		watch(scenes.sources.array[i]);
+		obs_scene_t *scene = obs_scene_from_source(scenes.sources.array[i]);
+		if (scene) {
+			obs_scene_enum_items(scene, watch_groups_cb, NULL);
+		}
+	}
+	obs_frontend_source_list_free(&scenes);
+}
+
 /* ------------------------------------------------------------------------- */
 /* Manter as gêmeas iguais à lista de cenas                                   */
 
@@ -672,7 +873,6 @@ static void sync_twins(void)
 	struct obs_frontend_source_list scenes = {0};
 	obs_frontend_get_scenes(&scenes);
 
-	unwatch_all();
 	for (size_t i = 0; i < scenes.sources.num; i++) {
 		obs_source_t *horizontal = scenes.sources.array[i];
 		obs_source_t *twin = find_twin(horizontal);
@@ -689,8 +889,8 @@ static void sync_twins(void)
 			}
 			obs_source_release(twin);
 		}
-		watch(horizontal);
 	}
+	rewatch_all();
 
 	/* Cena horizontal apagada: a gêmea vai junto. */
 	struct orphans data;
