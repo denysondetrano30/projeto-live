@@ -52,6 +52,9 @@ static void load_prefs(void)
 	obs_data_set_default_bool(prefs, "embed", true);
 	obs_data_set_default_string(prefs, "record_folder", "");
 	obs_data_set_default_int(prefs, "record_kbps", RECORD_KBPS);
+	obs_data_set_default_bool(prefs, "transition_own", false);
+	obs_data_set_default_string(prefs, "transition_id", "fade_transition");
+	obs_data_set_default_int(prefs, "transition_ms", 300);
 }
 
 bool pl_vertical_pref(const char *key)
@@ -101,6 +104,19 @@ void pl_vertical_set_pref_int(const char *key, int value)
 {
 	if (prefs) {
 		obs_data_set_int(prefs, key, value);
+		save_prefs();
+	}
+}
+
+obs_data_t *pl_vertical_pref_obj(const char *key)
+{
+	return prefs ? obs_data_get_obj(prefs, key) : NULL;
+}
+
+void pl_vertical_set_pref_obj(const char *key, obs_data_t *value)
+{
+	if (prefs) {
+		obs_data_set_obj(prefs, key, value);
 		save_prefs();
 	}
 }

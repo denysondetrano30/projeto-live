@@ -41,11 +41,21 @@ void pl_vertical_enum_scenes(pl_vertical_scene_cb callback, void *param);
 
 /* Cena que está no ar na tela vertical (nova referência ou NULL). */
 obs_source_t *pl_vertical_current(void);
+/* O mesmo, para uma tela já em mãos (serve na thread de vídeo). */
+obs_source_t *pl_vertical_active_scene(obs_canvas_t *canvas);
 /* true: o vertical segue o Programa sozinho; false: alguém escolheu uma cena à mão. */
 bool pl_vertical_following(void);
 /* Põe uma cena vertical no ar à mão; fica até o Programa trocar de cena ou "Seguir o Programa". */
 void pl_vertical_select(obs_source_t *scene);
 void pl_vertical_follow_program(void);
+
+/*
+ * Transição do vertical: por padrão a mesma do Programa; com a preferência "transition_own", uma
+ * escolhida só para o vertical. Chamar depois de mudar as preferências da transição.
+ */
+void pl_vertical_transition_changed(void);
+/* A transição que o vertical está usando (nova referência ou NULL), para abrir as propriedades. */
+obs_source_t *pl_vertical_get_transition(void);
 
 /* Cena só vertical (nova referência). */
 obs_source_t *pl_vertical_add_extra(const char *name);

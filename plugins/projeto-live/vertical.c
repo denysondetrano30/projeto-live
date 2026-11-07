@@ -19,7 +19,9 @@
  * Grupos: um grupo da cena horizontal vai para a gêmea como as fontes dele, cada uma no lugar
  * certo. Aparecer/sumir o grupo ou uma fonte dentro dele também vale no vertical.
  *
- * Por enquanto o vertical corta seco (sem transição).
+ * Transição: por padrão o vertical usa a mesma transição do Programa (o mesmo tipo, as mesmas
+ * configurações e a mesma duração), numa cópia privada que fica no canal da tela vertical. Dá para
+ * escolher uma só para o vertical no painel "Cenas verticais" (preferências em vertical.json).
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -28,6 +30,7 @@
  */
 
 #include "vertical.h"
+#include "vertical-record.h"
 
 #include <graphics/matrix4.h>
 #include <graphics/vec3.h>
@@ -51,6 +54,11 @@ static obs_canvas_t *canvas; /* com canvas_mutex para escrever; leitura livre na
 static bool loaded;
 static bool ready;
 static bool following = true;
+/* Cópia privada da transição do Programa, no canal 0 da tela vertical (thread da interface). */
+static obs_source_t *transition;
+/* A transição atual é uma escolhida só para o vertical (e não a cópia da do Programa)? */
+static bool transition_is_own;
+static bool ready_to_animate;
 static volatile long version;
 
 /* Cenas horizontais cujos avisos (item entrou, saiu, apareceu) estão ligados. */
@@ -912,12 +920,104 @@ static void sync_twins(void)
 /* ------------------------------------------------------------------------- */
 /* Que cena está no ar                                                        */
 
-static void set_on_air(obs_source_t *scene)
+obs_source_t *pl_vertical_active_scene(obs_canvas_t *target)
 {
-	if (canvas) {
-		obs_canvas_set_channel(canvas, 0, scene);
-		pl_vertical_touch();
+	obs_source_t *channel = target ? obs_canvas_get_channel(target, 0) : NULL;
+	if (channel && obs_source_get_type(channel) == OBS_SOURCE_TYPE_TRANSITION) {
+		obs_source_t *active = obs_transition_get_active_source(channel);
+		obs_source_release(channel);
+		return active;
 	}
+	return channel;
+}
+
+/* Guarda as configurações da transição própria do vertical (para voltarem ao abrir o OBS). */
+static void save_own_transition(void)
+{
+	if (!transition || !transition_is_own) {
+		return;
+	}
+	obs_data_t *settings = obs_source_get_settings(transition);
+	pl_vertical_set_pref_obj("transition_settings", settings);
+	pl_vertical_set_pref_string("transition_settings_id", obs_source_get_id(transition));
+	obs_data_release(settings);
+}
+
+/* A transição do vertical: a do Programa ou a própria (cria ou troca se precisar). */
+static obs_source_t *matching_transition(void)
+{
+	bool own = pl_vertical_pref("transition_own");
+	obs_source_t *program = own ? NULL : obs_frontend_get_current_transition();
+	const char *own_id = pl_vertical_pref_string("transition_id");
+	const char *id = own ? (own_id && *own_id ? own_id : "fade_transition")
+			     : (program ? obs_source_get_id(program) : "cut_transition");
+	obs_data_t *settings = NULL;
+	if (!own && program) {
+		settings = obs_source_get_settings(program);
+	} else if (own && strcmp(pl_vertical_pref_string("transition_settings_id"), id) == 0) {
+		settings = pl_vertical_pref_obj("transition_settings");
+	}
+
+	if (transition && transition_is_own == own && strcmp(obs_source_get_id(transition), id) == 0) {
+		/* A cópia acompanha as mudanças na transição do Programa; a própria fica como está. */
+		if (!own) {
+			obs_source_update(transition, settings);
+		}
+	} else {
+		save_own_transition();
+		obs_source_t *fresh = obs_source_create_private(id, "Projeto Live: transição vertical", settings);
+		if (fresh) {
+			obs_transition_set_size(fresh, PL_VERTICAL_WIDTH, PL_VERTICAL_HEIGHT);
+			obs_transition_set_alignment(fresh, OBS_ALIGN_CENTER);
+			obs_transition_set_scale_type(fresh, OBS_TRANSITION_SCALE_ASPECT);
+			/* Começa mostrando o que já estava no ar, para não piscar. */
+			obs_source_t *showing = pl_vertical_active_scene(canvas);
+			obs_transition_set(fresh, showing);
+			obs_source_release(showing);
+			obs_canvas_set_channel(canvas, 0, fresh);
+			obs_source_release(transition);
+			transition = fresh;
+			transition_is_own = own;
+		}
+	}
+	obs_data_release(settings);
+	obs_source_release(program);
+	return transition;
+}
+
+static void set_on_air(obs_source_t *scene, bool animate)
+{
+	if (!canvas) {
+		return;
+	}
+	obs_source_t *current = pl_vertical_active_scene(canvas);
+	bool already = current == scene;
+	obs_source_release(current);
+
+	obs_source_t *with = matching_transition();
+	if (!with) {
+		obs_canvas_set_channel(canvas, 0, scene);
+	} else if (!already) {
+		int duration = transition_is_own ? pl_vertical_pref_int("transition_ms")
+						 : obs_frontend_get_transition_duration();
+		if (!animate || !obs_transition_start(with, OBS_TRANSITION_MODE_AUTO,
+						      duration > 0 ? (uint32_t)duration : 300, scene)) {
+			obs_transition_set(with, scene);
+		}
+	}
+	pl_vertical_touch();
+}
+
+void pl_vertical_transition_changed(void)
+{
+	if (ready && canvas) {
+		matching_transition();
+	}
+}
+
+obs_source_t *pl_vertical_get_transition(void)
+{
+	return transition ? obs_source_get_ref(transition) : NULL;
 }
 
 void pl_vertical_follow_program(void)
@@ -936,7 +1036,7 @@ void pl_vertical_follow_program(void)
 		twin = find_twin(program);
 	}
 	if (twin) {
-		set_on_air(twin);
+		set_on_air(twin, ready_to_animate);
 	}
 	obs_source_release(twin);
 	obs_source_release(program);
@@ -948,7 +1048,7 @@ void pl_vertical_select(obs_source_t *scene)
 		return;
 	}
 	following = false;
-	set_on_air(scene);
+	set_on_air(scene, true);
 }
 
 bool pl_vertical_following(void)
@@ -958,7 +1058,7 @@ bool pl_vertical_following(void)
 
 obs_source_t *pl_vertical_current(void)
 {
-	return canvas ? obs_canvas_get_channel(canvas, 0) : NULL;
+	return canvas ? pl_vertical_active_scene(canvas) : NULL;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1055,7 +1155,14 @@ void pl_vertical_remove_extra(obs_source_t *scene)
 static void release_canvas(void)
 {
 	ready = false;
+	ready_to_animate = false;
 	unwatch_all();
+	save_own_transition();
+	if (canvas && transition) {
+		obs_canvas_set_channel(canvas, 0, NULL);
+	}
+	obs_source_release(transition);
+	transition = NULL;
 	pthread_mutex_lock(&canvas_mutex);
 	obs_canvas_t *old = canvas;
 	canvas = NULL;
@@ -1107,6 +1214,8 @@ static void setup_canvas(void)
 
 	sync_twins();
 	pl_vertical_follow_program();
+	/* Ao abrir, a primeira cena entra direto; daqui para a frente, com transição. */
+	ready_to_animate = true;
 }
 
 static void frontend_event(enum obs_frontend_event event, void *param)

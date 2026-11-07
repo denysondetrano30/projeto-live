@@ -51,6 +51,7 @@
 #include <QPlatformSurfaceEvent>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QSpinBox>
 #include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -290,7 +291,7 @@ void handlePoints(const Box &box, float x[8], float y[8])
 /* Moldura vermelha e quadradinhos da fonte escolhida. */
 void drawSelection(obs_canvas_t *canvas, float pixelsPerUnit)
 {
-	obs_source_t *current = obs_canvas_get_channel(canvas, 0);
+	obs_source_t *current = pl_vertical_active_scene(canvas);
 	obs_sceneitem_t *item = current ? selectedItemIn(current) : nullptr;
 	obs_source_release(current);
 	if (!item) {
@@ -810,6 +811,65 @@ public:
 		row2->addWidget(add);
 		row2->addWidget(remove);
 		layout->addLayout(row2);
+
+		/* Transição do vertical: acompanha a do Programa (padrão) ou uma só dele. */
+		auto *row3 = new QHBoxLayout();
+		transitionType = new QComboBox(this);
+		transitionType->addItem(moduleText("Vertical.Transition.Follow"), QString());
+		const char *id;
+		for (size_t i = 0; obs_enum_transition_types(i, &id); i++) {
+			if (obs_get_source_output_flags(id) & (OBS_SOURCE_DEPRECATED | OBS_SOURCE_CAP_DISABLED)) {
+				continue;
+			}
+			const char *label = obs_source_get_display_name(id);
+			transitionType->addItem(QString::fromUtf8(label ? label : id), QString::fromUtf8(id));
+		}
+		transitionMs = new QSpinBox(this);
+		transitionMs->setRange(50, 20000);
+		transitionMs->setSingleStep(50);
+		transitionMs->setSuffix(" ms");
+		transitionMs->setValue(pl_vertical_pref_int("transition_ms"));
+		transitionProps = new QPushButton(QString::fromUtf8("⚙"), this);
+		transitionProps->setToolTip(moduleText("Vertical.Transition.Properties"));
+		row3->addWidget(new QLabel(moduleText("Vertical.Transition"), this));
+		row3->addWidget(transitionType, 1);
+		row3->addWidget(transitionMs);
+		row3->addWidget(transitionProps);
+		layout->addLayout(row3);
+
+		int chosen = 0;
+		if (pl_vertical_pref("transition_own")) {
+			chosen = transitionType->findData(QString::fromUtf8(pl_vertical_pref_string("transition_id")));
+		}
+		transitionType->setCurrentIndex(chosen < 0 ? 0 : chosen);
+		updateTransitionControls();
+
+		connect(transitionType, &QComboBox::currentIndexChanged, this, [this](int) {
+			QByteArray chosenId = transitionType->currentData().toString().toUtf8();
+			bool own = !chosenId.isEmpty();
+			pl_vertical_set_pref("transition_own", own);
+			if (own) {
+				pl_vertical_set_pref_string("transition_id", chosenId.constData());
+			}
+			pl_vertical_transition_changed();
+			updateTransitionControls();
+		});
+		connect(transitionMs, &QSpinBox::valueChanged, this,
+			[](int ms) { pl_vertical_set_pref_int("transition_ms", ms); });
+		connect(transitionProps, &QPushButton::clicked, this, []() {
+			obs_source_t *current = pl_vertical_get_transition();
+			if (current) {
+				obs_frontend_open_source_properties(current);
+			}
+			obs_source_release(current);
+		});
+	}
+
+	void updateTransitionControls()
+	{
+		bool own = transitionType->currentIndex() > 0;
+		transitionMs->setEnabled(own);
+		transitionProps->setEnabled(own);
 	}
 
 	void rebuild()
@@ -939,6 +999,9 @@ private:
 
 	QListWidget *list = nullptr;
 	QPushButton *remove = nullptr;
+	QComboBox *transitionType = nullptr;
+	QSpinBox *transitionMs = nullptr;
+	QPushButton *transitionProps = nullptr;
 	std::vector<SceneEntry> entries;
 	bool rebuilding = false;
 };
