@@ -20,6 +20,7 @@
 #include <util/platform.h>
 #include <util/threading.h>
 
+#include "intercom-stream.h"
 #include "usb-relay.h"
 
 #define USBMUXD_WINDOWS_PORT 27015
@@ -40,6 +41,7 @@ struct pl_usb_relay {
 	int local_port;
 	char *name;
 	const volatile bool *on_air;
+	struct pl_voice_peer *voice;
 	pthread_t thread;
 	bool thread_created;
 	volatile bool stop;
@@ -381,7 +383,10 @@ static void pump(struct pl_usb_relay *relay, pl_socket_t phone, pl_socket_t medi
 	struct tunnel control = {PL_INVALID_SOCKET, -1};
 	struct pl_line_buffer lines = {{0}, 0};
 	uint64_t next_control_ns = 0;
+	uint64_t next_voice_ns = 0;
 	uint64_t last_ping_ns = 0;
+	uint32_t sent_voice = 0;
+	bool voice_pending = true;
 
 	while (!relay->stop) {
 		uint64_t now = os_gettime_ns();
@@ -392,6 +397,16 @@ static void pump(struct pl_usb_relay *relay, pl_socket_t phone, pl_socket_t medi
 			control.sock = connect_device(device_id, PL_USB_CONTROL_PORT, &result);
 			lines.used = 0;
 			next_control_ns = now + CONTROL_RETRY_NS;
+			voice_pending = true;
+		}
+
+		/* Intercom: um terceiro túnel, só de voz (o app 0.8 em diante escuta na porta 9012). */
+		if (relay->voice && now >= next_voice_ns && !pl_voice_peer_has_stream(relay->voice)) {
+			long long result;
+			pl_socket_t voice = connect_device(device_id, PL_USB_VOICE_PORT, &result);
+			if (voice != PL_INVALID_SOCKET)
+				pl_voice_peer_attach_stream(relay->voice, voice);
+			next_voice_ns = now + CONTROL_RETRY_NS;
 		}
 
 		/* O "no ar" vai pelos dois túneis: o de vídeo serve para o app 0.6. */
@@ -404,6 +419,17 @@ static void pump(struct pl_usb_relay *relay, pl_socket_t phone, pl_socket_t medi
 			last_ping_ns = now;
 			if (!pl_send_line(control.sock, "PING"))
 				close_control(relay, &control);
+		}
+		if (control.sock != PL_INVALID_SOCKET && relay->voice) {
+			char text[PL_VOICE_TEXT_MAX], line[PL_VOICE_TEXT_MAX + 8];
+			uint32_t serial = pl_voice_peer_voice_text(relay->voice, text, sizeof(text));
+			if (voice_pending || serial != sent_voice) {
+				snprintf(line, sizeof(line), "VOICE %s", text[0] ? text : "-");
+				if (!pl_send_line(control.sock, line))
+					close_control(relay, &control);
+				sent_voice = serial;
+				voice_pending = false;
+			}
 		}
 
 		fd_set readable;
@@ -438,6 +464,7 @@ static void pump(struct pl_usb_relay *relay, pl_socket_t phone, pl_socket_t medi
 	}
 
 	close_control(relay, &control);
+	pl_voice_peer_detach_stream(relay->voice);
 	bfree(buffer);
 }
 
@@ -469,7 +496,8 @@ static void *relay_thread(void *data)
 	return NULL;
 }
 
-struct pl_usb_relay *pl_usb_relay_create(const char *source_name, const volatile bool *on_air)
+struct pl_usb_relay *pl_usb_relay_create(const char *source_name, const volatile bool *on_air,
+					 struct pl_voice_peer *voice)
 {
 	pl_socket_startup();
 
@@ -497,6 +525,7 @@ struct pl_usb_relay *pl_usb_relay_create(const char *source_name, const volatile
 	relay->local_port = ntohs(addr.sin_port);
 	relay->name = bstrdup(source_name);
 	relay->on_air = on_air;
+	relay->voice = voice;
 	pthread_mutex_init(&relay->mutex, NULL);
 
 	if (pthread_create(&relay->thread, NULL, relay_thread, relay) == 0) {

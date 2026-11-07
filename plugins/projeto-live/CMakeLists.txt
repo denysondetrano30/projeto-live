@@ -12,6 +12,11 @@ target_sources(
     control-server.h
     director-dock.cpp
     director-dock.h
+    intercom-audio.c
+    intercom-audio.h
+    intercom-stream.h
+    intercom.c
+    intercom.h
     net-info.c
     net-info.h
     phone-source.c
@@ -36,6 +41,11 @@ target_link_libraries(
     $<$<PLATFORM_ID:Windows>:OBS::w32-pthreads>
     $<$<PLATFORM_ID:Windows>:ws2_32>
     $<$<PLATFORM_ID:Windows>:iphlpapi>
+    $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD>:${CMAKE_DL_LIBS}>
+    $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD>:m>
+    "$<$<PLATFORM_ID:Darwin>:$<LINK_LIBRARY:FRAMEWORK,CoreFoundation.framework>>"
+    "$<$<PLATFORM_ID:Darwin>:$<LINK_LIBRARY:FRAMEWORK,CoreAudio.framework>>"
+    "$<$<PLATFORM_ID:Darwin>:$<LINK_LIBRARY:FRAMEWORK,AudioToolbox.framework>>"
 )
 
 target_compile_options(projeto-live PRIVATE $<$<PLATFORM_ID:Darwin>:-Wno-quoted-include-in-framework-header>)
@@ -47,5 +57,6 @@ endif()
 
 set_target_properties_obs(projeto-live PROPERTIES FOLDER plugins PREFIX "")
 
-# qrcodegen.c is a third-party MIT library; its warnings must not stop the build.
+# qrcodegen.c (MIT) and deps/miniaudio (public domain or MIT-0) are third-party code; their warnings
+# must not stop the build.
 set_target_properties(projeto-live PROPERTIES COMPILE_WARNING_AS_ERROR OFF)

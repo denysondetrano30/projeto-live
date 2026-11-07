@@ -34,6 +34,8 @@ struct pl_phone_status {
 	uint32_t last_sent;  /* número do último aviso enviado (0 = nenhum) */
 	uint32_t last_acked; /* número do último aviso que o operador confirmou */
 	char last_text[PL_COMMAND_MAX + 1];
+	bool intercom; /* o celular está no intercom */
+	bool talking;  /* o operador está falando no intercom agora */
 };
 
 bool pl_phone_is_source(obs_source_t *source);
@@ -42,6 +44,9 @@ bool pl_phone_get_status(obs_source_t *source, struct pl_phone_status *status);
 
 /* Manda um aviso ao celular desta fonte. Devolve o número do aviso, ou 0 se não deu. */
 uint32_t pl_phone_send_command(obs_source_t *source, const char *text);
+
+/* Intercom: o diretor fala só com esta câmera enquanto `on` (segurando o botão). Qualquer thread. */
+void pl_phone_set_private_talk(obs_source_t *source, bool on);
 
 /* Avisos prontos ("Abre", "Fecha", "Foca no pregador", "Você está no ar"), já traduzidos. */
 size_t pl_phone_command_count(void);

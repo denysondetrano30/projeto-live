@@ -26,6 +26,8 @@ typedef SOCKET pl_socket_t;
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <unistd.h>
 typedef int pl_socket_t;
 #define PL_INVALID_SOCKET (-1)
@@ -114,6 +116,28 @@ static inline void pl_no_delay(pl_socket_t sock)
 {
 	int one = 1;
 	setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
+}
+
+/* Socket que nunca espera: recv e send devolvem na hora (usado pelo intercom). */
+static inline void pl_set_nonblocking(pl_socket_t sock)
+{
+#ifdef _WIN32
+	u_long one = 1;
+	ioctlsocket(sock, FIONBIO, &one);
+#else
+	int flags = fcntl(sock, F_GETFL, 0);
+	fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+#endif
+}
+
+/* A última operação num socket sem espera só não tinha nada para fazer agora. */
+static inline bool pl_would_block(void)
+{
+#ifdef _WIN32
+	return WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+	return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+#endif
 }
 
 /* ------------------------------------------------------------------------- */

@@ -32,12 +32,16 @@ extern "C" {
 
 #define PL_USB_PHONE_PORT 9010
 #define PL_USB_CONTROL_PORT 9011
+#define PL_USB_VOICE_PORT 9012
 
 struct pl_usb_relay;
+struct pl_voice_peer;
 
-/* Cria o relé e começa a esperar a Fonte de mídia. `on_air` é lido pela thread do relé (precisa
- * durar mais que ele). Devolve NULL se não conseguir. */
-struct pl_usb_relay *pl_usb_relay_create(const char *source_name, const volatile bool *on_air);
+/* Cria o relé e começa a esperar a Fonte de mídia. `on_air` e `voice` (o participante desta
+ * fonte no intercom) são usados pela thread do relé e precisam durar mais que ele. Devolve NULL
+ * se não conseguir. */
+struct pl_usb_relay *pl_usb_relay_create(const char *source_name, const volatile bool *on_air,
+					 struct pl_voice_peer *voice);
 
 /* Porta local (em 127.0.0.1) onde a Fonte de mídia deve conectar. */
 int pl_usb_relay_local_port(const struct pl_usb_relay *relay);

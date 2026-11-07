@@ -21,6 +21,7 @@
 #include <util/threading.h>
 
 #include "control-server.h"
+#include "intercom.h"
 #include "sha256.h"
 
 #define NONCE_CHARS 32
@@ -39,7 +40,9 @@ struct peer {
 	uint64_t last_send_ns;
 	char nonce[NONCE_CHARS + 1];
 	bool authed;
-	int sent_tally; /* -1 = ainda não mandou, 0 = fora do ar, 1 = no ar */
+	int sent_tally;      /* -1 = ainda não mandou, 0 = fora do ar, 1 = no ar */
+	uint32_t sent_voice; /* número do último "VOICE" mandado (veja intercom.h) */
+	bool voice_pending;  /* ainda não mandou nenhum "VOICE" */
 	char camera[PL_CAMERA_NAME_MAX];
 };
 
@@ -48,6 +51,7 @@ struct pl_control {
 	int port;
 	char key[KEY_MAX];
 	const volatile bool *on_air;
+	struct pl_voice_peer *voice;
 	pthread_t thread;
 	bool thread_created;
 	volatile bool stop;
@@ -338,7 +342,13 @@ static void *control_thread(void *data)
 			client.last_recv_ns = now;
 			blog(LOG_INFO, "[projeto-live] '%s': %s conectou no canal de controle", control->name,
 			     client.camera);
-			if (send_line(&client, "OK", now))
+			char audio[64];
+			bool ok = send_line(&client, "OK", now);
+			/* Intercom pelo Wi-Fi: a porta UDP e a ficha deste celular. */
+			if (ok && pl_voice_peer_audio_line(control->voice, audio, sizeof(audio)))
+				ok = send_line(&client, audio, now);
+			client.voice_pending = true;
+			if (ok)
 				publish_client(control, &client);
 			else
 				peer_close(&client);
@@ -359,6 +369,16 @@ static void *control_thread(void *data)
 			} else if (ok && now - client.last_send_ns >= PING_INTERVAL_NS) {
 				ok = send_line(&client, "PING", now);
 			}
+			if (ok && control->voice) {
+				char text[PL_VOICE_TEXT_MAX], line[PL_VOICE_TEXT_MAX + 8];
+				uint32_t serial = pl_voice_peer_voice_text(control->voice, text, sizeof(text));
+				if (client.voice_pending || serial != client.sent_voice) {
+					snprintf(line, sizeof(line), "VOICE %s", text[0] ? text : "-");
+					ok = send_line(&client, line, now);
+					client.sent_voice = serial;
+					client.voice_pending = false;
+				}
+			}
 			if (!ok)
 				drop_client(control, &client, "desconectou do canal de controle");
 		}
@@ -374,7 +394,8 @@ static void *control_thread(void *data)
 
 /* ------------------------------------------------------------------------- */
 
-struct pl_control *pl_control_create(const char *source_name, int port, const char *key, const volatile bool *on_air)
+struct pl_control *pl_control_create(const char *source_name, int port, const char *key, const volatile bool *on_air,
+				     struct pl_voice_peer *voice)
 {
 	if (port <= 0 || port > 65535 || !key || !*key || strlen(key) >= KEY_MAX)
 		return NULL;
@@ -386,6 +407,7 @@ struct pl_control *pl_control_create(const char *source_name, int port, const ch
 	control->port = port;
 	snprintf(control->key, sizeof(control->key), "%s", key);
 	control->on_air = on_air;
+	control->voice = voice;
 	pthread_mutex_init(&control->mutex, NULL);
 
 	if (pthread_create(&control->thread, NULL, control_thread, control) != 0) {

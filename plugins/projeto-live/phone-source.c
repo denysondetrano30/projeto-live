@@ -37,6 +37,7 @@
 #include <util/threading.h>
 
 #include "control-server.h"
+#include "intercom.h"
 #include "net-info.h"
 #include "phone-source.h"
 #include "qrcodegen.h"
@@ -80,6 +81,8 @@ struct phone_source {
 	bool usb_mode;
 	struct pl_usb_relay *usb;
 	struct pl_control *control;
+	struct pl_voice_peer *voice; /* esta câmera no intercom */
+	obs_hotkey_id private_talk_hotkey;
 	volatile bool on_air;
 
 	/* Avisos do diretor (só na thread da interface). */
@@ -352,6 +355,9 @@ static void apply_url(struct phone_source *ps, const char *url)
 /* Roda na thread da interface, a cada segundo (pedido pelo video_tick). */
 static void refresh(struct phone_source *ps)
 {
+	/* O intercom mostra a câmera pelo nome da fonte (que a pessoa pode trocar). */
+	pl_voice_peer_set_name(ps->voice, obs_source_get_name(ps->source));
+
 	if (os_gettime_ns() - ps->addresses_checked_ns >= ADDRESS_CHECK_NS)
 		rebuild_qr(ps);
 
@@ -452,7 +458,18 @@ bool pl_phone_get_status(obs_source_t *source, struct pl_phone_status *status)
 	status->last_sent = ps->last_sent;
 	status->last_acked = link.last_ack;
 	snprintf(status->last_text, sizeof(status->last_text), "%s", ps->last_text);
+	status->intercom = pl_voice_peer_is_connected(ps->voice);
+	status->talking = pl_voice_peer_is_talking(ps->voice);
 	return true;
+}
+
+void pl_phone_set_private_talk(obs_source_t *source, bool on)
+{
+	if (!pl_phone_is_source(source))
+		return;
+	struct phone_source *ps = obs_obj_get_data(source);
+	if (ps)
+		pl_voice_peer_set_private(ps->voice, on);
 }
 
 uint32_t pl_phone_send_command(obs_source_t *source, const char *text)
@@ -520,8 +537,21 @@ static void hotkey_pressed(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, b
 	}
 }
 
+/* Atalho "falar só com esta câmera": vale enquanto a tecla estiver apertada. */
+static void private_talk_pressed(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	struct phone_source *ps = data;
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hotkey);
+	pl_voice_peer_set_private(ps->voice, pressed);
+}
+
 static void register_hotkeys(struct phone_source *ps)
 {
+	ps->private_talk_hotkey = obs_hotkey_register_source(ps->source, "projeto_live.intercom.private",
+							     obs_module_text("Hotkey.TalkPrivate"),
+							     private_talk_pressed, ps);
+
 	for (size_t i = 0; i < COMMAND_COUNT; i++) {
 		char name[64];
 		char description[256];
@@ -565,7 +595,7 @@ static void phone_update(void *data, obs_data_t *settings)
 	ps->usb_mode = usb_mode;
 	struct pl_usb_relay *old_relay = NULL;
 	if (usb_mode && !ps->usb) {
-		ps->usb = pl_usb_relay_create(obs_source_get_name(ps->source), &ps->on_air);
+		ps->usb = pl_usb_relay_create(obs_source_get_name(ps->source), &ps->on_air, ps->voice);
 		if (!ps->usb)
 			blog(LOG_WARNING, "[projeto-live] Não consegui preparar o cabo USB");
 	} else if (!usb_mode && ps->usb) {
@@ -580,7 +610,8 @@ static void phone_update(void *data, obs_data_t *settings)
 		ps->control = NULL;
 	} else if (!pl_control_matches(ps->control, ps->port, ps->key)) {
 		pl_control_destroy(ps->control);
-		ps->control = pl_control_create(obs_source_get_name(ps->source), ps->port, ps->key, &ps->on_air);
+		ps->control =
+			pl_control_create(obs_source_get_name(ps->source), ps->port, ps->key, &ps->on_air, ps->voice);
 	}
 
 	const char *new_manual = obs_data_get_string(settings, S_MANUAL);
@@ -624,6 +655,8 @@ static void *phone_create(obs_data_t *settings, obs_source_t *source)
 
 	for (size_t i = 0; i < COMMAND_COUNT; i++)
 		ps->hotkeys[i] = OBS_INVALID_HOTKEY_ID;
+	ps->private_talk_hotkey = OBS_INVALID_HOTKEY_ID;
+	ps->voice = pl_voice_peer_create(obs_source_get_name(source));
 	phone_update(ps, settings);
 	register_hotkeys(ps);
 	return ps;
@@ -637,6 +670,8 @@ static void phone_destroy(void *data)
 	for (size_t i = 0; i < COMMAND_COUNT; i++)
 		if (ps->hotkeys[i] != OBS_INVALID_HOTKEY_ID)
 			obs_hotkey_unregister(ps->hotkeys[i]);
+	if (ps->private_talk_hotkey != OBS_INVALID_HOTKEY_ID)
+		obs_hotkey_unregister(ps->private_talk_hotkey);
 
 	if (ps->media) {
 		obs_source_remove_active_child(ps->source, ps->media);
@@ -644,6 +679,7 @@ static void phone_destroy(void *data)
 	}
 	pl_usb_relay_destroy(ps->usb);
 	pl_control_destroy(ps->control);
+	pl_voice_peer_destroy(ps->voice); /* depois do relé e do canal, que usam o participante */
 	if (ps->qr_texture) {
 		obs_enter_graphics();
 		gs_texture_destroy(ps->qr_texture);

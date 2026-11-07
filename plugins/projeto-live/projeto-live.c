@@ -10,6 +10,7 @@
 #include <obs-module.h>
 
 #include "director-dock.h"
+#include "intercom.h"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("projeto-live", "en-US")
@@ -23,7 +24,13 @@ MODULE_EXPORT const char *obs_module_description(void)
 
 bool obs_module_load(void)
 {
+	pl_intercom_start();
 	obs_register_source(&projeto_live_phone_source);
 	pl_director_dock_load();
 	return true;
+}
+
+void obs_module_unload(void)
+{
+	pl_intercom_stop();
 }
