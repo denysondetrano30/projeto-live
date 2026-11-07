@@ -4,10 +4,13 @@
  * - Programa vertical: fica ao lado do preview do OBS (liga e desliga em Painéis > "Programa
  *   vertical"), com o nome da cena no ar, "Seguir o Programa" quando foi escolhida à mão e
  *   "Soltar", que leva para uma janela solta (fechar a janela traz de volta).
- * - "Cenas verticais": as gêmeas (⇄, na ordem das cenas do OBS) e as cenas só verticais. Um clique
- *   escolhe a cena para mexer nas fontes; dois cliques (ou "Pôr no ar") põem a cena no vertical.
+ * - "Cenas verticais" (como no Aitum Vertical): as cenas da tela vertical, criadas pela pessoa. Um
+ *   clique põe a cena no ar no vertical e mostra as fontes dela; ⇄ mostra a cena do OBS ligada
+ *   (quando o Programa troca para ela, o vertical troca junto). Botão direito: ligar, desligar,
+ *   renomear, remover. Embaixo, a transição do vertical.
  * - "Fontes verticais": as fontes da cena escolhida, com a caixa de aparecer/sumir, a ordem, os
- *   enquadramentos rápidos (preencher, inteira, largura toda) e "Casar fontes".
+ *   enquadramentos rápidos (preencher, inteira, largura toda), propriedades e filtros. "+ Fonte"
+ *   cria uma fonte nova ou usa uma que já existe.
  * - Nas duas janelas de vídeo do vertical dá para mexer com o mouse, como no preview do OBS: um
  *   clique escolhe a fonte (moldura vermelha em volta da imagem), arrastar move (gruda nas bordas e
  *   no meio), os cantos redimensionam sem deformar e os meios dos lados cortam. Mexe na cena
@@ -35,6 +38,7 @@
 #include <QCheckBox>
 #include <QColor>
 #include <QComboBox>
+#include <QCursor>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFormLayout>
@@ -49,6 +53,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPlatformSurfaceEvent>
+#include <QPoint>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QSpinBox>
@@ -770,7 +775,6 @@ void placeEmbedded();
 
 struct SceneEntry {
 	obs_weak_source_t *weak = nullptr;
-	bool twin = false;
 };
 
 class ScenesDock : public QWidget {
@@ -781,13 +785,17 @@ public:
 		layout->setContentsMargins(4, 4, 4, 4);
 
 		list = new QListWidget(this);
+		list->setContextMenuPolicy(Qt::CustomContextMenu);
 		layout->addWidget(list, 1);
+		/* Como no OBS: clicar numa cena põe ela no ar (no vertical) e mostra as fontes dela. */
 		connect(list, &QListWidget::currentRowChanged, this, [this](int row) {
 			if (!rebuilding) {
 				chooseRow(row);
 			}
 		});
-		connect(list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) { putOnAir(); });
+		connect(list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) { rename(); });
+		connect(list, &QListWidget::customContextMenuRequested, this,
+			[this](const QPoint &point) { showMenu(list->mapToGlobal(point)); });
 
 		auto *help = new QLabel(moduleText("Vertical.Scenes.Help"), this);
 		help->setWordWrap(true);
@@ -795,25 +803,20 @@ public:
 		layout->addWidget(help);
 
 		auto *row1 = new QHBoxLayout();
-		auto *onAir = new QPushButton(moduleText("Vertical.OnAir"), this);
-		auto *follow = new QPushButton(moduleText("Vertical.Follow"), this);
-		connect(onAir, &QPushButton::clicked, this, [this]() { putOnAir(); });
-		connect(follow, &QPushButton::clicked, this, []() { pl_vertical_follow_program(); });
-		row1->addWidget(onAir);
-		row1->addWidget(follow);
+		auto *add = new QPushButton(moduleText("Vertical.AddScene"), this);
+		auto *link = new QPushButton(moduleText("Vertical.Link"), this);
+		auto *remove = new QPushButton(moduleText("Vertical.RemoveScene"), this);
+		connect(add, &QPushButton::clicked, this, [this]() { addScene(); });
+		connect(link, &QPushButton::clicked, this,
+			[this, link]() { showMenu(link->mapToGlobal(QPoint(0, link->height()))); });
+		connect(remove, &QPushButton::clicked, this, [this]() { removeScene(); });
+		row1->addWidget(add);
+		row1->addWidget(link);
+		row1->addWidget(remove);
 		layout->addLayout(row1);
 
-		auto *row2 = new QHBoxLayout();
-		auto *add = new QPushButton(moduleText("Vertical.AddExtra"), this);
-		remove = new QPushButton(moduleText("Vertical.RemoveExtra"), this);
-		connect(add, &QPushButton::clicked, this, [this]() { addExtra(); });
-		connect(remove, &QPushButton::clicked, this, [this]() { removeExtra(); });
-		row2->addWidget(add);
-		row2->addWidget(remove);
-		layout->addLayout(row2);
-
 		/* Transição do vertical: acompanha a do Programa (padrão) ou uma só dele. */
-		auto *row3 = new QHBoxLayout();
+		auto *row2 = new QHBoxLayout();
 		transitionType = new QComboBox(this);
 		transitionType->addItem(moduleText("Vertical.Transition.Follow"), QString());
 		const char *id;
@@ -831,11 +834,11 @@ public:
 		transitionMs->setValue(pl_vertical_pref_int("transition_ms"));
 		transitionProps = new QPushButton(QString::fromUtf8("⚙"), this);
 		transitionProps->setToolTip(moduleText("Vertical.Transition.Properties"));
-		row3->addWidget(new QLabel(moduleText("Vertical.Transition"), this));
-		row3->addWidget(transitionType, 1);
-		row3->addWidget(transitionMs);
-		row3->addWidget(transitionProps);
-		layout->addLayout(row3);
+		row2->addWidget(new QLabel(moduleText("Vertical.Transition"), this));
+		row2->addWidget(transitionType, 1);
+		row2->addWidget(transitionMs);
+		row2->addWidget(transitionProps);
+		layout->addLayout(row2);
 
 		int chosen = 0;
 		if (pl_vertical_pref("transition_own")) {
@@ -865,69 +868,56 @@ public:
 		});
 	}
 
-	void updateTransitionControls()
-	{
-		bool own = transitionType->currentIndex() > 0;
-		transitionMs->setEnabled(own);
-		transitionProps->setEnabled(own);
-	}
+	~ScenesDock() override { clearEntries(); }
 
 	void rebuild()
 	{
 		rebuilding = true;
-		obs_source_t *chosen = editingScene();
 		obs_source_t *current = pl_vertical_current();
-
 		clearEntries();
 		list->clear();
 		struct Collect {
 			ScenesDock *self;
-			obs_source_t *chosen;
 			obs_source_t *current;
-			int chosenRow;
-		} collect = {this, chosen, current, -1};
+			int currentRow;
+		} collect = {this, current, -1};
 
 		pl_vertical_enum_scenes(
-			[](void *param, obs_source_t *scene, const char *twinOf) -> bool {
+			[](void *param, obs_source_t *scene, const char *linkedTo) -> bool {
 				auto *c = static_cast<Collect *>(param);
-				QString text = twinOf ? QString::fromUtf8("⇄ ") + QString::fromUtf8(twinOf)
-						      : QString::fromUtf8(obs_source_get_name(scene));
+				QString text = QString::fromUtf8(obs_source_get_name(scene));
+				if (linkedTo) {
+					text += QString::fromUtf8("   ⇄ ") + QString::fromUtf8(linkedTo);
+				}
 				auto *item = new QListWidgetItem(text);
 				if (scene == c->current) {
 					QFont font = item->font();
 					font.setBold(true);
 					item->setFont(font);
-					item->setText(text + "  ●");
+					item->setText(text + QString::fromUtf8("  ●"));
 					item->setForeground(QColor(229, 72, 77));
+					c->currentRow = (int)c->self->entries.size();
 				}
 				c->self->list->addItem(item);
 				SceneEntry entry;
 				entry.weak = obs_source_get_weak_source(scene);
-				entry.twin = twinOf != nullptr;
 				c->self->entries.push_back(entry);
-				if (scene == c->chosen) {
-					c->chosenRow = (int)c->self->entries.size() - 1;
-				}
 				return true;
 			},
 			&collect);
 
-		obs_source_release(current);
-		obs_source_release(chosen);
-
-		if (collect.chosenRow < 0 && !entries.empty()) {
-			collect.chosenRow = 0;
-			obs_source_t *first = obs_weak_source_get_source(entries[0].weak);
+		list->setCurrentRow(collect.currentRow);
+		obs_source_t *chosen = collect.currentRow >= 0 ? sceneAt(collect.currentRow) : nullptr;
+		obs_source_t *editingNow = editingScene();
+		if (chosen && chosen != editingNow) {
 			obs_weak_source_release(editing);
-			editing = first ? obs_source_get_weak_source(first) : nullptr;
-			obs_source_release(first);
+			editing = obs_source_get_weak_source(chosen);
 		}
-		list->setCurrentRow(collect.chosenRow);
-		updateButtons();
+		obs_source_release(editingNow);
+		obs_source_release(chosen);
+		obs_source_release(current);
 		rebuilding = false;
 	}
-
-	~ScenesDock() override { clearEntries(); }
 
 private:
 	void clearEntries()
@@ -936,6 +926,13 @@ private:
 			obs_weak_source_release(entry.weak);
 		}
 		entries.clear();
+	}
+
+	void updateTransitionControls()
+	{
+		bool own = transitionType->currentIndex() > 0;
+		transitionMs->setEnabled(own);
+		transitionProps->setEnabled(own);
 	}
 
 	obs_source_t *sceneAt(int row)
@@ -949,65 +946,121 @@ private:
 	void chooseRow(int row)
 	{
 		obs_source_t *scene = sceneAt(row);
-		setEditingScene(scene);
+		if (scene) {
+			setEditingScene(scene);
+			pl_vertical_select(scene);
+		}
 		obs_source_release(scene);
-		updateButtons();
 	}
 
-	void updateButtons()
-	{
-		int row = list->currentRow();
-		remove->setEnabled(row >= 0 && row < (int)entries.size() && !entries[row].twin);
-	}
-
-	void putOnAir()
+	/* Menu do botão direito (e do botão "Ligar"): ligar, desligar, renomear, remover. */
+	void showMenu(const QPoint &where)
 	{
 		obs_source_t *scene = sceneAt(list->currentRow());
-		pl_vertical_select(scene);
+		if (!scene) {
+			return;
+		}
+		obs_source_t *linked = pl_vertical_linked(scene);
+
+		QMenu menu(this);
+		QMenu *linkMenu = menu.addMenu(moduleText("Vertical.Link.To"));
+		struct obs_frontend_source_list horizontals = {};
+		obs_frontend_get_scenes(&horizontals);
+		for (size_t i = 0; i < horizontals.sources.num; i++) {
+			obs_source_t *horizontal = horizontals.sources.array[i];
+			QAction *action = linkMenu->addAction(QString::fromUtf8(obs_source_get_name(horizontal)));
+			action->setCheckable(true);
+			action->setChecked(horizontal == linked);
+			QString uuid = QString::fromUtf8(obs_source_get_uuid(horizontal));
+			QString sceneUuid = QString::fromUtf8(obs_source_get_uuid(scene));
+			connect(action, &QAction::triggered, this, [uuid, sceneUuid]() {
+				QByteArray h = uuid.toUtf8();
+				QByteArray v = sceneUuid.toUtf8();
+				obs_source_t *horizontalNow = obs_get_source_by_uuid(h.constData());
+				obs_source_t *verticalNow = obs_get_source_by_uuid(v.constData());
+				pl_vertical_link(verticalNow, horizontalNow);
+				obs_source_release(verticalNow);
+				obs_source_release(horizontalNow);
+			});
+		}
+		obs_frontend_source_list_free(&horizontals);
+
+		QAction *unlink = menu.addAction(moduleText("Vertical.Unlink"));
+		unlink->setEnabled(linked != nullptr);
+		connect(unlink, &QAction::triggered, this, [this]() {
+			obs_source_t *chosen = sceneAt(list->currentRow());
+			pl_vertical_link(chosen, nullptr);
+			obs_source_release(chosen);
+		});
+		menu.addSeparator();
+		connect(menu.addAction(moduleText("Vertical.Rename")), &QAction::triggered, this,
+			[this]() { rename(); });
+		connect(menu.addAction(moduleText("Vertical.RemoveScene")), &QAction::triggered, this,
+			[this]() { removeScene(); });
+
+		obs_source_release(linked);
 		obs_source_release(scene);
+		menu.exec(where);
 	}
 
-	void addExtra()
+	void addScene()
 	{
 		bool ok = false;
-		QString name = QInputDialog::getText(this, moduleText("Vertical.AddExtra"),
-						     moduleText("Vertical.AddExtra.Name"), QLineEdit::Normal,
-						     moduleText("Vertical.AddExtra.Default"), &ok);
+		QString name = QInputDialog::getText(this, moduleText("Vertical.AddScene"),
+						     moduleText("Vertical.AddScene.Name"), QLineEdit::Normal,
+						     moduleText("Vertical.AddScene.Default"), &ok);
 		if (!ok) {
 			return;
 		}
 		QByteArray bytes = name.trimmed().toUtf8();
-		obs_source_t *scene = pl_vertical_add_extra(bytes.constData());
-		setEditingScene(scene);
+		obs_source_t *scene = pl_vertical_add_scene(bytes.constData());
+		if (scene) {
+			setEditingScene(scene);
+			pl_vertical_select(scene);
+		}
 		obs_source_release(scene);
 	}
 
-	void removeExtra()
+	void rename()
+	{
+		obs_source_t *scene = sceneAt(list->currentRow());
+		if (!scene) {
+			return;
+		}
+		bool ok = false;
+		QString name = QInputDialog::getText(this, moduleText("Vertical.Rename"),
+						     moduleText("Vertical.AddScene.Name"), QLineEdit::Normal,
+						     QString::fromUtf8(obs_source_get_name(scene)), &ok);
+		if (ok) {
+			QByteArray bytes = name.trimmed().toUtf8();
+			pl_vertical_rename_scene(scene, bytes.constData());
+		}
+		obs_source_release(scene);
+	}
+
+	void removeScene()
 	{
 		obs_source_t *scene = sceneAt(list->currentRow());
 		if (!scene) {
 			return;
 		}
 		QString question =
-			moduleText("Vertical.RemoveExtra.Question").arg(QString::fromUtf8(obs_source_get_name(scene)));
-		if (QMessageBox::question(this, moduleText("Vertical.RemoveExtra"), question) == QMessageBox::Yes) {
+			moduleText("Vertical.RemoveScene.Question").arg(QString::fromUtf8(obs_source_get_name(scene)));
+		if (QMessageBox::question(this, moduleText("Vertical.RemoveScene"), question) == QMessageBox::Yes) {
 			setEditingScene(nullptr);
-			pl_vertical_remove_extra(scene);
+			setSelection(nullptr, 0);
+			pl_vertical_remove_scene(scene);
 		}
 		obs_source_release(scene);
 	}
 
 	QListWidget *list = nullptr;
-	QPushButton *remove = nullptr;
 	QComboBox *transitionType = nullptr;
 	QSpinBox *transitionMs = nullptr;
 	QPushButton *transitionProps = nullptr;
 	std::vector<SceneEntry> entries;
 	bool rebuilding = false;
 };
-
-/* ------------------------------------------------------------------------- */
-/* Janela "Casar fontes"                                                      */
 
 QStringList allSourceNames()
 {
@@ -1021,90 +1074,6 @@ QStringList allSourceNames()
 	names.sort(Qt::CaseInsensitive);
 	return names;
 }
-
-class PairDialog : public QDialog {
-public:
-	PairDialog(QWidget *parent, const QString &start) : QDialog(parent)
-	{
-		setWindowTitle(moduleText("Vertical.Pair.Title"));
-		setMinimumWidth(420);
-		auto *layout = new QVBoxLayout(this);
-
-		auto *help = new QLabel(moduleText("Vertical.Pair.Help"), this);
-		help->setWordWrap(true);
-		layout->addWidget(help);
-
-		QStringList names = allSourceNames();
-		auto *form = new QFormLayout();
-		source = new QComboBox(this);
-		source->addItems(names);
-		pair = new QComboBox(this);
-		pair->addItem(moduleText("Vertical.Pair.Same"), QString());
-		pair->addItem(moduleText("Vertical.Pair.Hide"), QString::fromUtf8("\x01"));
-		for (const QString &name : names) {
-			pair->addItem(name, name);
-		}
-		form->addRow(moduleText("Vertical.Pair.Source"), source);
-		form->addRow(moduleText("Vertical.Pair.Shows"), pair);
-		layout->addLayout(form);
-
-		auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-		connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-		connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-		layout->addWidget(buttons);
-
-		connect(source, &QComboBox::currentIndexChanged, this, [this](int) { showCurrentPair(); });
-		int index = source->findText(start);
-		source->setCurrentIndex(index < 0 ? 0 : index);
-		showCurrentPair();
-	}
-
-	void apply()
-	{
-		QByteArray name = source->currentText().toUtf8();
-		obs_source_t *chosen = obs_get_source_by_name(name.constData());
-		if (!chosen) {
-			return;
-		}
-		QString data = pair->currentData().toString();
-		if (data.isEmpty()) {
-			pl_vertical_set_pair(chosen, PL_PAIR_SAME, nullptr);
-		} else if (data == QString::fromUtf8("\x01")) {
-			pl_vertical_set_pair(chosen, PL_PAIR_HIDE, nullptr);
-		} else {
-			QByteArray otherName = data.toUtf8();
-			obs_source_t *other = obs_get_source_by_name(otherName.constData());
-			if (other && other != chosen) {
-				pl_vertical_set_pair(chosen, PL_PAIR_OTHER, other);
-			} else {
-				pl_vertical_set_pair(chosen, PL_PAIR_SAME, nullptr);
-			}
-			obs_source_release(other);
-		}
-		obs_source_release(chosen);
-	}
-
-private:
-	void showCurrentPair()
-	{
-		QByteArray name = source->currentText().toUtf8();
-		obs_source_t *chosen = obs_get_source_by_name(name.constData());
-		obs_source_t *other = nullptr;
-		enum pl_vertical_pair_mode mode = pl_vertical_get_pair(chosen, &other);
-		int index = 0;
-		if (mode == PL_PAIR_HIDE) {
-			index = 1;
-		} else if (mode == PL_PAIR_OTHER && other) {
-			index = pair->findData(QString::fromUtf8(obs_source_get_name(other)));
-		}
-		pair->setCurrentIndex(index < 0 ? 0 : index);
-		obs_source_release(other);
-		obs_source_release(chosen);
-	}
-
-	QComboBox *source = nullptr;
-	QComboBox *pair = nullptr;
-};
 
 /* ------------------------------------------------------------------------- */
 /* Painel "Fontes verticais"                                                  */
@@ -1172,9 +1141,26 @@ public:
 		row2->addWidget(width);
 		layout->addLayout(row2);
 
-		auto *pairButton = new QPushButton(moduleText("Vertical.Pair.Button"), this);
-		connect(pairButton, &QPushButton::clicked, this, [this]() { pairSources(); });
-		layout->addWidget(pairButton);
+		auto *row3 = new QHBoxLayout();
+		auto *properties = new QPushButton(moduleText("Vertical.Sources.Properties"), this);
+		auto *filters = new QPushButton(moduleText("Vertical.Sources.Filters"), this);
+		connect(properties, &QPushButton::clicked, this, [this]() {
+			obs_sceneitem_t *item = itemAt(list->currentRow());
+			if (item) {
+				obs_frontend_open_source_properties(obs_sceneitem_get_source(item));
+				obs_sceneitem_release(item);
+			}
+		});
+		connect(filters, &QPushButton::clicked, this, [this]() {
+			obs_sceneitem_t *item = itemAt(list->currentRow());
+			if (item) {
+				obs_frontend_open_source_filters(obs_sceneitem_get_source(item));
+				obs_sceneitem_release(item);
+			}
+		});
+		row3->addWidget(properties);
+		row3->addWidget(filters);
+		layout->addLayout(row3);
 	}
 
 	void rebuild()
@@ -1247,27 +1233,82 @@ private:
 		return item;
 	}
 
+	/* "+ Fonte": uma fonte nova (como no OBS) ou uma que já existe na tela horizontal. */
 	void addSource()
 	{
 		obs_source_t *sceneSource = editingScene();
 		if (!sceneSource) {
 			return;
 		}
+		QMenu menu(this);
+		QAction *fresh = menu.addAction(moduleText("Vertical.Sources.New"));
+		QAction *existing = menu.addAction(moduleText("Vertical.Sources.Existing"));
+		QAction *chosen = menu.exec(QCursor::pos());
+		if (chosen == fresh) {
+			addNewSource(sceneSource);
+		} else if (chosen == existing) {
+			addExistingSource(sceneSource);
+		}
+		obs_source_release(sceneSource);
+	}
 
-		/* Fontes do OBS (as mesmas da tela horizontal) e as cenas horizontais. */
-		QStringList names;
-		obs_enum_sources(
-			[](void *param, obs_source_t *source) -> bool {
-				static_cast<QStringList *>(param)->append(
-					QString::fromUtf8(obs_source_get_name(source)));
-				return true;
-			},
-			&names);
-		names.sort(Qt::CaseInsensitive);
-
+	void addNewSource(obs_source_t *sceneSource)
+	{
+		QStringList labels;
+		QStringList ids;
+		const char *id;
+		for (size_t i = 0; obs_enum_input_types(i, &id); i++) {
+			uint32_t flags = obs_get_source_output_flags(id);
+			if (flags & (OBS_SOURCE_DEPRECATED | OBS_SOURCE_CAP_DISABLED)) {
+				continue;
+			}
+			const char *label = obs_source_get_display_name(id);
+			labels.append(QString::fromUtf8(label ? label : id));
+			ids.append(QString::fromUtf8(id));
+		}
 		bool ok = false;
-		QString chosen = QInputDialog::getItem(this, moduleText("Vertical.Sources.Add"),
-						       moduleText("Vertical.Sources.Choose"), names, 0, false, &ok);
+		QString type = QInputDialog::getItem(this, moduleText("Vertical.Sources.New"),
+						     moduleText("Vertical.Sources.Type"), labels, 0, false, &ok);
+		int index = labels.indexOf(type);
+		if (!ok || index < 0) {
+			return;
+		}
+		QString name = QInputDialog::getText(this, moduleText("Vertical.Sources.New"),
+						     moduleText("Vertical.AddScene.Name"), QLineEdit::Normal, type,
+						     &ok);
+		if (!ok || name.trimmed().isEmpty()) {
+			return;
+		}
+
+		/* Nome que ainda não existe ("Imagem", "Imagem 2"...). */
+		QString unique = name.trimmed();
+		for (int n = 2; n < 1000; n++) {
+			QByteArray probe = unique.toUtf8();
+			obs_source_t *other = obs_get_source_by_name(probe.constData());
+			obs_source_release(other);
+			if (!other) {
+				break;
+			}
+			unique = name.trimmed() + QStringLiteral(" ") + QString::number(n);
+		}
+
+		QByteArray typeId = ids[index].toUtf8();
+		QByteArray bytes = unique.toUtf8();
+		obs_source_t *source = obs_source_create(typeId.constData(), bytes.constData(), nullptr, nullptr);
+		if (source) {
+			pl_vertical_add_source(sceneSource, source);
+			obs_frontend_open_source_properties(source);
+			obs_source_release(source);
+			pl_vertical_touch();
+		}
+	}
+
+	void addExistingSource(obs_source_t *sceneSource)
+	{
+		bool ok = false;
+		QString chosen = QInputDialog::getItem(this, moduleText("Vertical.Sources.Existing"),
+						       moduleText("Vertical.Sources.Choose"), allSourceNames(), 0,
+						       false, &ok);
 		if (ok && !chosen.isEmpty()) {
 			QByteArray bytes = chosen.toUtf8();
 			obs_source_t *source = obs_get_source_by_name(bytes.constData());
@@ -1275,7 +1316,6 @@ private:
 			obs_source_release(source);
 			pl_vertical_touch();
 		}
-		obs_source_release(sceneSource);
 	}
 
 	void removeSource()
@@ -1298,20 +1338,6 @@ private:
 			pl_vertical_touch();
 			rebuild();
 			list->setCurrentRow(std::clamp(row, 0, std::max(list->count() - 1, 0)));
-		}
-	}
-
-	void pairSources()
-	{
-		QString start;
-		obs_sceneitem_t *item = itemAt(list->currentRow());
-		if (item) {
-			start = QString::fromUtf8(obs_source_get_name(obs_sceneitem_get_source(item)));
-			obs_sceneitem_release(item);
-		}
-		PairDialog dialog(this, start);
-		if (dialog.exec() == QDialog::Accepted) {
-			dialog.apply();
 		}
 	}
 
@@ -1349,16 +1375,12 @@ public:
 		status->setTextFormat(Qt::RichText);
 		status->setWordWrap(true);
 		status->setStyleSheet("color: #a0a0a0;");
-		follow = new QPushButton(moduleText("Vertical.Follow"), this);
-		follow->setToolTip(moduleText("Vertical.Follow"));
-		connect(follow, &QPushButton::clicked, this, []() { pl_vertical_follow_program(); });
 		auto *detach = new QPushButton(moduleText(isFloating ? "Vertical.Attach" : "Vertical.Detach"), this);
 		connect(detach, &QPushButton::clicked, this, [isFloating]() {
 			floating = !isFloating;
 			QTimer::singleShot(0, []() { placeEmbedded(); });
 		});
 		header->addWidget(status, 1);
-		header->addWidget(follow);
 		header->addWidget(detach);
 		layout->addLayout(header);
 		layout->addWidget(new VerticalDisplay(this), 1);
@@ -1377,9 +1399,7 @@ public:
 		QString name = current ? QString::fromUtf8(obs_source_get_name(current)).toHtmlEscaped()
 				       : moduleText("Vertical.Nothing");
 		obs_source_release(current);
-		bool following = pl_vertical_following();
-		status->setText(moduleText(following ? "Vertical.Short.Following" : "Vertical.Short.Manual").arg(name));
-		follow->setVisible(!following);
+		status->setText(moduleText("Vertical.Short.OnAir").arg(name));
 	}
 
 	/* Ao lado do preview: largura certa para a tela em pé caber na altura da área. */
@@ -1404,7 +1424,6 @@ protected:
 
 private:
 	QLabel *status = nullptr;
-	QPushButton *follow = nullptr;
 	bool embeddedMode = true;
 };
 
