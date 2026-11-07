@@ -66,6 +66,20 @@ enum pl_vertical_fit {
 };
 void pl_vertical_fit_item(obs_sceneitem_t *item, enum pl_vertical_fit fit);
 
+/*
+ * Fontes casadas. SAME: no vertical vai a própria fonte (o normal). OTHER: vai outra fonte (por
+ * exemplo a mesma arte feita em pé). HIDE: a fonte não vai ao vertical. Mudar o casamento já
+ * troca a fonte em todas as gêmeas.
+ */
+enum pl_vertical_pair_mode {
+	PL_PAIR_SAME,
+	PL_PAIR_OTHER,
+	PL_PAIR_HIDE,
+};
+/* `*other` recebe uma nova referência (ou NULL) quando o modo é OTHER. */
+enum pl_vertical_pair_mode pl_vertical_get_pair(obs_source_t *source, obs_source_t **other);
+void pl_vertical_set_pair(obs_source_t *source, enum pl_vertical_pair_mode mode, obs_source_t *other);
+
 #ifdef __cplusplus
 }
 #endif

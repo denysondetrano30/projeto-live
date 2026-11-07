@@ -14,6 +14,7 @@
 #include "multistream.h"
 #include "stream-dock.h"
 #include "vertical-dock.h"
+#include "vertical-record.h"
 #include "vertical.h"
 
 OBS_DECLARE_MODULE()
@@ -32,6 +33,7 @@ bool obs_module_load(void)
 	obs_register_source(&projeto_live_phone_source);
 	pl_director_dock_load();
 	pl_vertical_load();
+	pl_vertical_record_load();
 	pl_vertical_dock_load();
 	pl_multistream_load();
 	pl_stream_dock_load();
@@ -41,6 +43,7 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
 	pl_multistream_unload();
+	pl_vertical_record_unload();
 	pl_vertical_unload();
 	pl_intercom_stop();
 }

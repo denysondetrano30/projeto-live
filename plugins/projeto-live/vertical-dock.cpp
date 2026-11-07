@@ -5,8 +5,10 @@
  *   ou numa cena escolhida à mão, e o botão "Seguir o Programa".
  * - "Cenas verticais": as gêmeas (⇄, na ordem das cenas do OBS) e as cenas só verticais. Um clique
  *   escolhe a cena para mexer nas fontes; dois cliques (ou "Pôr no ar") põem a cena no vertical.
- * - "Fontes verticais": as fontes da cena escolhida, com a caixa de aparecer/sumir, a ordem e os
- *   enquadramentos rápidos (preencher, inteira, largura toda).
+ * - "Fontes verticais": as fontes da cena escolhida, com a caixa de aparecer/sumir, a ordem, os
+ *   enquadramentos rápidos (preencher, inteira, largura toda) e "Casar fontes".
+ * - Ao lado do preview do OBS (na mesma fileira, depois do Programa no modo estúdio): uma cópia do
+ *   Programa vertical, que dá para desligar no painel "Programa vertical".
  *
  * O trabalho de verdade fica em vertical.c.
  *
@@ -21,7 +23,13 @@
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 
+#include <QBoxLayout>
+#include <QCheckBox>
 #include <QColor>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
 #include <QEvent>
 #include <QFont>
 #include <QHBoxLayout>
@@ -41,6 +49,7 @@
 #include <algorithm>
 #include <vector>
 
+#include "vertical-record.h"
 #include "vertical.h"
 
 namespace {
@@ -206,6 +215,8 @@ private:
 	obs_display_t *display = nullptr;
 };
 
+void placeEmbedded();
+
 /* ------------------------------------------------------------------------- */
 /* Painel "Programa vertical"                                                 */
 
@@ -226,6 +237,19 @@ public:
 		follow = new QPushButton(moduleText("Vertical.Follow"), this);
 		connect(follow, &QPushButton::clicked, this, []() { pl_vertical_follow_program(); });
 		layout->addWidget(follow);
+
+		auto *embed = new QCheckBox(moduleText("Vertical.Embed"), this);
+		embed->setChecked(pl_vertical_pref("embed"));
+		connect(embed, &QCheckBox::toggled, this, [](bool on) {
+			pl_vertical_set_pref("embed", on);
+			placeEmbedded();
+		});
+		layout->addWidget(embed);
+
+		auto *record = new QCheckBox(moduleText("Vertical.Record"), this);
+		record->setChecked(pl_vertical_pref("record"));
+		connect(record, &QCheckBox::toggled, this, [](bool on) { pl_vertical_set_pref("record", on); });
+		layout->addWidget(record);
 
 		refresh();
 	}
@@ -428,6 +452,106 @@ private:
 };
 
 /* ------------------------------------------------------------------------- */
+/* Janela "Casar fontes"                                                      */
+
+QStringList allSourceNames()
+{
+	QStringList names;
+	obs_enum_sources(
+		[](void *param, obs_source_t *source) -> bool {
+			static_cast<QStringList *>(param)->append(QString::fromUtf8(obs_source_get_name(source)));
+			return true;
+		},
+		&names);
+	names.sort(Qt::CaseInsensitive);
+	return names;
+}
+
+class PairDialog : public QDialog {
+public:
+	PairDialog(QWidget *parent, const QString &start) : QDialog(parent)
+	{
+		setWindowTitle(moduleText("Vertical.Pair.Title"));
+		setMinimumWidth(420);
+		auto *layout = new QVBoxLayout(this);
+
+		auto *help = new QLabel(moduleText("Vertical.Pair.Help"), this);
+		help->setWordWrap(true);
+		layout->addWidget(help);
+
+		QStringList names = allSourceNames();
+		auto *form = new QFormLayout();
+		source = new QComboBox(this);
+		source->addItems(names);
+		pair = new QComboBox(this);
+		pair->addItem(moduleText("Vertical.Pair.Same"), QString());
+		pair->addItem(moduleText("Vertical.Pair.Hide"), QString::fromUtf8("\x01"));
+		for (const QString &name : names) {
+			pair->addItem(name, name);
+		}
+		form->addRow(moduleText("Vertical.Pair.Source"), source);
+		form->addRow(moduleText("Vertical.Pair.Shows"), pair);
+		layout->addLayout(form);
+
+		auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+		connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+		connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+		layout->addWidget(buttons);
+
+		connect(source, &QComboBox::currentIndexChanged, this, [this](int) { showCurrentPair(); });
+		int index = source->findText(start);
+		source->setCurrentIndex(index < 0 ? 0 : index);
+		showCurrentPair();
+	}
+
+	void apply()
+	{
+		QByteArray name = source->currentText().toUtf8();
+		obs_source_t *chosen = obs_get_source_by_name(name.constData());
+		if (!chosen) {
+			return;
+		}
+		QString data = pair->currentData().toString();
+		if (data.isEmpty()) {
+			pl_vertical_set_pair(chosen, PL_PAIR_SAME, nullptr);
+		} else if (data == QString::fromUtf8("\x01")) {
+			pl_vertical_set_pair(chosen, PL_PAIR_HIDE, nullptr);
+		} else {
+			QByteArray otherName = data.toUtf8();
+			obs_source_t *other = obs_get_source_by_name(otherName.constData());
+			if (other && other != chosen) {
+				pl_vertical_set_pair(chosen, PL_PAIR_OTHER, other);
+			} else {
+				pl_vertical_set_pair(chosen, PL_PAIR_SAME, nullptr);
+			}
+			obs_source_release(other);
+		}
+		obs_source_release(chosen);
+	}
+
+private:
+	void showCurrentPair()
+	{
+		QByteArray name = source->currentText().toUtf8();
+		obs_source_t *chosen = obs_get_source_by_name(name.constData());
+		obs_source_t *other = nullptr;
+		enum pl_vertical_pair_mode mode = pl_vertical_get_pair(chosen, &other);
+		int index = 0;
+		if (mode == PL_PAIR_HIDE) {
+			index = 1;
+		} else if (mode == PL_PAIR_OTHER && other) {
+			index = pair->findData(QString::fromUtf8(obs_source_get_name(other)));
+		}
+		pair->setCurrentIndex(index < 0 ? 0 : index);
+		obs_source_release(other);
+		obs_source_release(chosen);
+	}
+
+	QComboBox *source = nullptr;
+	QComboBox *pair = nullptr;
+};
+
+/* ------------------------------------------------------------------------- */
 /* Painel "Fontes verticais"                                                  */
 
 class SourcesDock : public QWidget {
@@ -483,6 +607,10 @@ public:
 		row2->addWidget(whole);
 		row2->addWidget(width);
 		layout->addLayout(row2);
+
+		auto *pairButton = new QPushButton(moduleText("Vertical.Pair.Button"), this);
+		connect(pairButton, &QPushButton::clicked, this, [this]() { pairSources(); });
+		layout->addWidget(pairButton);
 	}
 
 	void rebuild()
@@ -600,6 +728,20 @@ private:
 		}
 	}
 
+	void pairSources()
+	{
+		QString start;
+		obs_sceneitem_t *item = itemAt(list->currentRow());
+		if (item) {
+			start = QString::fromUtf8(obs_source_get_name(obs_sceneitem_get_source(item)));
+			obs_sceneitem_release(item);
+		}
+		PairDialog dialog(this, start);
+		if (dialog.exec() == QDialog::Accepted) {
+			dialog.apply();
+		}
+	}
+
 	void fit(enum pl_vertical_fit how)
 	{
 		obs_sceneitem_t *item = itemAt(list->currentRow());
@@ -642,8 +784,87 @@ void refreshDocks()
 	}
 }
 
+/* ------------------------------------------------------------------------- */
+/* Programa vertical ao lado do preview                                       */
+
+class EmbeddedVertical : public QWidget {
+public:
+	explicit EmbeddedVertical(QWidget *parent) : QWidget(parent)
+	{
+		auto *layout = new QVBoxLayout(this);
+		layout->setContentsMargins(4, 0, 0, 0);
+		layout->setSpacing(2);
+		label = new QLabel(moduleText("Vertical.Embedded.Label"), this);
+		label->setStyleSheet("color: #8a8a8a;");
+		layout->addWidget(label);
+		layout->addWidget(new VerticalDisplay(this), 1);
+		parent->installEventFilter(this);
+		fitWidth();
+	}
+
+	/* Largura certa para a tela em pé caber na altura da área do preview. */
+	void fitWidth()
+	{
+		QWidget *area = parentWidget();
+		int height = (area ? area->height() : 400) - label->sizeHint().height() - 2;
+		setFixedWidth(std::max(90, height * 9 / 16 + 4));
+	}
+
+protected:
+	bool eventFilter(QObject *object, QEvent *event) override
+	{
+		if (object == parentWidget() && event->type() == QEvent::Resize) {
+			fitWidth();
+		}
+		return QWidget::eventFilter(object, event);
+	}
+
+private:
+	QLabel *label = nullptr;
+};
+
+EmbeddedVertical *embedded = nullptr;
+
+QBoxLayout *previewRow()
+{
+	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	QWidget *area = mainWindow ? mainWindow->findChild<QWidget *>("canvasEditor") : nullptr;
+	return area ? qobject_cast<QBoxLayout *>(area->layout()) : nullptr;
+}
+
+void placeEmbedded()
+{
+	QBoxLayout *row = previewRow();
+	bool wanted = pl_vertical_pref("embed") && row;
+
+	if (!wanted && embedded) {
+		if (row) {
+			row->removeWidget(embedded);
+		}
+		delete embedded;
+		embedded = nullptr;
+		return;
+	}
+	if (!wanted) {
+		return;
+	}
+	if (!embedded) {
+		embedded = new EmbeddedVertical(row->parentWidget());
+		QObject::connect(embedded, &QObject::destroyed, []() { embedded = nullptr; });
+	} else {
+		row->removeWidget(embedded);
+	}
+	/* Sempre o último da fileira (no modo estúdio o OBS acrescenta o Programa depois). */
+	row->addWidget(embedded);
+	embedded->show();
+}
+
 void frontendEvent(enum obs_frontend_event event, void *)
 {
+	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_STUDIO_MODE_ENABLED ||
+	    event == OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED) {
+		QTimer::singleShot(0, []() { placeEmbedded(); });
+	}
 	if (event == OBS_FRONTEND_EVENT_EXIT || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) {
 		setEditingScene(nullptr);
 	}

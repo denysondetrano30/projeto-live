@@ -413,6 +413,106 @@ static void create_twin(obs_source_t *horizontal)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Casar fontes                                                               */
+
+enum pl_vertical_pair_mode pl_vertical_get_pair(obs_source_t *source, obs_source_t **other)
+{
+	*other = NULL;
+	if (!source) {
+		return PL_PAIR_SAME;
+	}
+	if (private_bool(source, HIDE_KEY)) {
+		return PL_PAIR_HIDE;
+	}
+	const char *uuid = private_string(source, PAIR_KEY);
+	if (uuid && *uuid) {
+		*other = obs_get_source_by_uuid(uuid);
+		if (*other) {
+			return PL_PAIR_OTHER;
+		}
+	}
+	return PL_PAIR_SAME;
+}
+
+static bool repair_items_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+{
+	UNUSED_PARAMETER(scene);
+	DARRAY(obs_sceneitem_t *) *items = param;
+	obs_sceneitem_addref(item);
+	da_push_back(*items, &item);
+	return true;
+}
+
+/* Troca, nas gêmeas, a par antiga da fonte pela nova. */
+static void repair_twins(obs_source_t *source, obs_source_t *old_pair)
+{
+	struct obs_frontend_source_list scenes = {0};
+	obs_frontend_get_scenes(&scenes);
+	for (size_t i = 0; i < scenes.sources.num; i++) {
+		obs_source_t *horizontal = scenes.sources.array[i];
+		obs_scene_t *scene = obs_scene_from_source(horizontal);
+		obs_source_t *twin = find_twin(horizontal);
+		if (!scene || !twin) {
+			obs_source_release(twin);
+			continue;
+		}
+
+		DARRAY(obs_sceneitem_t *) items;
+		da_init(items);
+		obs_scene_enum_items(scene, repair_items_cb, &items);
+		bool uses_source = false;
+		for (size_t j = 0; j < items.num; j++) {
+			uses_source = uses_source || obs_sceneitem_get_source(items.array[j]) == source;
+		}
+
+		if (uses_source) {
+			if (old_pair) {
+				struct twin_items found;
+				collect_twin_items(twin, old_pair, &found);
+				for (size_t j = 0; j < found.items.num; j++) {
+					obs_sceneitem_remove(found.items.array[j]);
+				}
+				free_twin_items(&found);
+			}
+			for (size_t j = 0; j < items.num; j++) {
+				if (obs_sceneitem_get_source(items.array[j]) == source) {
+					add_twin_item(twin, items.array[j]);
+				}
+			}
+		}
+
+		for (size_t j = 0; j < items.num; j++) {
+			obs_sceneitem_release(items.array[j]);
+		}
+		da_free(items);
+		obs_source_release(twin);
+	}
+	obs_frontend_source_list_free(&scenes);
+	pl_vertical_touch();
+}
+
+void pl_vertical_set_pair(obs_source_t *source, enum pl_vertical_pair_mode mode, obs_source_t *other)
+{
+	if (!source) {
+		return;
+	}
+	obs_source_t *old_pair = vertical_pair(source);
+
+	obs_data_t *settings = obs_source_get_private_settings(source);
+	obs_data_set_bool(settings, HIDE_KEY, mode == PL_PAIR_HIDE);
+	obs_data_set_string(settings, PAIR_KEY, (mode == PL_PAIR_OTHER && other) ? obs_source_get_uuid(other) : "");
+	obs_data_release(settings);
+	blog(LOG_INFO, "[projeto-live] vertical: '%s' casada com '%s'", obs_source_get_name(source),
+	     mode == PL_PAIR_HIDE ? "(nada)"
+				  : (mode == PL_PAIR_OTHER && other ? obs_source_get_name(other) : "ela mesma"));
+
+	if (ready && canvas) {
+		repair_twins(source, old_pair);
+	}
+	obs_source_release(old_pair);
+}
+
+/* ------------------------------------------------------------------------- */
 /* Avisos das cenas horizontais (chegam em qualquer thread; o trabalho vai para a interface) */
 
 enum item_event { ITEM_ADDED, ITEM_REMOVED, ITEM_VISIBLE };

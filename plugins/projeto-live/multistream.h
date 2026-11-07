@@ -75,6 +75,9 @@ int pl_multistream_main_kbps(void);
 
 /* Endereço padrão da plataforma ("" se a pessoa precisa colar o da plataforma). */
 const char *pl_multistream_default_server(const char *platform);
+/* O melhor codificador H.264 do PC (placa de vídeo primeiro, x264 por último). */
+const char *pl_best_h264_encoder(void);
+
 /* Instagram e TikTok são verticais. */
 bool pl_multistream_platform_vertical(const char *platform);
 

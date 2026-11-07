@@ -36,6 +36,8 @@ target_sources(
     usb-relay.h
     vertical-dock.cpp
     vertical-dock.h
+    vertical-record.c
+    vertical-record.h
     vertical.c
     vertical.h
 )

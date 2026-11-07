@@ -177,7 +177,7 @@ static void dest_release(struct dest *d)
 }
 
 /* O melhor codificador H.264 do PC: placa de vídeo (NVIDIA, AMD, Intel, Mac) e, por último, x264. */
-static const char *best_h264_encoder(void)
+const char *pl_best_h264_encoder(void)
 {
 	static const char *preferred[] = {
 		"obs_nvenc_h264_tex", "jim_nvenc", "h264_texture_amf",
@@ -198,7 +198,7 @@ static const char *best_h264_encoder(void)
 
 static obs_encoder_t *create_video_encoder(const struct dest *d, int kbps, video_t *video)
 {
-	const char *id = best_h264_encoder();
+	const char *id = pl_best_h264_encoder();
 	obs_data_t *settings = obs_data_create();
 	obs_data_set_string(settings, "rate_control", "CBR");
 	obs_data_set_int(settings, "bitrate", kbps);
