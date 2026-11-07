@@ -1,12 +1,15 @@
 /*
- * Projeto Live: aba "Multistream" nas Configurações do OBS e bolinhas na barra de baixo.
+ * Projeto Live: destinos extras e gravação vertical dentro das Configurações do OBS, e bolinhas
+ * na barra de baixo.
  *
  * (O nome do arquivo ficou da época do painel "Transmissão", que saiu em 07/11.)
  *
- * - Aba "Multistream": aparece na janela de Configurações do OBS, depois de "Avançado", com
- *   três partes: destinos deitados (YouTube, Facebook ou outro endereço), destinos verticais
- *   (Instagram, TikTok ou outro endereço) e a gravação vertical (ligar, pasta e qualidade). As
- *   mudanças só valem no "Aplicar" ou "OK", como o resto das Configurações.
+ * - Aba Transmissão do OBS: no alto continua a transmissão principal do próprio OBS (com o login
+ *   do YouTube etc.); embaixo, na mesma aba, entram os destinos horizontais (YouTube, Facebook ou
+ *   outro endereço) e os verticais (Instagram, TikTok ou outro endereço). Tudo fica numa área com
+ *   rolagem.
+ * - Aba Saída do OBS: no fim, a caixa "Gravação vertical" (ligar, pasta e qualidade).
+ * - As mudanças só valem no "Aplicar" ou "OK", como o resto das Configurações.
  * - Barra de baixo do OBS: uma bolinha por destino marcado enquanto a transmissão está no ar
  *   (verde no ar, amarelo ligando ou reconectando, vermelho com erro); passar o mouse mostra o
  *   detalhe e a velocidade.
@@ -38,6 +41,7 @@
 #include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -46,7 +50,6 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScrollArea>
-#include <QStackedWidget>
 #include <QStatusBar>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -312,7 +315,7 @@ private:
 /* ------------------------------------------------------------------------- */
 /* Aba "Multistream"                                                          */
 
-/* Uma das duas listas (deitados ou verticais), mexendo na cópia de trabalho da aba. */
+/* Uma das duas listas (horizontais ou verticais), mexendo na cópia de trabalho. */
 class DestinationsBox : public QGroupBox {
 public:
 	DestinationsBox(QWidget *parent, const QString &title, bool isVertical, std::vector<pl_dest_info> &list,
@@ -442,73 +445,28 @@ private:
 	bool rebuilding = false;
 };
 
-class MultistreamPage : public QScrollArea {
+/* Os destinos extras, embaixo da transmissão principal na aba Transmissão. */
+class DestinationsSection : public QWidget {
 public:
-	MultistreamPage(QWidget *parent, std::function<void()> onChange) : QScrollArea(parent), changed(onChange)
+	DestinationsSection(QWidget *parent, std::function<void()> onChange) : QWidget(parent), changed(onChange)
 	{
-		setWidgetResizable(true);
-		setFrameShape(QFrame::NoFrame);
-		auto *content = new QWidget(this);
-		auto *layout = new QVBoxLayout(content);
-
+		auto *layout = new QVBoxLayout(this);
+		layout->setContentsMargins(0, 8, 0, 0);
 		reload();
 
-		auto *help = new QLabel(moduleText("Multistream.Help"), content);
+		auto *help = new QLabel(moduleText("Multistream.Help"), this);
 		help->setWordWrap(true);
 		layout->addWidget(help);
 
-		horizontal = new DestinationsBox(content, moduleText("Multistream.Horizontal"), false, dests, changed);
-		vertical = new DestinationsBox(content, moduleText("Multistream.Vertical"), true, dests, changed);
+		horizontal = new DestinationsBox(this, moduleText("Multistream.Horizontal"), false, dests, changed);
+		vertical = new DestinationsBox(this, moduleText("Multistream.Vertical"), true, dests, changed);
 		layout->addWidget(horizontal);
 		layout->addWidget(vertical);
-
-		/* Gravação vertical. */
-		auto *record = new QGroupBox(moduleText("Multistream.Record"), content);
-		auto *recordForm = new QFormLayout(record);
-		recordOn = new QCheckBox(moduleText("Multistream.Record.Enable"), record);
-		recordOn->setChecked(pl_vertical_pref("record"));
-		folder = new QLineEdit(QString::fromUtf8(pl_vertical_pref_string("record_folder")), record);
-		folder->setPlaceholderText(moduleText("Multistream.Record.FolderHint"));
-		auto *browse = new QPushButton(moduleText("Multistream.Record.Browse"), record);
-		auto *folderLine = new QHBoxLayout();
-		folderLine->addWidget(folder, 1);
-		folderLine->addWidget(browse);
-		recordKbps = new QDoubleSpinBox(record);
-		recordKbps->setRange(1.0, 50.0);
-		recordKbps->setSingleStep(1.0);
-		recordKbps->setDecimals(1);
-		recordKbps->setSuffix(" Mbps");
-		int kbps = pl_vertical_pref_int("record_kbps");
-		recordKbps->setValue(kbps > 0 ? kbps / 1000.0 : 10.0);
-		recordForm->addRow(recordOn);
-		recordForm->addRow(moduleText("Multistream.Record.Folder"), folderLine);
-		recordForm->addRow(moduleText("Multistream.Record.Quality"), recordKbps);
-		layout->addWidget(record);
-		layout->addStretch(1);
-		setWidget(content);
-
-		connect(browse, &QPushButton::clicked, this, [this]() {
-			QString dir = QFileDialog::getExistingDirectory(this, moduleText("Multistream.Record.Browse"),
-									folder->text());
-			if (!dir.isEmpty()) {
-				folder->setText(dir);
-				changed();
-			}
-		});
-		connect(recordOn, &QCheckBox::toggled, this, [this](bool) { changed(); });
-		connect(folder, &QLineEdit::textEdited, this, [this](const QString &) { changed(); });
-		connect(recordKbps, &QDoubleSpinBox::valueChanged, this, [this](double) { changed(); });
 	}
 
-	/* "Aplicar" ou "OK" nas Configurações. */
 	void commit()
 	{
 		pl_multistream_set_all(dests.data(), dests.size());
-		pl_vertical_set_pref("record", recordOn->isChecked());
-		QByteArray path = folder->text().trimmed().toUtf8();
-		pl_vertical_set_pref_string("record_folder", path.constData());
-		pl_vertical_set_pref_int("record_kbps", (int)(recordKbps->value() * 1000.0 + 0.5));
-
 		/* Os destinos novos ganharam identificador ao salvar: relê para o próximo "Aplicar". */
 		reload();
 		horizontal->rebuild();
@@ -531,12 +489,64 @@ private:
 	std::vector<pl_dest_info> dests;
 	DestinationsBox *horizontal = nullptr;
 	DestinationsBox *vertical = nullptr;
+};
+
+/* A caixa "Gravação vertical", no fim da aba Saída. */
+class RecordSection : public QGroupBox {
+public:
+	RecordSection(QWidget *parent, std::function<void()> onChange)
+		: QGroupBox(moduleText("Multistream.Record"), parent),
+		  changed(onChange)
+	{
+		auto *form = new QFormLayout(this);
+		recordOn = new QCheckBox(moduleText("Multistream.Record.Enable"), this);
+		recordOn->setChecked(pl_vertical_pref("record"));
+		folder = new QLineEdit(QString::fromUtf8(pl_vertical_pref_string("record_folder")), this);
+		folder->setPlaceholderText(moduleText("Multistream.Record.FolderHint"));
+		auto *browse = new QPushButton(moduleText("Multistream.Record.Browse"), this);
+		auto *folderLine = new QHBoxLayout();
+		folderLine->addWidget(folder, 1);
+		folderLine->addWidget(browse);
+		recordKbps = new QDoubleSpinBox(this);
+		recordKbps->setRange(1.0, 50.0);
+		recordKbps->setSingleStep(1.0);
+		recordKbps->setDecimals(1);
+		recordKbps->setSuffix(" Mbps");
+		int kbps = pl_vertical_pref_int("record_kbps");
+		recordKbps->setValue(kbps > 0 ? kbps / 1000.0 : 10.0);
+		form->addRow(recordOn);
+		form->addRow(moduleText("Multistream.Record.Folder"), folderLine);
+		form->addRow(moduleText("Multistream.Record.Quality"), recordKbps);
+
+		connect(browse, &QPushButton::clicked, this, [this]() {
+			QString dir = QFileDialog::getExistingDirectory(this, moduleText("Multistream.Record.Browse"),
+									folder->text());
+			if (!dir.isEmpty()) {
+				folder->setText(dir);
+				changed();
+			}
+		});
+		connect(recordOn, &QCheckBox::toggled, this, [this](bool) { changed(); });
+		connect(folder, &QLineEdit::textEdited, this, [this](const QString &) { changed(); });
+		connect(recordKbps, &QDoubleSpinBox::valueChanged, this, [this](double) { changed(); });
+	}
+
+	void commit()
+	{
+		pl_vertical_set_pref("record", recordOn->isChecked());
+		QByteArray path = folder->text().trimmed().toUtf8();
+		pl_vertical_set_pref_string("record_folder", path.constData());
+		pl_vertical_set_pref_int("record_kbps", (int)(recordKbps->value() * 1000.0 + 0.5));
+	}
+
+private:
+	std::function<void()> changed;
 	QCheckBox *recordOn = nullptr;
 	QLineEdit *folder = nullptr;
 	QDoubleSpinBox *recordKbps = nullptr;
 };
 
-/* Põe a aba na janela de Configurações do OBS quando ela abre. */
+/* Põe as partes do Projeto Live nas abas Transmissão e Saída quando as Configurações abrem. */
 class SettingsInjector : public QObject {
 public:
 	using QObject::QObject;
@@ -545,9 +555,9 @@ protected:
 	bool eventFilter(QObject *object, QEvent *event) override
 	{
 		if (event->type() == QEvent::Show && object->objectName() == QStringLiteral("OBSBasicSettings") &&
-		    !object->property("projetoLiveTab").toBool()) {
+		    !object->property("projetoLive").toBool()) {
 			if (auto *dialog = qobject_cast<QDialog *>(object)) {
-				dialog->setProperty("projetoLiveTab", true);
+				dialog->setProperty("projetoLive", true);
 				inject(dialog);
 			}
 		}
@@ -555,12 +565,49 @@ protected:
 	}
 
 private:
+	/*
+	 * A aba Transmissão não tem rolagem: o que já está nela vai para dentro de uma área com
+	 * rolagem, e os destinos entram embaixo.
+	 */
+	static void wrapInScroll(QWidget *page, QWidget *extra)
+	{
+		QLayout *old = page->layout();
+		if (!old) {
+			return;
+		}
+		auto *scroll = new QScrollArea(page);
+		scroll->setWidgetResizable(true);
+		scroll->setFrameShape(QFrame::NoFrame);
+		auto *content = new QWidget(scroll);
+		auto *layout = new QVBoxLayout(content);
+		layout->setContentsMargins(old->contentsMargins());
+		while (QLayoutItem *item = old->takeAt(0)) {
+			if (item->spacerItem()) {
+				/* As molas do fim empurravam tudo para cima: aqui a rolagem cuida disso. */
+				delete item;
+				continue;
+			}
+			if (QWidget *widget = item->widget()) {
+				layout->addWidget(widget);
+			} else if (QLayout *inner = item->layout()) {
+				layout->addLayout(inner);
+			}
+			delete item;
+		}
+		extra->setParent(content);
+		layout->addWidget(extra);
+		layout->addStretch(1);
+		scroll->setWidget(content);
+		old->setContentsMargins(0, 0, 0, 0);
+		old->addWidget(scroll);
+	}
+
 	static void inject(QDialog *dialog)
 	{
-		auto *list = dialog->findChild<QListWidget *>("listWidget");
-		auto *pages = dialog->findChild<QStackedWidget *>("settingsPages");
+		auto *streamPage = dialog->findChild<QWidget *>("streamPage");
+		auto *outputPage = dialog->findChild<QWidget *>("outputPage");
 		auto *buttons = dialog->findChild<QDialogButtonBox *>("buttonBox");
-		if (!list || !pages || !buttons) {
+		if (!streamPage || !outputPage || !buttons || !outputPage->layout()) {
 			blog(LOG_WARNING, "[projeto-live] não achei as partes da janela de Configurações");
 			return;
 		}
@@ -570,27 +617,21 @@ private:
 				apply->setEnabled(true);
 			}
 		};
-		auto *page = new MultistreamPage(pages, enableApply);
-		pages->addWidget(page);
+		auto *destinations = new DestinationsSection(streamPage, enableApply);
+		wrapInScroll(streamPage, destinations);
 
-		auto *item = new QListWidgetItem(moduleText("Multistream.Tab"));
-		if (list->count() > 2 && list->item(2)) {
-			item->setIcon(list->item(2)->icon());
-		}
-		list->addItem(item);
-		int row = list->count() - 1;
-		QObject::connect(list, &QListWidget::currentRowChanged, page, [pages, page, row](int current) {
-			if (current == row) {
-				pages->setCurrentWidget(page);
-			}
-		});
+		auto *record = new RecordSection(outputPage, enableApply);
+		outputPage->layout()->addWidget(record);
 
-		QObject::connect(buttons, &QDialogButtonBox::clicked, page, [buttons, page](QAbstractButton *button) {
-			QDialogButtonBox::ButtonRole role = buttons->buttonRole(button);
-			if (role == QDialogButtonBox::ApplyRole || role == QDialogButtonBox::AcceptRole) {
-				page->commit();
-			}
-		});
+		QObject::connect(buttons, &QDialogButtonBox::clicked, destinations,
+				 [buttons, destinations, record](QAbstractButton *button) {
+					 QDialogButtonBox::ButtonRole role = buttons->buttonRole(button);
+					 if (role == QDialogButtonBox::ApplyRole ||
+					     role == QDialogButtonBox::AcceptRole) {
+						 destinations->commit();
+						 record->commit();
+					 }
+				 });
 	}
 };
 

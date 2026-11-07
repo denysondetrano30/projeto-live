@@ -25,6 +25,9 @@
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
+#if !defined(_WIN32) && !defined(__APPLE__)
+#include <obs-nix-platform.h>
+#endif
 
 #include <QAction>
 #include <QBoxLayout>
@@ -711,11 +714,18 @@ private:
 		info.cy = (uint32_t)std::max(size.height(), 1);
 		info.format = GS_BGRA;
 		info.zsformat = GS_ZS_NONE;
+		/* Igual ao OBS (OBSQTDisplay): cada sistema entrega a janela de um jeito. */
 #ifdef _WIN32
 		info.window.hwnd = (void *)windowHandle()->winId();
+#elif defined(__APPLE__)
+		info.window.view = (id)windowHandle()->winId();
 #else
-		/* Mac e Linux: a janela de vídeo ainda não foi feita para lá (o Projeto Live é para Windows). */
-		return;
+		if (obs_get_nix_platform() != OBS_NIX_PLATFORM_X11_EGL) {
+			/* Wayland: a janela de vídeo do vertical ainda não foi feita para lá. */
+			return;
+		}
+		info.window.id = (uint32_t)windowHandle()->winId();
+		info.window.display = obs_get_nix_platform_display();
 #endif
 		display = obs_display_create(&info, 0xFF202020);
 		if (display) {

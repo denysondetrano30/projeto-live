@@ -36,7 +36,7 @@ enum pl_dest_state {
 
 /*
  * O que a pessoa configura em cada destino. `platform`: youtube, facebook, instagram, tiktok ou
- * custom. `vertical`: recebe a tela vertical (senão, a imagem deitada).
+ * custom. `vertical`: recebe a tela vertical (senão, a imagem horizontal do Programa).
  */
 struct pl_dest_info {
 	/* Identificador fixo (para saber, ao salvar, quais destinos mudaram). */
