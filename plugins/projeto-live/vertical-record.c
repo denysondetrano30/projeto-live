@@ -1,10 +1,11 @@
 /*
  * Projeto Live: gravação vertical e preferências da tela vertical.
  *
- * Quando a gravação normal do OBS começa, grava também a tela vertical num arquivo ao lado:
- * "2026-11-07 19-30-00.mp4" ganha o irmão "2026-11-07 19-30-00 (vertical).mp4". Pausa, volta e
- * para junto com a gravação normal. O vídeo vertical tem codificador próprio (o melhor do PC,
- * 10 Mbps); o som é o mesmo da gravação normal.
+ * Quando a gravação normal do OBS começa, grava também a tela vertical:
+ * "2026-11-07 19-30-00.mp4" ganha o irmão "2026-11-07 19-30-00 (vertical).mp4", na mesma pasta
+ * ou na pasta escolhida na aba Multistream. Pausa, volta e para junto com a gravação normal. O
+ * vídeo vertical tem codificador próprio (o melhor do PC, 10 Mbps ou o escolhido); o som é o
+ * mesmo da gravação normal.
  *
  * As preferências ("gravar o vertical junto", "mostrar ao lado do preview") ficam em
  * vertical.json, na pasta de configuração do plugin.
@@ -49,6 +50,8 @@ static void load_prefs(void)
 	}
 	obs_data_set_default_bool(prefs, "record", true);
 	obs_data_set_default_bool(prefs, "embed", true);
+	obs_data_set_default_string(prefs, "record_folder", "");
+	obs_data_set_default_int(prefs, "record_kbps", RECORD_KBPS);
 }
 
 bool pl_vertical_pref(const char *key)
@@ -56,12 +59,8 @@ bool pl_vertical_pref(const char *key)
 	return prefs ? obs_data_get_bool(prefs, key) : true;
 }
 
-void pl_vertical_set_pref(const char *key, bool value)
+static void save_prefs(void)
 {
-	if (!prefs) {
-		return;
-	}
-	obs_data_set_bool(prefs, key, value);
 	char *dir = obs_module_config_path("");
 	char *path = obs_module_config_path("vertical.json");
 	if (dir && path) {
@@ -70,6 +69,40 @@ void pl_vertical_set_pref(const char *key, bool value)
 	}
 	bfree(dir);
 	bfree(path);
+}
+
+void pl_vertical_set_pref(const char *key, bool value)
+{
+	if (prefs) {
+		obs_data_set_bool(prefs, key, value);
+		save_prefs();
+	}
+}
+
+const char *pl_vertical_pref_string(const char *key)
+{
+	return prefs ? obs_data_get_string(prefs, key) : "";
+}
+
+void pl_vertical_set_pref_string(const char *key, const char *value)
+{
+	if (prefs) {
+		obs_data_set_string(prefs, key, value ? value : "");
+		save_prefs();
+	}
+}
+
+int pl_vertical_pref_int(const char *key)
+{
+	return prefs ? (int)obs_data_get_int(prefs, key) : 0;
+}
+
+void pl_vertical_set_pref_int(const char *key, int value)
+{
+	if (prefs) {
+		obs_data_set_int(prefs, key, value);
+		save_prefs();
+	}
 }
 
 /* ------------------------------------------------------------------------- */
@@ -97,8 +130,11 @@ static void release_recording(void)
 	own_audio = NULL;
 }
 
-/* "pasta/2026-11-07 19-30-00.mp4" -> "pasta/2026-11-07 19-30-00 (vertical).mp4" */
-static void vertical_path(const char *path, struct dstr *out)
+/*
+ * "pasta/2026-11-07 19-30-00.mp4" -> "pasta/2026-11-07 19-30-00 (vertical).mp4"; com `folder`,
+ * o arquivo vai para lá: "folder/2026-11-07 19-30-00 (vertical).mp4".
+ */
+static void vertical_path(const char *path, const char *folder, struct dstr *out)
 {
 	const char *slash = strrchr(path, '/');
 	const char *backslash = strrchr(path, '\\');
@@ -109,7 +145,17 @@ static void vertical_path(const char *path, struct dstr *out)
 	if (!dot || (slash && dot < slash)) {
 		dot = path + strlen(path);
 	}
-	dstr_ncopy(out, path, (size_t)(dot - path));
+	if (folder && *folder) {
+		const char *name = slash ? slash + 1 : path;
+		dstr_copy(out, folder);
+		if (!dstr_is_empty(out) && out->array[out->len - 1] != '/' && out->array[out->len - 1] != '\\') {
+			dstr_cat(out, "/");
+		}
+		dstr_ncat(out, name, (size_t)(dot - name));
+		os_mkdirs(folder);
+	} else {
+		dstr_ncopy(out, path, (size_t)(dot - path));
+	}
 	dstr_cat(out, " (vertical)");
 	dstr_cat(out, dot);
 }
@@ -140,7 +186,7 @@ static void start_recording(void)
 	}
 
 	struct dstr file = {0};
-	vertical_path(path, &file);
+	vertical_path(path, pl_vertical_pref_string("record_folder"), &file);
 	obs_data_release(main_settings);
 
 	obs_encoder_t *audio = obs_output_get_audio_encoder(main_output, 0);
@@ -160,7 +206,8 @@ static void start_recording(void)
 	const char *id = pl_best_h264_encoder();
 	obs_data_t *settings = obs_data_create();
 	obs_data_set_string(settings, "rate_control", "CBR");
-	obs_data_set_int(settings, "bitrate", RECORD_KBPS);
+	int kbps = pl_vertical_pref_int("record_kbps");
+	obs_data_set_int(settings, "bitrate", kbps > 0 ? kbps : RECORD_KBPS);
 	obs_data_set_int(settings, "keyint_sec", 2);
 	if (strcmp(id, "obs_x264") == 0) {
 		obs_data_set_string(settings, "preset", "veryfast");

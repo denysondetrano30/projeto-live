@@ -36,7 +36,7 @@ bool obs_module_load(void)
 	pl_vertical_record_load();
 	pl_vertical_dock_load();
 	pl_multistream_load();
-	pl_stream_dock_load();
+	pl_multistream_ui_load();
 	return true;
 }
 

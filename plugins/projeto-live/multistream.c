@@ -13,8 +13,12 @@
  * Se um destino cair, só ele tenta voltar sozinho (até 20 vezes, a cada 10 s); os outros seguem.
  * Os destinos ficam em destinos.json, na pasta de configuração do plugin.
  *
- * Instagram e TikTok recebem a tela vertical (vertical.c), sempre com um codificador próprio
- * (na "mesma qualidade", com a velocidade da principal).
+ * Destinos verticais (Instagram, TikTok ou outro marcado como vertical) recebem a tela vertical
+ * (vertical.c), sempre com um codificador próprio (na "mesma qualidade", com a velocidade da
+ * principal), em 1080x1920 ou num tamanho menor escolhido (ex.: 720x1280).
+ *
+ * A lista é editada na aba "Multistream" das Configurações do OBS (stream-dock.cpp) e salva
+ * inteira com pl_multistream_set_all.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -196,9 +200,35 @@ const char *pl_best_h264_encoder(void)
 	return "obs_x264";
 }
 
+static bool encoder_exists(const char *wanted)
+{
+	const char *id;
+	for (size_t i = 0; wanted && *wanted && obs_enum_encoder_types(i, &id); i++) {
+		if (strcmp(id, wanted) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void pl_multistream_enum_encoders(pl_encoder_cb callback, void *param)
+{
+	const char *id;
+	for (size_t i = 0; obs_enum_encoder_types(i, &id); i++) {
+		const char *codec = obs_get_encoder_codec(id);
+		uint32_t caps = obs_get_encoder_caps(id);
+		if (obs_get_encoder_type(id) != OBS_ENCODER_VIDEO || !codec || strcmp(codec, "h264") != 0 ||
+		    (caps & (OBS_ENCODER_CAP_DEPRECATED | OBS_ENCODER_CAP_INTERNAL))) {
+			continue;
+		}
+		const char *name = obs_encoder_get_display_name(id);
+		callback(param, id, name ? name : id);
+	}
+}
+
 static obs_encoder_t *create_video_encoder(const struct dest *d, int kbps, video_t *video)
 {
-	const char *id = pl_best_h264_encoder();
+	const char *id = encoder_exists(d->info.encoder) ? d->info.encoder : pl_best_h264_encoder();
 	obs_data_t *settings = obs_data_create();
 	obs_data_set_string(settings, "rate_control", "CBR");
 	obs_data_set_int(settings, "bitrate", kbps);
@@ -213,6 +243,10 @@ static obs_encoder_t *create_video_encoder(const struct dest *d, int kbps, video
 	obs_data_release(settings);
 	if (encoder) {
 		obs_encoder_set_video(encoder, video);
+		if (d->info.vertical && d->info.width > 0 && d->info.height > 0 &&
+		    (d->info.width != PL_VERTICAL_WIDTH || d->info.height != PL_VERTICAL_HEIGHT)) {
+			obs_encoder_set_scaled_size(encoder, (uint32_t)d->info.width, (uint32_t)d->info.height);
+		}
 		blog(LOG_INFO, "[projeto-live] destino '%s' com codificador próprio %s, %d kbps", d->info.name, id,
 		     kbps);
 	}
@@ -264,7 +298,7 @@ static void dest_start(struct dest *d)
 		return;
 	}
 
-	bool vertical = pl_multistream_platform_vertical(d->info.platform);
+	bool vertical = d->info.vertical;
 	obs_encoder_t *main_video = obs_output_get_video_encoder(main_output);
 	obs_encoder_t *video = (d->info.own_quality || vertical) ? NULL : main_video;
 	obs_encoder_t *audio = obs_output_get_audio_encoder(main_output, 0);
@@ -409,6 +443,11 @@ static void save_dests(void)
 			obs_data_set_bool(item, "enabled", info->enabled);
 			obs_data_set_bool(item, "own_quality", info->own_quality);
 			obs_data_set_int(item, "bitrate", info->bitrate_kbps);
+			obs_data_set_string(item, "id", info->id);
+			obs_data_set_bool(item, "vertical", info->vertical);
+			obs_data_set_string(item, "encoder", info->encoder);
+			obs_data_set_int(item, "width", info->width);
+			obs_data_set_int(item, "height", info->height);
 			obs_data_array_push_back(array, item);
 			obs_data_release(item);
 		}
@@ -429,6 +468,13 @@ static struct dest *new_dest(const struct pl_dest_info *info)
 	d->info.platform[sizeof(d->info.platform) - 1] = 0;
 	d->info.server[sizeof(d->info.server) - 1] = 0;
 	d->info.key[sizeof(d->info.key) - 1] = 0;
+	d->info.id[sizeof(d->info.id) - 1] = 0;
+	d->info.encoder[sizeof(d->info.encoder) - 1] = 0;
+	if (!*d->info.id) {
+		char *uuid = os_generate_uuid();
+		copy_text(d->info.id, sizeof(d->info.id), uuid);
+		bfree(uuid);
+	}
 	d->state = info->enabled ? PL_DEST_WAITING : PL_DEST_OFF;
 	return d;
 }
@@ -457,6 +503,14 @@ static void load_dests(void)
 		if (!*info.platform) {
 			copy_text(info.platform, sizeof(info.platform), "custom");
 		}
+		copy_text(info.id, sizeof(info.id), obs_data_get_string(item, "id"));
+		copy_text(info.encoder, sizeof(info.encoder), obs_data_get_string(item, "encoder"));
+		/* Destinos de antes da aba Multistream não tinham "vertical": vale a plataforma. */
+		info.vertical = obs_data_has_user_value(item, "vertical")
+					? obs_data_get_bool(item, "vertical")
+					: pl_multistream_platform_vertical(info.platform);
+		info.width = (int)obs_data_get_int(item, "width");
+		info.height = (int)obs_data_get_int(item, "height");
 		struct dest *d = new_dest(&info);
 		da_push_back(dests, &d);
 		obs_data_release(item);
@@ -523,68 +577,60 @@ void pl_multistream_get_status(size_t index, struct pl_dest_status *status)
 	status->total_bytes = d->output ? obs_output_get_total_bytes(d->output) : 0;
 }
 
-void pl_multistream_add(const struct pl_dest_info *info)
+static bool same_info(const struct pl_dest_info *a, const struct pl_dest_info *b)
 {
-	struct dest *d = new_dest(info);
-	da_push_back(dests, &d);
-	save_dests();
-	if (d->info.enabled && obs_frontend_streaming_active()) {
-		dest_start(d);
-	}
+	return strcmp(a->name, b->name) == 0 && strcmp(a->platform, b->platform) == 0 &&
+	       strcmp(a->server, b->server) == 0 && strcmp(a->key, b->key) == 0 && a->enabled == b->enabled &&
+	       a->own_quality == b->own_quality && a->bitrate_kbps == b->bitrate_kbps && a->vertical == b->vertical &&
+	       strcmp(a->encoder, b->encoder) == 0 && a->width == b->width && a->height == b->height;
 }
 
-void pl_multistream_update(size_t index, const struct pl_dest_info *info)
+void pl_multistream_set_all(const struct pl_dest_info *infos, size_t count)
 {
-	if (index >= dests.num) {
-		return;
-	}
-	struct dest *d = dests.array[index];
-	bool was_running = d->output != NULL;
-	dest_release(d);
+	DARRAY(struct dest *) fresh;
+	da_init(fresh);
+	bool live = frontend_ready && obs_frontend_streaming_active();
 
-	struct dest *fresh = new_dest(info);
-	d->info = fresh->info;
-	bfree(fresh);
+	for (size_t i = 0; i < count; i++) {
+		struct dest *d = NULL;
+		for (size_t j = 0; j < dests.num; j++) {
+			if (*infos[i].id && strcmp(dests.array[j]->info.id, infos[i].id) == 0) {
+				d = dests.array[j];
+				da_erase(dests, j);
+				break;
+			}
+		}
+
+		if (d && same_info(&d->info, &infos[i])) {
+			/* Nada mudou: continua como está (no ar, se estava). */
+		} else if (d) {
+			bool was_running = d->output != NULL;
+			dest_release(d);
+			struct dest *changed = new_dest(&infos[i]);
+			d->info = changed->info;
+			bfree(changed);
+			if (d->info.enabled && (was_running || live)) {
+				dest_start(d);
+			} else {
+				set_state(d, d->info.enabled ? PL_DEST_WAITING : PL_DEST_OFF, NULL);
+			}
+		} else {
+			d = new_dest(&infos[i]);
+			if (d->info.enabled && live) {
+				dest_start(d);
+			}
+		}
+		da_push_back(fresh, &d);
+	}
+
+	/* Os que sobraram foram removidos. */
+	for (size_t j = 0; j < dests.num; j++) {
+		dest_release(dests.array[j]);
+		bfree(dests.array[j]);
+	}
+	da_free(dests);
+	dests.da = fresh.da;
 	save_dests();
-
-	if (d->info.enabled && (was_running || obs_frontend_streaming_active())) {
-		dest_start(d);
-	} else {
-		set_state(d, d->info.enabled ? PL_DEST_WAITING : PL_DEST_OFF, NULL);
-	}
-}
-
-void pl_multistream_remove(size_t index)
-{
-	if (index >= dests.num) {
-		return;
-	}
-	struct dest *d = dests.array[index];
-	dest_release(d);
-	da_erase(dests, index);
-	bfree(d);
-	save_dests();
-}
-
-void pl_multistream_set_enabled(size_t index, bool enabled)
-{
-	if (index >= dests.num) {
-		return;
-	}
-	struct dest *d = dests.array[index];
-	if (d->info.enabled == enabled) {
-		return;
-	}
-	d->info.enabled = enabled;
-	save_dests();
-
-	if (enabled && obs_frontend_streaming_active()) {
-		dest_start(d);
-	} else if (!enabled) {
-		dest_stop(d);
-	} else {
-		set_state(d, PL_DEST_WAITING, NULL);
-	}
 }
 
 bool pl_multistream_main_live(void)

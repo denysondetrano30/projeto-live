@@ -34,8 +34,13 @@ enum pl_dest_state {
 	PL_DEST_ERROR,
 };
 
-/* O que a pessoa configura em cada destino. `platform`: youtube, facebook, instagram, tiktok ou custom. */
+/*
+ * O que a pessoa configura em cada destino. `platform`: youtube, facebook, instagram, tiktok ou
+ * custom. `vertical`: recebe a tela vertical (senão, a imagem deitada).
+ */
 struct pl_dest_info {
+	/* Identificador fixo (para saber, ao salvar, quais destinos mudaram). */
+	char id[40];
 	char name[PL_DEST_NAME_MAX];
 	char platform[16];
 	char server[PL_DEST_TEXT_MAX];
@@ -45,6 +50,12 @@ struct pl_dest_info {
 	bool own_quality;
 	/* Só com own_quality. */
 	int bitrate_kbps;
+	bool vertical;
+	/* Codificador da qualidade própria ("" = o melhor do PC). */
+	char encoder[64];
+	/* Tamanho do vertical (0 = 1080x1920 da tela vertical; ex.: 720x1280). */
+	int width;
+	int height;
 };
 
 struct pl_dest_status {
@@ -62,11 +73,11 @@ void pl_multistream_unload(void);
 size_t pl_multistream_count(void);
 bool pl_multistream_get(size_t index, struct pl_dest_info *info);
 void pl_multistream_get_status(size_t index, struct pl_dest_status *status);
-void pl_multistream_add(const struct pl_dest_info *info);
-/* Se o destino estiver no ar, ele reinicia com as configurações novas. */
-void pl_multistream_update(size_t index, const struct pl_dest_info *info);
-void pl_multistream_remove(size_t index);
-void pl_multistream_set_enabled(size_t index, bool enabled);
+/*
+ * Troca a lista inteira (a aba Multistream das Configurações salva assim). Destinos iguais aos de
+ * antes continuam no ar sem piscar; os que mudaram reiniciam; os que saíram param.
+ */
+void pl_multistream_set_all(const struct pl_dest_info *infos, size_t count);
 
 /* A transmissão principal (Configurações > Transmissão) está no ar? */
 bool pl_multistream_main_live(void);
@@ -78,8 +89,11 @@ const char *pl_multistream_default_server(const char *platform);
 /* O melhor codificador H.264 do PC (placa de vídeo primeiro, x264 por último). */
 const char *pl_best_h264_encoder(void);
 
-/* Instagram e TikTok são verticais. */
+/* Instagram e TikTok são verticais (vale como padrão de destinos antigos e novos). */
 bool pl_multistream_platform_vertical(const char *platform);
+/* Codificadores H.264 que a pessoa pode escolher (sem os antigos e internos). */
+typedef void (*pl_encoder_cb)(void *param, const char *id, const char *name);
+void pl_multistream_enum_encoders(pl_encoder_cb callback, void *param);
 
 #ifdef __cplusplus
 }

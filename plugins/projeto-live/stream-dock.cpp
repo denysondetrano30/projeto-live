@@ -1,10 +1,17 @@
 /*
- * Projeto Live: painel "Transmissão".
+ * Projeto Live: aba "Multistream" nas Configurações do OBS e bolinhas na barra de baixo.
  *
- * Lista os destinos extras (YouTube, Facebook, Instagram, TikTok ou outro endereço RTMP), cada um
- * com uma caixa para ligar ou desligar e o estado (esperando, ligando, no ar, reconectando, erro).
- * Os destinos marcados entram no ar junto com o botão "Iniciar transmissão" do OBS. No alto fica
- * a soma do upload que a transmissão está usando. O trabalho de verdade fica em multistream.c.
+ * (O nome do arquivo ficou da época do painel "Transmissão", que saiu em 07/11.)
+ *
+ * - Aba "Multistream": aparece na janela de Configurações do OBS, depois de "Avançado", com
+ *   três partes: destinos deitados (YouTube, Facebook ou outro endereço), destinos verticais
+ *   (Instagram, TikTok ou outro endereço) e a gravação vertical (ligar, pasta e qualidade). As
+ *   mudanças só valem no "Aplicar" ou "OK", como o resto das Configurações.
+ * - Barra de baixo do OBS: uma bolinha por destino marcado enquanto a transmissão está no ar
+ *   (verde no ar, amarelo ligando ou reconectando, vermelho com erro); passar o mouse mostra o
+ *   detalhe e a velocidade.
+ *
+ * O trabalho de verdade fica em multistream.c e vertical-record.c.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,21 +24,30 @@
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 
+#include <QAbstractButton>
+#include <QApplication>
 #include <QCheckBox>
-#include <QDateTime>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QEvent>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QFrame>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QMainWindow>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScrollArea>
+#include <QStackedWidget>
+#include <QStatusBar>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -39,9 +55,13 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <map>
+#include <string>
 #include <vector>
 
 #include "multistream.h"
+#include "vertical-record.h"
 
 namespace {
 
@@ -50,18 +70,36 @@ QString moduleText(const char *key)
 	return QString::fromUtf8(obs_module_text(key));
 }
 
+QString mbps(double kbps)
+{
+	return QString::number(kbps / 1000.0, 'f', 1);
+}
+
+void copyText(char *out, size_t size, const QString &text)
+{
+	QByteArray bytes = text.toUtf8();
+	size_t length = std::min((size_t)bytes.size(), size - 1);
+	memcpy(out, bytes.constData(), length);
+	out[length] = 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Plataformas                                                                */
+
 struct Platform {
 	const char *id;
 	const char *textKey;
 	const char *helpKey;
+	bool horizontal;
+	bool vertical;
 };
 
 const Platform platforms[] = {
-	{"youtube", "Stream.Platform.YouTube", "Stream.Help.YouTube"},
-	{"facebook", "Stream.Platform.Facebook", "Stream.Help.Facebook"},
-	{"instagram", "Stream.Platform.Instagram", "Stream.Help.Instagram"},
-	{"tiktok", "Stream.Platform.TikTok", "Stream.Help.TikTok"},
-	{"custom", "Stream.Platform.Custom", "Stream.Help.Custom"},
+	{"youtube", "Stream.Platform.YouTube", "Stream.Help.YouTube", true, false},
+	{"facebook", "Stream.Platform.Facebook", "Stream.Help.Facebook", true, false},
+	{"instagram", "Stream.Platform.Instagram", "Stream.Help.Instagram", false, true},
+	{"tiktok", "Stream.Platform.TikTok", "Stream.Help.TikTok", false, true},
+	{"custom", "Stream.Platform.Custom", "Stream.Help.Custom", true, true},
 };
 
 const Platform &findPlatform(const char *id)
@@ -74,24 +112,23 @@ const Platform &findPlatform(const char *id)
 	return platforms[4];
 }
 
-QString mbps(double kbps)
-{
-	return QString::number(kbps / 1000.0, 'f', 1);
-}
+/* ------------------------------------------------------------------------- */
+/* Janela para adicionar ou mudar um destino                                  */
 
-/* Janela para adicionar ou mudar um destino. */
 class DestinationDialog : public QDialog {
 public:
-	DestinationDialog(QWidget *parent, const pl_dest_info &start, bool editing) : QDialog(parent)
+	DestinationDialog(QWidget *parent, const pl_dest_info &start, bool editing) : QDialog(parent), original(start)
 	{
 		setWindowTitle(moduleText(editing ? "Stream.EditTitle" : "Stream.AddTitle"));
-		setMinimumWidth(460);
+		setMinimumWidth(480);
 		auto *layout = new QVBoxLayout(this);
 		auto *form = new QFormLayout();
 
 		platform = new QComboBox(this);
 		for (const Platform &item : platforms) {
-			platform->addItem(moduleText(item.textKey), QString::fromUtf8(item.id));
+			if (start.vertical ? item.vertical : item.horizontal) {
+				platform->addItem(moduleText(item.textKey), QString::fromUtf8(item.id));
+			}
 		}
 		name = new QLineEdit(this);
 		name->setMaxLength(PL_DEST_NAME_MAX - 1);
@@ -116,28 +153,50 @@ public:
 		help->setTextFormat(Qt::PlainText);
 		layout->addWidget(help);
 
-		auto *qualityFrame = new QFrame(this);
-		qualityFrame->setFrameShape(QFrame::StyledPanel);
-		auto *qualityLayout = new QVBoxLayout(qualityFrame);
-		qualityLayout->addWidget(new QLabel(moduleText("Stream.Quality"), qualityFrame));
-		sameQuality = new QRadioButton(moduleText("Stream.Quality.Same"), qualityFrame);
-		ownQuality = new QRadioButton(moduleText("Stream.Quality.Own"), qualityFrame);
-		bitrate = new QDoubleSpinBox(qualityFrame);
+		/* Qualidade: a mesma da principal ou própria (codificador e Mbps). */
+		auto *qualityBox = new QGroupBox(moduleText("Stream.Quality"), this);
+		auto *qualityLayout = new QVBoxLayout(qualityBox);
+		sameQuality = new QRadioButton(moduleText(start.vertical ? "Multistream.Quality.SameVertical"
+									 : "Stream.Quality.Same"),
+					       qualityBox);
+		ownQuality = new QRadioButton(moduleText("Stream.Quality.Own"), qualityBox);
+		qualityLayout->addWidget(sameQuality);
+		qualityLayout->addWidget(ownQuality);
+
+		auto *ownForm = new QFormLayout();
+		bitrate = new QDoubleSpinBox(qualityBox);
 		bitrate->setRange(0.5, 50.0);
 		bitrate->setSingleStep(0.5);
 		bitrate->setDecimals(1);
 		bitrate->setSuffix(" Mbps");
-		auto *ownLine = new QHBoxLayout();
-		ownLine->addWidget(ownQuality);
-		ownLine->addWidget(bitrate);
-		ownLine->addStretch(1);
-		qualityLayout->addWidget(sameQuality);
-		qualityLayout->addLayout(ownLine);
-		auto *qualityHelp = new QLabel(moduleText("Stream.Quality.Help"), qualityFrame);
+		encoder = new QComboBox(qualityBox);
+		encoder->addItem(moduleText("Multistream.Encoder.Auto"), QString());
+		pl_multistream_enum_encoders(
+			[](void *param, const char *id, const char *label) {
+				static_cast<QComboBox *>(param)->addItem(QString::fromUtf8(label),
+									 QString::fromUtf8(id));
+			},
+			encoder);
+		ownForm->addRow(moduleText("Multistream.Bitrate"), bitrate);
+		ownForm->addRow(moduleText("Multistream.Encoder"), encoder);
+		qualityLayout->addLayout(ownForm);
+
+		size = new QComboBox(qualityBox);
+		size->addItem(moduleText("Multistream.Size.Full"), 1080);
+		size->addItem(moduleText("Multistream.Size.Small"), 720);
+		if (start.vertical) {
+			auto *sizeForm = new QFormLayout();
+			sizeForm->addRow(moduleText("Multistream.Size"), size);
+			qualityLayout->addLayout(sizeForm);
+		} else {
+			size->hide();
+		}
+
+		auto *qualityHelp = new QLabel(moduleText("Stream.Quality.Help"), qualityBox);
 		qualityHelp->setWordWrap(true);
 		qualityLayout->addWidget(qualityHelp);
-		layout->addWidget(qualityFrame);
-		connect(ownQuality, &QRadioButton::toggled, bitrate, &QWidget::setEnabled);
+		layout->addWidget(qualityBox);
+		connect(ownQuality, &QRadioButton::toggled, this, [this](bool) { updateQuality(); });
 
 		auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
 		connect(buttons, &QDialogButtonBox::accepted, this, [this]() { tryAccept(); });
@@ -156,8 +215,11 @@ public:
 		}
 		sameQuality->setChecked(!start.own_quality);
 		ownQuality->setChecked(start.own_quality);
-		bitrate->setValue(start.bitrate_kbps > 0 ? start.bitrate_kbps / 1000.0 : 4.5);
-		bitrate->setEnabled(start.own_quality);
+		bitrate->setValue(start.bitrate_kbps > 0 ? start.bitrate_kbps / 1000.0 : (start.vertical ? 4.0 : 4.5));
+		int encoderIndex = encoder->findData(QString::fromUtf8(start.encoder));
+		encoder->setCurrentIndex(encoderIndex < 0 ? 0 : encoderIndex);
+		size->setCurrentIndex(start.width > 0 && start.width < 1080 ? 1 : 0);
+		updateQuality();
 		updateHelp();
 
 		connect(platform, &QComboBox::currentIndexChanged, this, [this](int) {
@@ -169,24 +231,31 @@ public:
 
 	pl_dest_info result() const
 	{
-		pl_dest_info info = {};
-		copy(info.platform, sizeof(info.platform), platform->currentData().toString());
-		copy(info.name, sizeof(info.name), name->text().trimmed());
-		copy(info.server, sizeof(info.server), server->text().trimmed());
-		copy(info.key, sizeof(info.key), key->text().trimmed());
-		info.enabled = true;
+		pl_dest_info info = original;
+		copyText(info.platform, sizeof(info.platform), platform->currentData().toString());
+		copyText(info.name, sizeof(info.name), name->text().trimmed());
+		copyText(info.server, sizeof(info.server), server->text().trimmed());
+		copyText(info.key, sizeof(info.key), key->text().trimmed());
 		info.own_quality = ownQuality->isChecked();
 		info.bitrate_kbps = (int)(bitrate->value() * 1000.0 + 0.5);
+		copyText(info.encoder, sizeof(info.encoder), encoder->currentData().toString());
+		if (info.vertical && size->currentData().toInt() == 720) {
+			info.width = 720;
+			info.height = 1280;
+		} else {
+			info.width = 0;
+			info.height = 0;
+		}
 		return info;
 	}
 
 private:
-	static void copy(char *out, size_t size, const QString &text)
+	void updateQuality()
 	{
-		QByteArray bytes = text.toUtf8();
-		size_t length = std::min((size_t)bytes.size(), size - 1);
-		memcpy(out, bytes.constData(), length);
-		out[length] = 0;
+		/* O vertical sempre tem codificador próprio: escolher o codificador vale nos dois casos. */
+		bool own = ownQuality->isChecked();
+		bitrate->setEnabled(own);
+		encoder->setEnabled(own || original.vertical);
 	}
 
 	/* Ao trocar de plataforma, troca o nome e o endereço se ainda eram os padrões da anterior. */
@@ -213,11 +282,7 @@ private:
 	void updateHelp()
 	{
 		QByteArray id = platform->currentData().toString().toUtf8();
-		QString text = moduleText(findPlatform(id.constData()).helpKey);
-		if (pl_multistream_platform_vertical(id.constData())) {
-			text += "\n\n" + moduleText("Stream.Help.VerticalSoon");
-		}
-		help->setText(text);
+		help->setText(moduleText(findPlatform(id.constData()).helpKey));
 	}
 
 	void tryAccept()
@@ -230,6 +295,7 @@ private:
 		accept();
 	}
 
+	pl_dest_info original;
 	QComboBox *platform = nullptr;
 	QLineEdit *name = nullptr;
 	QLineEdit *server = nullptr;
@@ -238,297 +304,431 @@ private:
 	QRadioButton *sameQuality = nullptr;
 	QRadioButton *ownQuality = nullptr;
 	QDoubleSpinBox *bitrate = nullptr;
+	QComboBox *encoder = nullptr;
+	QComboBox *size = nullptr;
 	QString lastPlatform;
 };
 
-struct DestinationRow {
-	QCheckBox *enabled = nullptr;
-	QLabel *details = nullptr;
-	QLabel *status = nullptr;
-	uint64_t lastBytes = 0;
-	qint64 lastMs = 0;
-	double kbps = 0.0;
-};
+/* ------------------------------------------------------------------------- */
+/* Aba "Multistream"                                                          */
 
-class StreamDock : public QWidget {
+/* Uma das duas listas (deitados ou verticais), mexendo na cópia de trabalho da aba. */
+class DestinationsBox : public QGroupBox {
 public:
-	explicit StreamDock(QWidget *parent) : QWidget(parent)
+	DestinationsBox(QWidget *parent, const QString &title, bool isVertical, std::vector<pl_dest_info> &list,
+			std::function<void()> onChange)
+		: QGroupBox(title, parent),
+		  vertical(isVertical),
+		  dests(list),
+		  changed(std::move(onChange))
 	{
-		auto *outer = new QVBoxLayout(this);
-		outer->setContentsMargins(4, 4, 4, 4);
-
-		mainStatus = new QLabel(this);
-		mainStatus->setWordWrap(true);
-		mainStatus->setTextFormat(Qt::RichText);
-		outer->addWidget(mainStatus);
-
-		total = new QLabel(this);
-		total->setWordWrap(true);
-		total->setTextFormat(Qt::RichText);
-		outer->addWidget(total);
-
-		auto *scroll = new QScrollArea(this);
-		scroll->setWidgetResizable(true);
-		scroll->setFrameShape(QFrame::NoFrame);
-		outer->addWidget(scroll, 1);
-
-		auto *content = new QWidget(scroll);
-		rowsLayout = new QVBoxLayout(content);
-		rowsLayout->setContentsMargins(0, 0, 0, 0);
-		rowsLayout->setSpacing(6);
-		scroll->setWidget(content);
-
-		auto *add = new QPushButton(moduleText("Stream.Add"), this);
-		add->setMinimumHeight(32);
-		connect(add, &QPushButton::clicked, this, [this]() { addDestination(); });
-		outer->addWidget(add);
-
-		auto *help = new QLabel(moduleText("Stream.DockHelp"), this);
-		help->setWordWrap(true);
-		help->setStyleSheet("color: #8a8a8a;");
-		outer->addWidget(help);
-
-		rebuild();
-		connect(&timer, &QTimer::timeout, this, [this]() { refresh(); });
-		timer.start(1000);
-	}
-
-	void stop() { timer.stop(); }
-
-private:
-	void clearRows()
-	{
-		rows.clear();
-		while (QLayoutItem *item = rowsLayout->takeAt(0)) {
-			if (item->widget()) {
-				item->widget()->hide();
-				item->widget()->deleteLater();
+		auto *layout = new QVBoxLayout(this);
+		view = new QListWidget(this);
+		view->setMinimumHeight(110);
+		layout->addWidget(view);
+		connect(view, &QListWidget::itemChanged, this, [this](QListWidgetItem *item) {
+			if (rebuilding) {
+				return;
 			}
-			delete item;
-		}
+			int index = indexOfRow(view->row(item));
+			if (index >= 0) {
+				dests[index].enabled = item->checkState() == Qt::Checked;
+				changed();
+			}
+		});
+		connect(view, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) { edit(); });
+
+		auto *buttons = new QHBoxLayout();
+		auto *add = new QPushButton(moduleText("Stream.Add"), this);
+		auto *editButton = new QPushButton(moduleText("Stream.Edit"), this);
+		auto *remove = new QPushButton(moduleText("Stream.Remove"), this);
+		connect(add, &QPushButton::clicked, this, [this]() { addDestination(); });
+		connect(editButton, &QPushButton::clicked, this, [this]() { edit(); });
+		connect(remove, &QPushButton::clicked, this, [this]() { removeDestination(); });
+		buttons->addWidget(add);
+		buttons->addWidget(editButton);
+		buttons->addWidget(remove);
+		buttons->addStretch(1);
+		layout->addLayout(buttons);
+		rebuild();
 	}
 
 	void rebuild()
 	{
-		clearRows();
-		size_t count = pl_multistream_count();
-		if (count == 0) {
-			auto *empty = new QLabel(moduleText("Stream.Empty"));
-			empty->setWordWrap(true);
-			rowsLayout->addWidget(empty);
+		rebuilding = true;
+		view->clear();
+		rows.clear();
+		for (size_t i = 0; i < dests.size(); i++) {
+			const pl_dest_info &info = dests[i];
+			if (info.vertical != vertical) {
+				continue;
+			}
+			QString text = QString::fromUtf8(info.name) + QString::fromUtf8("  —  ") +
+				       moduleText(findPlatform(info.platform).textKey);
+			if (info.own_quality) {
+				text += QString::fromUtf8(" · ") +
+					moduleText("Stream.Row.Own").arg(mbps(info.bitrate_kbps));
+			} else if (!vertical) {
+				text += QString::fromUtf8(" · ") + moduleText("Stream.Row.Same");
+			}
+			if (vertical && info.width > 0 && info.width < 1080) {
+				text += QString::fromUtf8(" · 720x1280");
+			}
+			auto *item = new QListWidgetItem(text);
+			item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+			item->setCheckState(info.enabled ? Qt::Checked : Qt::Unchecked);
+			view->addItem(item);
+			rows.push_back((int)i);
 		}
-		for (size_t i = 0; i < count; i++) {
-			addRow(i);
+		if (rows.empty()) {
+			auto *item = new QListWidgetItem(moduleText("Multistream.EmptyList"));
+			item->setFlags(Qt::NoItemFlags);
+			view->addItem(item);
 		}
-		rowsLayout->addStretch(1);
-		refresh();
+		rebuilding = false;
 	}
 
-	void addRow(size_t index)
-	{
-		pl_dest_info info;
-		if (!pl_multistream_get(index, &info)) {
-			return;
-		}
-
-		auto *frame = new QFrame();
-		frame->setFrameShape(QFrame::StyledPanel);
-		auto *layout = new QVBoxLayout(frame);
-
-		DestinationRow row;
-		row.enabled = new QCheckBox(QString::fromUtf8(info.name), frame);
-		QFont bold = row.enabled->font();
-		bold.setBold(true);
-		row.enabled->setFont(bold);
-		row.enabled->setChecked(info.enabled);
-		connect(row.enabled, &QCheckBox::toggled, this, [this, index](bool on) {
-			pl_multistream_set_enabled(index, on);
-			refresh();
-		});
-		layout->addWidget(row.enabled);
-
-		row.details = new QLabel(frame);
-		row.details->setWordWrap(true);
-		row.details->setStyleSheet("color: #8a8a8a;");
-		QString details = moduleText(findPlatform(info.platform).textKey) + " · ";
-		details += info.own_quality ? moduleText("Stream.Row.Own").arg(mbps(info.bitrate_kbps))
-					    : moduleText("Stream.Row.Same");
-		if (pl_multistream_platform_vertical(info.platform)) {
-			details += " · " + moduleText("Stream.Row.VerticalSoon");
-		}
-		row.details->setText(details);
-		layout->addWidget(row.details);
-
-		row.status = new QLabel(frame);
-		row.status->setWordWrap(true);
-		row.status->setTextFormat(Qt::RichText);
-		layout->addWidget(row.status);
-
-		auto *buttons = new QHBoxLayout();
-		auto *edit = new QPushButton(moduleText("Stream.Edit"), frame);
-		auto *remove = new QPushButton(moduleText("Stream.Remove"), frame);
-		connect(edit, &QPushButton::clicked, this, [this, index]() { editDestination(index); });
-		connect(remove, &QPushButton::clicked, this, [this, index]() { removeDestination(index); });
-		buttons->addWidget(edit);
-		buttons->addWidget(remove);
-		buttons->addStretch(1);
-		layout->addLayout(buttons);
-
-		rowsLayout->addWidget(frame);
-		rows.push_back(row);
-	}
+private:
+	int indexOfRow(int row) const { return row >= 0 && row < (int)rows.size() ? rows[row] : -1; }
 
 	void addDestination()
 	{
 		pl_dest_info start = {};
-		snprintf(start.platform, sizeof(start.platform), "youtube");
-		start.bitrate_kbps = 4500;
+		snprintf(start.platform, sizeof(start.platform), "%s", vertical ? "instagram" : "youtube");
+		start.vertical = vertical;
+		start.enabled = true;
+		start.bitrate_kbps = vertical ? 4000 : 4500;
 		DestinationDialog dialog(this, start, false);
 		if (dialog.exec() == QDialog::Accepted) {
-			pl_dest_info info = dialog.result();
-			pl_multistream_add(&info);
+			dests.push_back(dialog.result());
 			rebuild();
+			changed();
 		}
 	}
 
-	void editDestination(size_t index)
+	void edit()
 	{
-		pl_dest_info start;
-		if (!pl_multistream_get(index, &start)) {
+		int index = indexOfRow(view->currentRow());
+		if (index < 0) {
 			return;
 		}
-		DestinationDialog dialog(this, start, true);
+		DestinationDialog dialog(this, dests[index], true);
 		if (dialog.exec() == QDialog::Accepted) {
-			pl_dest_info info = dialog.result();
-			info.enabled = start.enabled;
-			pl_multistream_update(index, &info);
+			dests[index] = dialog.result();
 			rebuild();
+			changed();
 		}
 	}
 
-	void removeDestination(size_t index)
+	void removeDestination()
 	{
-		pl_dest_info info;
-		if (!pl_multistream_get(index, &info)) {
+		int index = indexOfRow(view->currentRow());
+		if (index < 0) {
 			return;
 		}
-		QString question = moduleText("Stream.RemoveQuestion").arg(QString::fromUtf8(info.name));
+		QString question = moduleText("Stream.RemoveQuestion").arg(QString::fromUtf8(dests[index].name));
 		if (QMessageBox::question(this, moduleText("Stream.Remove"), question) == QMessageBox::Yes) {
-			pl_multistream_remove(index);
+			dests.erase(dests.begin() + index);
 			rebuild();
+			changed();
 		}
 	}
 
-	QString stateText(const pl_dest_status &status, double kbps)
+	bool vertical;
+	std::vector<pl_dest_info> &dests;
+	std::function<void()> changed;
+	QListWidget *view = nullptr;
+	std::vector<int> rows;
+	bool rebuilding = false;
+};
+
+class MultistreamPage : public QScrollArea {
+public:
+	MultistreamPage(QWidget *parent, std::function<void()> onChange) : QScrollArea(parent), changed(onChange)
 	{
-		switch (status.state) {
-		case PL_DEST_OFF:
-			return "<span style='color:#8a8a8a'>" + moduleText("Stream.State.Off") + "</span>";
-		case PL_DEST_WAITING:
-			return "<span style='color:#8a8a8a'>" + moduleText("Stream.State.Waiting") + "</span>";
-		case PL_DEST_CONNECTING:
-			return "<span style='color:#e0a800;font-weight:bold'>" + moduleText("Stream.State.Connecting") +
-			       "</span>";
-		case PL_DEST_LIVE:
-			return "<span style='color:#ffffff;background-color:#d62828;font-weight:bold'>&nbsp;" +
-			       moduleText("Director.OnAir") + "&nbsp;</span> " + mbps(kbps) + " Mbps";
-		case PL_DEST_RECONNECTING:
-			return "<span style='color:#e0a800;font-weight:bold'>" +
-			       moduleText("Stream.State.Reconnecting") + "</span>";
-		case PL_DEST_ERROR:
-			return "<span style='color:#e5484d'>" + QString::fromUtf8(status.error).toHtmlEscaped() +
-			       "</span>";
+		setWidgetResizable(true);
+		setFrameShape(QFrame::NoFrame);
+		auto *content = new QWidget(this);
+		auto *layout = new QVBoxLayout(content);
+
+		reload();
+
+		auto *help = new QLabel(moduleText("Multistream.Help"), content);
+		help->setWordWrap(true);
+		layout->addWidget(help);
+
+		horizontal = new DestinationsBox(content, moduleText("Multistream.Horizontal"), false, dests, changed);
+		vertical = new DestinationsBox(content, moduleText("Multistream.Vertical"), true, dests, changed);
+		layout->addWidget(horizontal);
+		layout->addWidget(vertical);
+
+		/* Gravação vertical. */
+		auto *record = new QGroupBox(moduleText("Multistream.Record"), content);
+		auto *recordForm = new QFormLayout(record);
+		recordOn = new QCheckBox(moduleText("Multistream.Record.Enable"), record);
+		recordOn->setChecked(pl_vertical_pref("record"));
+		folder = new QLineEdit(QString::fromUtf8(pl_vertical_pref_string("record_folder")), record);
+		folder->setPlaceholderText(moduleText("Multistream.Record.FolderHint"));
+		auto *browse = new QPushButton(moduleText("Multistream.Record.Browse"), record);
+		auto *folderLine = new QHBoxLayout();
+		folderLine->addWidget(folder, 1);
+		folderLine->addWidget(browse);
+		recordKbps = new QDoubleSpinBox(record);
+		recordKbps->setRange(1.0, 50.0);
+		recordKbps->setSingleStep(1.0);
+		recordKbps->setDecimals(1);
+		recordKbps->setSuffix(" Mbps");
+		int kbps = pl_vertical_pref_int("record_kbps");
+		recordKbps->setValue(kbps > 0 ? kbps / 1000.0 : 10.0);
+		recordForm->addRow(recordOn);
+		recordForm->addRow(moduleText("Multistream.Record.Folder"), folderLine);
+		recordForm->addRow(moduleText("Multistream.Record.Quality"), recordKbps);
+		layout->addWidget(record);
+		layout->addStretch(1);
+		setWidget(content);
+
+		connect(browse, &QPushButton::clicked, this, [this]() {
+			QString dir = QFileDialog::getExistingDirectory(this, moduleText("Multistream.Record.Browse"),
+									folder->text());
+			if (!dir.isEmpty()) {
+				folder->setText(dir);
+				changed();
+			}
+		});
+		connect(recordOn, &QCheckBox::toggled, this, [this](bool) { changed(); });
+		connect(folder, &QLineEdit::textEdited, this, [this](const QString &) { changed(); });
+		connect(recordKbps, &QDoubleSpinBox::valueChanged, this, [this](double) { changed(); });
+	}
+
+	/* "Aplicar" ou "OK" nas Configurações. */
+	void commit()
+	{
+		pl_multistream_set_all(dests.data(), dests.size());
+		pl_vertical_set_pref("record", recordOn->isChecked());
+		QByteArray path = folder->text().trimmed().toUtf8();
+		pl_vertical_set_pref_string("record_folder", path.constData());
+		pl_vertical_set_pref_int("record_kbps", (int)(recordKbps->value() * 1000.0 + 0.5));
+
+		/* Os destinos novos ganharam identificador ao salvar: relê para o próximo "Aplicar". */
+		reload();
+		horizontal->rebuild();
+		vertical->rebuild();
+	}
+
+private:
+	void reload()
+	{
+		dests.clear();
+		for (size_t i = 0; i < pl_multistream_count(); i++) {
+			pl_dest_info info;
+			if (pl_multistream_get(i, &info)) {
+				dests.push_back(info);
+			}
 		}
-		return QString();
+	}
+
+	std::function<void()> changed;
+	std::vector<pl_dest_info> dests;
+	DestinationsBox *horizontal = nullptr;
+	DestinationsBox *vertical = nullptr;
+	QCheckBox *recordOn = nullptr;
+	QLineEdit *folder = nullptr;
+	QDoubleSpinBox *recordKbps = nullptr;
+};
+
+/* Põe a aba na janela de Configurações do OBS quando ela abre. */
+class SettingsInjector : public QObject {
+public:
+	using QObject::QObject;
+
+protected:
+	bool eventFilter(QObject *object, QEvent *event) override
+	{
+		if (event->type() == QEvent::Show && object->objectName() == QStringLiteral("OBSBasicSettings") &&
+		    !object->property("projetoLiveTab").toBool()) {
+			if (auto *dialog = qobject_cast<QDialog *>(object)) {
+				dialog->setProperty("projetoLiveTab", true);
+				inject(dialog);
+			}
+		}
+		return QObject::eventFilter(object, event);
+	}
+
+private:
+	static void inject(QDialog *dialog)
+	{
+		auto *list = dialog->findChild<QListWidget *>("listWidget");
+		auto *pages = dialog->findChild<QStackedWidget *>("settingsPages");
+		auto *buttons = dialog->findChild<QDialogButtonBox *>("buttonBox");
+		if (!list || !pages || !buttons) {
+			blog(LOG_WARNING, "[projeto-live] não achei as partes da janela de Configurações");
+			return;
+		}
+
+		auto enableApply = [buttons]() {
+			if (QAbstractButton *apply = buttons->button(QDialogButtonBox::Apply)) {
+				apply->setEnabled(true);
+			}
+		};
+		auto *page = new MultistreamPage(pages, enableApply);
+		pages->addWidget(page);
+
+		auto *item = new QListWidgetItem(moduleText("Multistream.Tab"));
+		if (list->count() > 2 && list->item(2)) {
+			item->setIcon(list->item(2)->icon());
+		}
+		list->addItem(item);
+		int row = list->count() - 1;
+		QObject::connect(list, &QListWidget::currentRowChanged, page, [pages, page, row](int current) {
+			if (current == row) {
+				pages->setCurrentWidget(page);
+			}
+		});
+
+		QObject::connect(buttons, &QDialogButtonBox::clicked, page, [buttons, page](QAbstractButton *button) {
+			QDialogButtonBox::ButtonRole role = buttons->buttonRole(button);
+			if (role == QDialogButtonBox::ApplyRole || role == QDialogButtonBox::AcceptRole) {
+				page->commit();
+			}
+		});
+	}
+};
+
+/* ------------------------------------------------------------------------- */
+/* Bolinhas na barra de baixo                                                 */
+
+class StatusDots : public QWidget {
+public:
+	explicit StatusDots(QWidget *parent) : QWidget(parent)
+	{
+		label = new QLabel(this);
+		label->setTextFormat(Qt::RichText);
+		auto *layout = new QHBoxLayout(this);
+		layout->setContentsMargins(6, 0, 6, 0);
+		layout->addWidget(label);
+		hide();
 	}
 
 	void refresh()
 	{
 		bool live = pl_multistream_main_live();
-		int mainKbps = pl_multistream_main_kbps();
+		QStringList parts;
+		QStringList tips;
+		qint64 now = QDateTime::currentMSecsSinceEpoch();
 
-		mainStatus->setText(moduleText(live ? "Stream.Main.Live" : "Stream.Main.Off"));
-
-		double extras = 0.0;
-		int sameCount = 0;
-		int ownCount = 0;
-		for (size_t i = 0; i < rows.size(); i++) {
+		for (size_t i = 0; i < pl_multistream_count(); i++) {
 			pl_dest_info info;
 			pl_dest_status status;
-			if (!pl_multistream_get(i, &info)) {
+			if (!pl_multistream_get(i, &info) || !info.enabled) {
 				continue;
 			}
 			pl_multistream_get_status(i, &status);
+			if (!live && (status.state == PL_DEST_OFF || status.state == PL_DEST_WAITING)) {
+				continue;
+			}
 
 			/* Velocidade real: bytes enviados desde a última olhada. */
-			DestinationRow &row = rows[i];
-			qint64 now = QDateTime::currentMSecsSinceEpoch();
-			if (status.total_bytes < row.lastBytes || !status.total_bytes) {
-				row.kbps = 0.0;
-			} else if (row.lastMs && now - row.lastMs >= 500) {
+			Speed &speed = speeds[std::string(info.id)];
+			if (status.total_bytes < speed.bytes || !status.total_bytes) {
+				speed.kbps = 0.0;
+			} else if (speed.ms && now - speed.ms >= 500) {
 				double kbps =
-					(double)(status.total_bytes - row.lastBytes) * 8.0 / (double)(now - row.lastMs);
-				row.kbps = row.kbps > 0.0 ? row.kbps * 0.6 + kbps * 0.4 : kbps;
+					(double)(status.total_bytes - speed.bytes) * 8.0 / (double)(now - speed.ms);
+				speed.kbps = speed.kbps > 0.0 ? speed.kbps * 0.6 + kbps * 0.4 : kbps;
 			}
-			if (!row.lastMs || now - row.lastMs >= 500 || status.total_bytes < row.lastBytes) {
-				row.lastBytes = status.total_bytes;
-				row.lastMs = now;
+			if (!speed.ms || now - speed.ms >= 500 || status.total_bytes < speed.bytes) {
+				speed.bytes = status.total_bytes;
+				speed.ms = now;
 			}
-			row.status->setText(stateText(status, row.kbps));
 
-			if (info.enabled) {
-				if (info.own_quality) {
-					extras += info.bitrate_kbps;
-					ownCount++;
-				} else {
-					sameCount++;
-				}
+			QString color = QStringLiteral("#8a8a8a");
+			QString state = moduleText("Stream.State.Waiting");
+			switch (status.state) {
+			case PL_DEST_LIVE:
+				color = QStringLiteral("#3fb950");
+				state = moduleText("Director.OnAir") + QString::fromUtf8(" · ") + mbps(speed.kbps) +
+					QStringLiteral(" Mbps");
+				break;
+			case PL_DEST_CONNECTING:
+				color = QStringLiteral("#e0a800");
+				state = moduleText("Stream.State.Connecting");
+				break;
+			case PL_DEST_RECONNECTING:
+				color = QStringLiteral("#e0a800");
+				state = moduleText("Stream.State.Reconnecting");
+				break;
+			case PL_DEST_ERROR:
+				color = QStringLiteral("#e5484d");
+				state = QString::fromUtf8(status.error);
+				break;
+			default:
+				break;
 			}
+			QString name = QString::fromUtf8(info.name).toHtmlEscaped();
+			parts.append(QStringLiteral("<span style='color:%1'>&#9679;</span> %2").arg(color, name));
+			tips.append(QString::fromUtf8(info.name) + QStringLiteral(": ") + state);
 		}
 
-		/* Soma: a principal, os destinos com o mesmo vídeo dela, os de qualidade própria e o som
-		 * (160 kbps) de cada um. */
-		int destinations = 1 + sameCount + ownCount;
-		double totalKbps = (double)mainKbps * (1 + sameCount) + extras + 160.0 * destinations;
-
-		if (mainKbps > 0) {
-			total->setText(moduleText("Stream.Total").arg(mbps(totalKbps)).arg(destinations));
-		} else {
-			total->setText(moduleText("Stream.TotalUnknown").arg(destinations));
+		if (parts.isEmpty()) {
+			hide();
+			return;
 		}
+		label->setText(parts.join(QStringLiteral("&nbsp;&nbsp;")));
+		setToolTip(tips.join(QStringLiteral("\n")));
+		show();
 	}
 
-	QLabel *mainStatus = nullptr;
-	QLabel *total = nullptr;
-	QVBoxLayout *rowsLayout = nullptr;
-	std::vector<DestinationRow> rows;
-	QTimer timer;
+private:
+	struct Speed {
+		uint64_t bytes = 0;
+		qint64 ms = 0;
+		double kbps = 0.0;
+	};
+
+	QLabel *label = nullptr;
+	std::map<std::string, Speed> speeds;
 };
 
-StreamDock *dock = nullptr;
+SettingsInjector *injector = nullptr;
+StatusDots *dots = nullptr;
+QTimer *timer = nullptr;
 
 void frontendEvent(enum obs_frontend_event event, void *)
 {
-	if (event == OBS_FRONTEND_EVENT_EXIT && dock) {
-		dock->stop();
+	if (event == OBS_FRONTEND_EVENT_EXIT) {
+		if (timer) {
+			timer->stop();
+		}
+		if (injector) {
+			qApp->removeEventFilter(injector);
+		}
 	}
 }
 
 } // namespace
 
-void pl_stream_dock_load(void)
+void pl_multistream_ui_load(void)
 {
-	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	auto *mainWindow = static_cast<QMainWindow *>(obs_frontend_get_main_window());
 	if (!mainWindow) {
 		return;
 	}
 
-	dock = new StreamDock(mainWindow);
-	if (!obs_frontend_add_dock_by_id("projeto-live-transmissao", obs_module_text("Stream.Title"), dock)) {
-		delete dock;
-		dock = nullptr;
-		return;
+	injector = new SettingsInjector(mainWindow);
+	qApp->installEventFilter(injector);
+
+	if (QStatusBar *bar = mainWindow->statusBar()) {
+		dots = new StatusDots(bar);
+		bar->insertPermanentWidget(0, dots);
+		QObject::connect(dots, &QObject::destroyed, []() { dots = nullptr; });
 	}
-	QObject::connect(dock, &QObject::destroyed, []() { dock = nullptr; });
+
+	timer = new QTimer(mainWindow);
+	QObject::connect(timer, &QTimer::timeout, []() {
+		if (dots) {
+			dots->refresh();
+		}
+	});
+	timer->start(1000);
 	obs_frontend_add_event_callback(frontendEvent, nullptr);
 }
