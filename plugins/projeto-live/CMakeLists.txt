@@ -17,6 +17,8 @@ target_sources(
     intercom-stream.h
     intercom.c
     intercom.h
+    multistream.c
+    multistream.h
     net-info.c
     net-info.h
     phone-source.c
@@ -28,6 +30,8 @@ target_sources(
     qrcodegen.h
     sha256.c
     sha256.h
+    stream-dock.cpp
+    stream-dock.h
     usb-relay.c
     usb-relay.h
 )

@@ -11,6 +11,8 @@
 
 #include "director-dock.h"
 #include "intercom.h"
+#include "multistream.h"
+#include "stream-dock.h"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("projeto-live", "en-US")
@@ -27,10 +29,13 @@ bool obs_module_load(void)
 	pl_intercom_start();
 	obs_register_source(&projeto_live_phone_source);
 	pl_director_dock_load();
+	pl_multistream_load();
+	pl_stream_dock_load();
 	return true;
 }
 
 void obs_module_unload(void)
 {
+	pl_multistream_unload();
 	pl_intercom_stop();
 }
