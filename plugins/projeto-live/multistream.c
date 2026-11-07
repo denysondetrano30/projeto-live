@@ -13,8 +13,8 @@
  * Se um destino cair, só ele tenta voltar sozinho (até 20 vezes, a cada 10 s); os outros seguem.
  * Os destinos ficam em destinos.json, na pasta de configuração do plugin.
  *
- * Instagram e TikTok são verticais: enquanto a tela vertical não existe (Etapa 5b), eles recebem
- * a imagem deitada (o Instagram corta as laterais sozinho).
+ * Instagram e TikTok recebem a tela vertical (vertical.c), sempre com um codificador próprio
+ * (na "mesma qualidade", com a velocidade da principal).
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -23,6 +23,7 @@
  */
 
 #include "multistream.h"
+#include "vertical.h"
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
@@ -195,7 +196,7 @@ static const char *best_h264_encoder(void)
 	return "obs_x264";
 }
 
-static obs_encoder_t *create_video_encoder(const struct dest *d, int kbps)
+static obs_encoder_t *create_video_encoder(const struct dest *d, int kbps, video_t *video)
 {
 	const char *id = best_h264_encoder();
 	obs_data_t *settings = obs_data_create();
@@ -211,7 +212,7 @@ static obs_encoder_t *create_video_encoder(const struct dest *d, int kbps)
 	obs_encoder_t *encoder = obs_video_encoder_create(id, name, settings, NULL);
 	obs_data_release(settings);
 	if (encoder) {
-		obs_encoder_set_video(encoder, obs_get_video());
+		obs_encoder_set_video(encoder, video);
 		blog(LOG_INFO, "[projeto-live] destino '%s' com codificador próprio %s, %d kbps", d->info.name, id,
 		     kbps);
 	}
@@ -263,11 +264,19 @@ static void dest_start(struct dest *d)
 		return;
 	}
 
-	obs_encoder_t *video = d->info.own_quality ? NULL : obs_output_get_video_encoder(main_output);
+	bool vertical = pl_multistream_platform_vertical(d->info.platform);
+	obs_encoder_t *main_video = obs_output_get_video_encoder(main_output);
+	obs_encoder_t *video = (d->info.own_quality || vertical) ? NULL : main_video;
 	obs_encoder_t *audio = obs_output_get_audio_encoder(main_output, 0);
 	if (!video) {
-		int kbps = d->info.own_quality ? d->info.bitrate_kbps : DEFAULT_KBPS;
-		d->own_video = create_video_encoder(d, kbps > 0 ? kbps : DEFAULT_KBPS);
+		video_t *picture = vertical ? pl_vertical_get_video() : obs_get_video();
+		if (!picture) {
+			obs_output_release(main_output);
+			set_state(d, PL_DEST_ERROR, obs_module_text("Stream.Error.NoVertical"));
+			return;
+		}
+		int kbps = d->info.own_quality ? d->info.bitrate_kbps : encoder_kbps(main_video);
+		d->own_video = create_video_encoder(d, kbps > 0 ? kbps : DEFAULT_KBPS, picture);
 		video = d->own_video;
 	}
 	if (!audio) {

@@ -34,6 +34,10 @@ target_sources(
     stream-dock.h
     usb-relay.c
     usb-relay.h
+    vertical-dock.cpp
+    vertical-dock.h
+    vertical.c
+    vertical.h
 )
 
 target_link_libraries(
