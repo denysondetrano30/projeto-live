@@ -7,6 +7,9 @@
  *   escolhe a cena para mexer nas fontes; dois cliques (ou "Pôr no ar") põem a cena no vertical.
  * - "Fontes verticais": as fontes da cena escolhida, com a caixa de aparecer/sumir, a ordem, os
  *   enquadramentos rápidos (preencher, inteira, largura toda) e "Casar fontes".
+ * - Nas duas janelas de vídeo do vertical dá para mexer com o mouse, como no preview do OBS: um
+ *   clique escolhe a fonte (moldura vermelha), arrastar move (gruda nas bordas e no meio) e os
+ *   cantos redimensionam sem deformar. Mexe na cena que está no ar no vertical.
  * - Ao lado do preview do OBS (na mesma fileira, depois do Programa no modo estúdio): uma cópia do
  *   Programa vertical, que dá para desligar no painel "Programa vertical".
  *
@@ -36,6 +39,7 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMouseEvent>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPlatformSurfaceEvent>
@@ -46,7 +50,13 @@
 #include <QWidget>
 #include <QWindow>
 
+#include <graphics/matrix4.h>
+#include <graphics/vec3.h>
+#include <graphics/vec4.h>
+
 #include <algorithm>
+#include <cmath>
+#include <mutex>
 #include <vector>
 
 #include "vertical-record.h"
@@ -74,6 +84,117 @@ void setEditingScene(obs_source_t *scene)
 	obs_weak_source_release(editing);
 	editing = scene ? obs_source_get_weak_source(scene) : nullptr;
 	pl_vertical_touch();
+}
+
+/* ------------------------------------------------------------------------- */
+/* Fonte escolhida com o mouse (a janela de vídeo desenha na thread de vídeo)  */
+
+std::mutex selectionMutex;
+obs_weak_source_t *selectedScene = nullptr;
+int64_t selectedId = 0;
+
+void setSelection(obs_source_t *scene, int64_t id)
+{
+	std::lock_guard<std::mutex> lock(selectionMutex);
+	obs_weak_source_release(selectedScene);
+	selectedScene = scene ? obs_source_get_weak_source(scene) : nullptr;
+	selectedId = scene ? id : 0;
+}
+
+/* Item escolhido, se ele estiver na cena `scene` (nova referência ou nullptr). */
+obs_sceneitem_t *selectedItemIn(obs_source_t *scene)
+{
+	int64_t id = 0;
+	bool same = false;
+	{
+		std::lock_guard<std::mutex> lock(selectionMutex);
+		obs_source_t *chosen = selectedScene ? obs_weak_source_get_source(selectedScene) : nullptr;
+		same = chosen && chosen == scene;
+		id = selectedId;
+		obs_source_release(chosen);
+	}
+	obs_scene_t *sceneData = same ? obs_scene_from_source(scene) : nullptr;
+	obs_sceneitem_t *item = sceneData ? obs_scene_find_sceneitem_by_id(sceneData, id) : nullptr;
+	if (item) {
+		obs_sceneitem_addref(item);
+	}
+	return item;
+}
+
+int64_t selectedItemId()
+{
+	std::lock_guard<std::mutex> lock(selectionMutex);
+	return selectedId;
+}
+
+/* Cantos do item na tela vertical: 0 alto-esquerda, 1 alto-direita, 2 baixo-direita, 3 baixo-esquerda. */
+void itemCorners(obs_sceneitem_t *item, vec3 corners[4])
+{
+	matrix4 transform;
+	obs_sceneitem_get_box_transform(item, &transform);
+	const float unit[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
+	for (int i = 0; i < 4; i++) {
+		vec3_set(&corners[i], unit[i][0], unit[i][1], 0.0f);
+		vec3_transform(&corners[i], &corners[i], &transform);
+	}
+}
+
+struct Box {
+	float left, top, right, bottom;
+	float width() const { return right - left; }
+	float height() const { return bottom - top; }
+};
+
+Box itemBox(obs_sceneitem_t *item)
+{
+	vec3 corners[4];
+	itemCorners(item, corners);
+	Box box = {corners[0].x, corners[0].y, corners[0].x, corners[0].y};
+	for (const vec3 &corner : corners) {
+		box.left = std::min(box.left, corner.x);
+		box.top = std::min(box.top, corner.y);
+		box.right = std::max(box.right, corner.x);
+		box.bottom = std::max(box.bottom, corner.y);
+	}
+	return box;
+}
+
+/* Moldura vermelha e quadradinhos nos cantos da fonte escolhida. */
+void drawSelection(obs_canvas_t *canvas, float pixelsPerUnit)
+{
+	obs_source_t *current = obs_canvas_get_channel(canvas, 0);
+	obs_sceneitem_t *item = current ? selectedItemIn(current) : nullptr;
+	obs_source_release(current);
+	if (!item) {
+		return;
+	}
+	vec3 corners[4];
+	itemCorners(item, corners);
+	obs_sceneitem_release(item);
+
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	gs_eparam_t *color = gs_effect_get_param_by_name(solid, "color");
+	vec4 red;
+	vec4_set(&red, 0.9f, 0.2f, 0.2f, 1.0f);
+	gs_effect_set_vec4(color, &red);
+	float half = 5.0f / pixelsPerUnit;
+
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(true);
+		for (int i = 0; i <= 4; i++) {
+			gs_vertex2f(corners[i % 4].x, corners[i % 4].y);
+		}
+		gs_render_stop(GS_LINESTRIP);
+
+		for (const vec3 &corner : corners) {
+			gs_render_start(true);
+			gs_vertex2f(corner.x - half, corner.y - half);
+			gs_vertex2f(corner.x + half, corner.y - half);
+			gs_vertex2f(corner.x - half, corner.y + half);
+			gs_vertex2f(corner.x + half, corner.y + half);
+			gs_render_stop(GS_TRISTRIP);
+		}
+	}
 }
 
 /* ------------------------------------------------------------------------- */
@@ -105,6 +226,7 @@ void drawVertical(void *, uint32_t cx, uint32_t cy)
 	gs_set_viewport(x, y, width, height);
 	gs_ortho(0.0f, base_w, 0.0f, base_h, -100.0f, 100.0f);
 	obs_render_canvas_texture(canvas);
+	drawSelection(canvas, scale);
 	gs_viewport_pop();
 	gs_projection_pop();
 
@@ -122,6 +244,7 @@ public:
 		setAttribute(Qt::WA_DontCreateNativeAncestors);
 		setAttribute(Qt::WA_NativeWindow);
 		setMinimumSize(90, 160);
+		setMouseTracking(true);
 
 		if (QWindow *window = windowHandle()) {
 			window->installEventFilter(this);
@@ -139,6 +262,89 @@ public:
 	QPaintEngine *paintEngine() const override { return nullptr; }
 
 protected:
+	void mousePressEvent(QMouseEvent *event) override
+	{
+		if (event->button() != Qt::LeftButton) {
+			return;
+		}
+		float x, y;
+		toCanvas(event->position(), x, y);
+		obs_source_t *current = pl_vertical_current();
+		obs_scene_t *scene = obs_scene_from_source(current);
+		mode = Mode::None;
+
+		/* Primeiro: um canto da fonte já escolhida? */
+		obs_sceneitem_t *item = current ? selectedItemIn(current) : nullptr;
+		int corner = item ? cornerAt(item, x, y) : -1;
+		if (item && corner < 0) {
+			obs_sceneitem_release(item);
+			item = nullptr;
+		}
+		/* Senão: a fonte mais de cima embaixo do mouse. */
+		if (!item && scene) {
+			item = itemAt(scene, x, y);
+		}
+
+		if (item && !obs_sceneitem_locked(item)) {
+			setSelection(current, obs_sceneitem_get_id(item));
+			startBox = itemBox(item);
+			startMouseX = x;
+			startMouseY = y;
+			obs_sceneitem_get_pos(item, &startPos);
+			obs_sceneitem_get_scale(item, &startScale);
+			activeCorner = corner;
+			mode = corner >= 0 ? Mode::Resize : Mode::Move;
+		} else {
+			setSelection(item ? current : nullptr, item ? obs_sceneitem_get_id(item) : 0);
+		}
+		obs_sceneitem_release(item);
+
+		obs_source_t *editingNow = editingScene();
+		if (current && editingNow != current) {
+			setEditingScene(current);
+		}
+		obs_source_release(editingNow);
+		obs_source_release(current);
+		pl_vertical_touch();
+	}
+
+	void mouseMoveEvent(QMouseEvent *event) override
+	{
+		float x, y;
+		toCanvas(event->position(), x, y);
+		obs_source_t *current = pl_vertical_current();
+		obs_sceneitem_t *item = current ? selectedItemIn(current) : nullptr;
+		obs_source_release(current);
+
+		if (!item) {
+			unsetCursor();
+			return;
+		}
+		if (mode == Mode::Move) {
+			moveItem(item, x - startMouseX, y - startMouseY);
+		} else if (mode == Mode::Resize) {
+			resizeItem(item, x, y);
+		} else {
+			int corner = cornerAt(item, x, y);
+			if (corner == 0 || corner == 2) {
+				setCursor(Qt::SizeFDiagCursor);
+			} else if (corner == 1 || corner == 3) {
+				setCursor(Qt::SizeBDiagCursor);
+			} else {
+				unsetCursor();
+			}
+		}
+		obs_sceneitem_release(item);
+	}
+
+	void mouseReleaseEvent(QMouseEvent *) override
+	{
+		if (mode != Mode::None) {
+			mode = Mode::None;
+			pl_vertical_touch();
+		}
+	}
+
 	void paintEvent(QPaintEvent *event) override
 	{
 		createDisplay();
@@ -165,6 +371,149 @@ protected:
 	}
 
 private:
+	enum class Mode { None, Move, Resize };
+
+	/* Quanto da tela vertical cabe em cada pixel da janela, e onde ela começa. */
+	void viewMap(float &scale, float &offsetX, float &offsetY) const
+	{
+		QSize size = pixelSize();
+		float baseW = PL_VERTICAL_WIDTH;
+		float baseH = PL_VERTICAL_HEIGHT;
+		scale = std::min((float)size.width() / baseW, (float)size.height() / baseH);
+		if (scale <= 0.0f) {
+			scale = 1.0f;
+		}
+		offsetX = ((float)size.width() - baseW * scale) / 2.0f;
+		offsetY = ((float)size.height() - baseH * scale) / 2.0f;
+	}
+
+	void toCanvas(const QPointF &point, float &x, float &y) const
+	{
+		float scale, offsetX, offsetY;
+		viewMap(scale, offsetX, offsetY);
+		qreal ratio = devicePixelRatioF();
+		x = ((float)(point.x() * ratio) - offsetX) / scale;
+		y = ((float)(point.y() * ratio) - offsetY) / scale;
+	}
+
+	/* Distância (em unidades da tela vertical) que conta como "em cima" de um canto ou borda. */
+	float grabDistance() const
+	{
+		float scale, offsetX, offsetY;
+		viewMap(scale, offsetX, offsetY);
+		return 9.0f * (float)devicePixelRatioF() / scale;
+	}
+
+	int cornerAt(obs_sceneitem_t *item, float x, float y) const
+	{
+		vec3 corners[4];
+		itemCorners(item, corners);
+		float grab = grabDistance();
+		for (int i = 0; i < 4; i++) {
+			if (std::fabs(corners[i].x - x) <= grab && std::fabs(corners[i].y - y) <= grab) {
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	/* A fonte visível mais de cima no ponto (nova referência ou nullptr). */
+	obs_sceneitem_t *itemAt(obs_scene_t *scene, float x, float y) const
+	{
+		struct Hit {
+			float x, y;
+			obs_sceneitem_t *found;
+		} hit = {x, y, nullptr};
+		obs_scene_enum_items(
+			scene,
+			[](obs_scene_t *, obs_sceneitem_t *item, void *param) -> bool {
+				auto *h = static_cast<Hit *>(param);
+				if (!obs_sceneitem_visible(item)) {
+					return true;
+				}
+				matrix4 transform, inverse;
+				obs_sceneitem_get_box_transform(item, &transform);
+				if (!matrix4_inv(&inverse, &transform)) {
+					return true;
+				}
+				vec3 point;
+				vec3_set(&point, h->x, h->y, 0.0f);
+				vec3_transform(&point, &point, &inverse);
+				if (point.x >= 0.0f && point.x <= 1.0f && point.y >= 0.0f && point.y <= 1.0f) {
+					/* A lista vai de baixo para cima: o último que acertar é o de cima. */
+					h->found = item;
+				}
+				return true;
+			},
+			&hit);
+		if (hit.found) {
+			obs_sceneitem_addref(hit.found);
+		}
+		return hit.found;
+	}
+
+	/* Move, grudando as bordas e o meio da fonte nas bordas e no meio da tela. */
+	void moveItem(obs_sceneitem_t *item, float dx, float dy)
+	{
+		float grab = grabDistance() * 1.5f;
+		auto snap = [grab](float start, float size, float delta, float limit) {
+			const float targets[] = {0.0f, limit / 2.0f, limit};
+			const float edges[] = {0.0f, size / 2.0f, size};
+			float best = delta;
+			float bestDistance = grab;
+			for (float edge : edges) {
+				for (float target : targets) {
+					float wanted = target - (start + edge);
+					if (std::fabs(wanted - delta) < bestDistance) {
+						bestDistance = std::fabs(wanted - delta);
+						best = wanted;
+					}
+				}
+			}
+			return best;
+		};
+		dx = snap(startBox.left, startBox.width(), dx, (float)PL_VERTICAL_WIDTH);
+		dy = snap(startBox.top, startBox.height(), dy, (float)PL_VERTICAL_HEIGHT);
+
+		vec2 pos;
+		vec2_set(&pos, startPos.x + dx, startPos.y + dy);
+		obs_sceneitem_set_pos(item, &pos);
+	}
+
+	/* Redimensiona pelo canto, sem deformar; o canto oposto fica parado. */
+	void resizeItem(obs_sceneitem_t *item, float x, float y)
+	{
+		bool right = activeCorner == 1 || activeCorner == 2;
+		bool bottom = activeCorner == 2 || activeCorner == 3;
+		float anchorX = right ? startBox.left : startBox.right;
+		float anchorY = bottom ? startBox.top : startBox.bottom;
+		float w0 = std::max(startBox.width(), 1.0f);
+		float h0 = std::max(startBox.height(), 1.0f);
+
+		float factor = std::max(std::fabs(x - anchorX) / w0, std::fabs(y - anchorY) / h0);
+		factor = std::max(factor, 16.0f / std::min(w0, h0));
+		float w = w0 * factor;
+		float h = h0 * factor;
+		float left = right ? anchorX : anchorX - w;
+		float top = bottom ? anchorY : anchorY - h;
+
+		obs_sceneitem_defer_update_begin(item);
+		obs_sceneitem_set_alignment(item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
+		vec2 pos;
+		vec2_set(&pos, left, top);
+		obs_sceneitem_set_pos(item, &pos);
+		if (obs_sceneitem_get_bounds_type(item) != OBS_BOUNDS_NONE) {
+			vec2 bounds;
+			vec2_set(&bounds, w, h);
+			obs_sceneitem_set_bounds(item, &bounds);
+		} else {
+			vec2 scale;
+			vec2_set(&scale, startScale.x * factor, startScale.y * factor);
+			obs_sceneitem_set_scale(item, &scale);
+		}
+		obs_sceneitem_defer_update_end(item);
+	}
+
 	QSize pixelSize() const
 	{
 		qreal ratio = devicePixelRatioF();
@@ -213,6 +562,13 @@ private:
 	}
 
 	obs_display_t *display = nullptr;
+	Mode mode = Mode::None;
+	Box startBox = {0.0f, 0.0f, 0.0f, 0.0f};
+	vec2 startPos = {};
+	vec2 startScale = {};
+	float startMouseX = 0.0f;
+	float startMouseY = 0.0f;
+	int activeCorner = -1;
 };
 
 void placeEmbedded();
@@ -568,6 +924,15 @@ public:
 
 		list = new QListWidget(this);
 		layout->addWidget(list, 1);
+		connect(list, &QListWidget::currentRowChanged, this, [this](int row) {
+			if (rebuilding || row < 0 || row >= (int)ids.size()) {
+				return;
+			}
+			/* Escolher na lista também mostra a moldura vermelha no vídeo. */
+			obs_source_t *sceneSource = editingScene();
+			setSelection(sceneSource, ids[row]);
+			obs_source_release(sceneSource);
+		});
 		connect(list, &QListWidget::itemChanged, this, [this](QListWidgetItem *item) {
 			if (rebuilding) {
 				return;
@@ -647,6 +1012,15 @@ public:
 				list->addItem(row);
 				ids.push_back(obs_sceneitem_get_id(item));
 			}
+		}
+		/* A fonte escolhida com o mouse fica marcada na lista. */
+		obs_sceneitem_t *selected = sceneSource ? selectedItemIn(sceneSource) : nullptr;
+		if (selected) {
+			auto found = std::find(ids.begin(), ids.end(), obs_sceneitem_get_id(selected));
+			if (found != ids.end()) {
+				previousRow = (int)(found - ids.begin());
+			}
+			obs_sceneitem_release(selected);
 		}
 		obs_source_release(sceneSource);
 
