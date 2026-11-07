@@ -1,17 +1,17 @@
 /*
  * Projeto Live: painéis da tela vertical.
  *
- * - "Programa vertical": mostra o que está saindo em pé, se o vertical está seguindo o Programa
- *   ou numa cena escolhida à mão, e o botão "Seguir o Programa".
+ * - Programa vertical: fica ao lado do preview do OBS (liga e desliga em Painéis > "Programa
+ *   vertical"), com o nome da cena no ar, "Seguir o Programa" quando foi escolhida à mão e
+ *   "Soltar", que leva para uma janela solta (fechar a janela traz de volta).
  * - "Cenas verticais": as gêmeas (⇄, na ordem das cenas do OBS) e as cenas só verticais. Um clique
  *   escolhe a cena para mexer nas fontes; dois cliques (ou "Pôr no ar") põem a cena no vertical.
  * - "Fontes verticais": as fontes da cena escolhida, com a caixa de aparecer/sumir, a ordem, os
  *   enquadramentos rápidos (preencher, inteira, largura toda) e "Casar fontes".
  * - Nas duas janelas de vídeo do vertical dá para mexer com o mouse, como no preview do OBS: um
- *   clique escolhe a fonte (moldura vermelha), arrastar move (gruda nas bordas e no meio) e os
- *   cantos redimensionam sem deformar. Mexe na cena que está no ar no vertical.
- * - Ao lado do preview do OBS (na mesma fileira, depois do Programa no modo estúdio): uma cópia do
- *   Programa vertical, que dá para desligar no painel "Programa vertical".
+ *   clique escolhe a fonte (moldura vermelha em volta da imagem), arrastar move (gruda nas bordas e
+ *   no meio), os cantos redimensionam sem deformar e os meios dos lados cortam. Mexe na cena
+ *   que está no ar no vertical.
  *
  * O trabalho de verdade fica em vertical.c.
  *
@@ -26,7 +26,9 @@
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 
+#include <QAction>
 #include <QBoxLayout>
+#include <QCloseEvent>
 #include <QCheckBox>
 #include <QColor>
 #include <QComboBox>
@@ -41,10 +43,12 @@
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPlatformSurfaceEvent>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -127,39 +131,160 @@ int64_t selectedItemId()
 	return selectedId;
 }
 
-/* Cantos do item na tela vertical: 0 alto-esquerda, 1 alto-direita, 2 baixo-direita, 3 baixo-esquerda. */
-void itemCorners(obs_sceneitem_t *item, vec3 corners[4])
-{
-	matrix4 transform;
-	obs_sceneitem_get_box_transform(item, &transform);
-	const float unit[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
-	for (int i = 0; i < 4; i++) {
-		vec3_set(&corners[i], unit[i][0], unit[i][1], 0.0f);
-		vec3_transform(&corners[i], &corners[i], &transform);
-	}
-}
-
 struct Box {
 	float left, top, right, bottom;
 	float width() const { return right - left; }
 	float height() const { return bottom - top; }
 };
 
+/* Retângulo do "quadro" do item na tela vertical (com as faixas vazias, se houver). */
 Box itemBox(obs_sceneitem_t *item)
 {
-	vec3 corners[4];
-	itemCorners(item, corners);
-	Box box = {corners[0].x, corners[0].y, corners[0].x, corners[0].y};
-	for (const vec3 &corner : corners) {
-		box.left = std::min(box.left, corner.x);
-		box.top = std::min(box.top, corner.y);
-		box.right = std::max(box.right, corner.x);
-		box.bottom = std::max(box.bottom, corner.y);
+	matrix4 transform;
+	obs_sceneitem_get_box_transform(item, &transform);
+	const float unit[4][2] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
+	Box box = {INFINITY, INFINITY, -INFINITY, -INFINITY};
+	for (const auto &corner : unit) {
+		vec3 point;
+		vec3_set(&point, corner[0], corner[1], 0.0f);
+		vec3_transform(&point, &point, &transform);
+		box.left = std::min(box.left, point.x);
+		box.top = std::min(box.top, point.y);
+		box.right = std::max(box.right, point.x);
+		box.bottom = std::max(box.bottom, point.y);
 	}
 	return box;
 }
 
-/* Moldura vermelha e quadradinhos nos cantos da fonte escolhida. */
+/* Tamanho da imagem da fonte, já sem o que foi cortado. */
+void contentSize(obs_sceneitem_t *item, float &width, float &height)
+{
+	obs_source_t *source = obs_sceneitem_get_source(item);
+	obs_sceneitem_crop crop;
+	obs_sceneitem_get_crop(item, &crop);
+	width = (float)obs_source_get_width(source) - (float)(crop.left + crop.right);
+	height = (float)obs_source_get_height(source) - (float)(crop.top + crop.bottom);
+}
+
+/* Onde a imagem aparece de verdade: no modo "Inteira" o quadro é a tela toda, a imagem não. */
+Box visibleBox(obs_sceneitem_t *item)
+{
+	Box rect = itemBox(item);
+	enum obs_bounds_type type = obs_sceneitem_get_bounds_type(item);
+	float cw, ch;
+	contentSize(item, cw, ch);
+	if (type == OBS_BOUNDS_NONE || type == OBS_BOUNDS_STRETCH || cw <= 0.0f || ch <= 0.0f) {
+		return rect;
+	}
+
+	float rw = rect.width();
+	float rh = rect.height();
+	float scale;
+	switch (type) {
+	case OBS_BOUNDS_SCALE_OUTER:
+		if (obs_sceneitem_get_bounds_crop(item)) {
+			return rect;
+		}
+		scale = std::max(rw / cw, rh / ch);
+		break;
+	case OBS_BOUNDS_SCALE_TO_WIDTH:
+		scale = rw / cw;
+		break;
+	case OBS_BOUNDS_SCALE_TO_HEIGHT:
+		scale = rh / ch;
+		break;
+	case OBS_BOUNDS_MAX_ONLY:
+		scale = std::min(1.0f, std::min(rw / cw, rh / ch));
+		break;
+	default:
+		scale = std::min(rw / cw, rh / ch);
+		break;
+	}
+
+	float w = cw * scale;
+	float h = ch * scale;
+	uint32_t align = obs_sceneitem_get_bounds_alignment(item);
+	float x = (align & OBS_ALIGN_LEFT)    ? rect.left
+		  : (align & OBS_ALIGN_RIGHT) ? rect.right - w
+					      : rect.left + (rw - w) / 2.0f;
+	float y = (align & OBS_ALIGN_TOP)      ? rect.top
+		  : (align & OBS_ALIGN_BOTTOM) ? rect.bottom - h
+					       : rect.top + (rh - h) / 2.0f;
+	return {x, y, x + w, y + h};
+}
+
+/*
+ * Antes de mexer com o mouse, a fonte vira uma fonte "normal" do OBS (sem quadro), sem mudar
+ * nada do que aparece: a moldura passa a ser exatamente a imagem.
+ */
+void normalizeItem(obs_sceneitem_t *item)
+{
+	if (std::fabs(obs_sceneitem_get_rot(item)) > 0.01f) {
+		return;
+	}
+	enum obs_bounds_type type = obs_sceneitem_get_bounds_type(item);
+	Box visible = visibleBox(item);
+	obs_sceneitem_crop crop;
+	obs_sceneitem_get_crop(item, &crop);
+	float cw, ch;
+	contentSize(item, cw, ch);
+
+	vec2 scale;
+	if (type == OBS_BOUNDS_NONE) {
+		obs_sceneitem_get_scale(item, &scale);
+	} else if (cw <= 0.0f || ch <= 0.0f) {
+		return;
+	} else if (type == OBS_BOUNDS_STRETCH) {
+		vec2_set(&scale, visible.width() / cw, visible.height() / ch);
+	} else if (type == OBS_BOUNDS_SCALE_OUTER && obs_sceneitem_get_bounds_crop(item)) {
+		/* "Preencher": o pedaço cortado para caber vira um corte de verdade. */
+		Box rect = itemBox(item);
+		float s = std::max(rect.width() / cw, rect.height() / ch);
+		float extraX = std::max(cw - rect.width() / s, 0.0f);
+		float extraY = std::max(ch - rect.height() / s, 0.0f);
+		uint32_t align = obs_sceneitem_get_bounds_alignment(item);
+		float leftShare = (align & OBS_ALIGN_LEFT) ? 0.0f : (align & OBS_ALIGN_RIGHT) ? 1.0f : 0.5f;
+		float topShare = (align & OBS_ALIGN_TOP) ? 0.0f : (align & OBS_ALIGN_BOTTOM) ? 1.0f : 0.5f;
+		int addLeft = (int)std::lround(extraX * leftShare);
+		int addTop = (int)std::lround(extraY * topShare);
+		crop.left += addLeft;
+		crop.right += (int)std::lround(extraX) - addLeft;
+		crop.top += addTop;
+		crop.bottom += (int)std::lround(extraY) - addTop;
+		vec2_set(&scale, s, s);
+	} else {
+		float s = visible.width() / cw;
+		vec2_set(&scale, s, s);
+	}
+
+	obs_sceneitem_defer_update_begin(item);
+	obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_NONE);
+	obs_sceneitem_set_crop(item, &crop);
+	obs_sceneitem_set_scale(item, &scale);
+	obs_sceneitem_set_alignment(item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
+	vec2 pos;
+	vec2_set(&pos, visible.left, visible.top);
+	obs_sceneitem_set_pos(item, &pos);
+	obs_sceneitem_defer_update_end(item);
+}
+
+/*
+ * Os 8 quadradinhos da moldura: 0 alto-esquerda, 1 alto-direita, 2 baixo-direita, 3 baixo-esquerda
+ * (aumentam e diminuem sem deformar) e 4 alto, 5 direita, 6 baixo, 7 esquerda (cortam a imagem).
+ */
+void handlePoints(const Box &box, float x[8], float y[8])
+{
+	float midX = (box.left + box.right) / 2.0f;
+	float midY = (box.top + box.bottom) / 2.0f;
+	const float xs[8] = {box.left, box.right, box.right, box.left, midX, box.right, midX, box.left};
+	const float ys[8] = {box.top, box.top, box.bottom, box.bottom, box.top, midY, box.bottom, midY};
+	for (int i = 0; i < 8; i++) {
+		x[i] = xs[i];
+		y[i] = ys[i];
+	}
+}
+
+/* Moldura vermelha e quadradinhos da fonte escolhida. */
 void drawSelection(obs_canvas_t *canvas, float pixelsPerUnit)
 {
 	obs_source_t *current = obs_canvas_get_channel(canvas, 0);
@@ -168,9 +293,10 @@ void drawSelection(obs_canvas_t *canvas, float pixelsPerUnit)
 	if (!item) {
 		return;
 	}
-	vec3 corners[4];
-	itemCorners(item, corners);
+	Box box = visibleBox(item);
 	obs_sceneitem_release(item);
+	float hx[8], hy[8];
+	handlePoints(box, hx, hy);
 
 	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
 	gs_eparam_t *color = gs_effect_get_param_by_name(solid, "color");
@@ -181,17 +307,19 @@ void drawSelection(obs_canvas_t *canvas, float pixelsPerUnit)
 
 	while (gs_effect_loop(solid, "Solid")) {
 		gs_render_start(true);
-		for (int i = 0; i <= 4; i++) {
-			gs_vertex2f(corners[i % 4].x, corners[i % 4].y);
-		}
+		gs_vertex2f(box.left, box.top);
+		gs_vertex2f(box.right, box.top);
+		gs_vertex2f(box.right, box.bottom);
+		gs_vertex2f(box.left, box.bottom);
+		gs_vertex2f(box.left, box.top);
 		gs_render_stop(GS_LINESTRIP);
 
-		for (const vec3 &corner : corners) {
+		for (int i = 0; i < 8; i++) {
 			gs_render_start(true);
-			gs_vertex2f(corner.x - half, corner.y - half);
-			gs_vertex2f(corner.x + half, corner.y - half);
-			gs_vertex2f(corner.x - half, corner.y + half);
-			gs_vertex2f(corner.x + half, corner.y + half);
+			gs_vertex2f(hx[i] - half, hy[i] - half);
+			gs_vertex2f(hx[i] + half, hy[i] - half);
+			gs_vertex2f(hx[i] - half, hy[i] + half);
+			gs_vertex2f(hx[i] + half, hy[i] + half);
 			gs_render_stop(GS_TRISTRIP);
 		}
 	}
@@ -273,10 +401,10 @@ protected:
 		obs_scene_t *scene = obs_scene_from_source(current);
 		mode = Mode::None;
 
-		/* Primeiro: um canto da fonte já escolhida? */
+		/* Primeiro: um quadradinho da fonte já escolhida? */
 		obs_sceneitem_t *item = current ? selectedItemIn(current) : nullptr;
-		int corner = item ? cornerAt(item, x, y) : -1;
-		if (item && corner < 0) {
+		int handle = item ? handleAt(visibleBox(item), x, y) : -1;
+		if (item && handle < 0) {
 			obs_sceneitem_release(item);
 			item = nullptr;
 		}
@@ -287,13 +415,15 @@ protected:
 
 		if (item && !obs_sceneitem_locked(item)) {
 			setSelection(current, obs_sceneitem_get_id(item));
-			startBox = itemBox(item);
+			normalizeItem(item);
+			startBox = visibleBox(item);
 			startMouseX = x;
 			startMouseY = y;
 			obs_sceneitem_get_pos(item, &startPos);
 			obs_sceneitem_get_scale(item, &startScale);
-			activeCorner = corner;
-			mode = corner >= 0 ? Mode::Resize : Mode::Move;
+			obs_sceneitem_get_crop(item, &startCrop);
+			activeHandle = handle;
+			mode = handle < 0 ? Mode::Move : handle < 4 ? Mode::Resize : Mode::Crop;
 		} else {
 			setSelection(item ? current : nullptr, item ? obs_sceneitem_get_id(item) : 0);
 		}
@@ -324,12 +454,18 @@ protected:
 			moveItem(item, x - startMouseX, y - startMouseY);
 		} else if (mode == Mode::Resize) {
 			resizeItem(item, x, y);
+		} else if (mode == Mode::Crop) {
+			cropItem(item, x - startMouseX, y - startMouseY);
 		} else {
-			int corner = cornerAt(item, x, y);
-			if (corner == 0 || corner == 2) {
+			int handle = handleAt(visibleBox(item), x, y);
+			if (handle == 0 || handle == 2) {
 				setCursor(Qt::SizeFDiagCursor);
-			} else if (corner == 1 || corner == 3) {
+			} else if (handle == 1 || handle == 3) {
 				setCursor(Qt::SizeBDiagCursor);
+			} else if (handle == 4 || handle == 6) {
+				setCursor(Qt::SizeVerCursor);
+			} else if (handle == 5 || handle == 7) {
+				setCursor(Qt::SizeHorCursor);
 			} else {
 				unsetCursor();
 			}
@@ -371,7 +507,7 @@ protected:
 	}
 
 private:
-	enum class Mode { None, Move, Resize };
+	enum class Mode { None, Move, Resize, Crop };
 
 	/* Quanto da tela vertical cabe em cada pixel da janela, e onde ela começa. */
 	void viewMap(float &scale, float &offsetX, float &offsetY) const
@@ -404,20 +540,20 @@ private:
 		return 9.0f * (float)devicePixelRatioF() / scale;
 	}
 
-	int cornerAt(obs_sceneitem_t *item, float x, float y) const
+	int handleAt(const Box &box, float x, float y) const
 	{
-		vec3 corners[4];
-		itemCorners(item, corners);
+		float hx[8], hy[8];
+		handlePoints(box, hx, hy);
 		float grab = grabDistance();
-		for (int i = 0; i < 4; i++) {
-			if (std::fabs(corners[i].x - x) <= grab && std::fabs(corners[i].y - y) <= grab) {
+		for (int i = 0; i < 8; i++) {
+			if (std::fabs(hx[i] - x) <= grab && std::fabs(hy[i] - y) <= grab) {
 				return i;
 			}
 		}
 		return -1;
 	}
 
-	/* A fonte visível mais de cima no ponto (nova referência ou nullptr). */
+	/* A fonte visível mais de cima no ponto, contando só onde a imagem aparece (nova referência). */
 	obs_sceneitem_t *itemAt(obs_scene_t *scene, float x, float y) const
 	{
 		struct Hit {
@@ -431,15 +567,8 @@ private:
 				if (!obs_sceneitem_visible(item)) {
 					return true;
 				}
-				matrix4 transform, inverse;
-				obs_sceneitem_get_box_transform(item, &transform);
-				if (!matrix4_inv(&inverse, &transform)) {
-					return true;
-				}
-				vec3 point;
-				vec3_set(&point, h->x, h->y, 0.0f);
-				vec3_transform(&point, &point, &inverse);
-				if (point.x >= 0.0f && point.x <= 1.0f && point.y >= 0.0f && point.y <= 1.0f) {
+				Box box = visibleBox(item);
+				if (h->x >= box.left && h->x <= box.right && h->y >= box.top && h->y <= box.bottom) {
 					/* A lista vai de baixo para cima: o último que acertar é o de cima. */
 					h->found = item;
 				}
@@ -450,6 +579,57 @@ private:
 			obs_sceneitem_addref(hit.found);
 		}
 		return hit.found;
+	}
+
+	/* Gruda um valor no 0, no meio ou no fim da tela, se estiver perto. */
+	float snapEdge(float value, float limit) const
+	{
+		float grab = grabDistance() * 1.5f;
+		const float targets[] = {0.0f, limit / 2.0f, limit};
+		for (float target : targets) {
+			if (std::fabs(value - target) < grab) {
+				return target;
+			}
+		}
+		return value;
+	}
+
+	/* Corta pelo lado puxado (o lado oposto fica parado). */
+	void cropItem(obs_sceneitem_t *item, float dx, float dy)
+	{
+		obs_source_t *source = obs_sceneitem_get_source(item);
+		float fullW = (float)obs_source_get_width(source);
+		float fullH = (float)obs_source_get_height(source);
+		float sx = std::max(std::fabs(startScale.x), 0.0001f);
+		float sy = std::max(std::fabs(startScale.y), 0.0001f);
+		const float minimum = 8.0f;
+
+		obs_sceneitem_crop crop = startCrop;
+		vec2 pos = startPos;
+		if (activeHandle == 5) {
+			float edge = snapEdge(startBox.right + dx, (float)PL_VERTICAL_WIDTH);
+			float cut = (float)startCrop.right - (edge - startBox.right) / sx;
+			crop.right = (int)std::lround(std::clamp(cut, 0.0f, fullW - (float)startCrop.left - minimum));
+		} else if (activeHandle == 7) {
+			float edge = snapEdge(startBox.left + dx, (float)PL_VERTICAL_WIDTH);
+			float cut = (float)startCrop.left + (edge - startBox.left) / sx;
+			crop.left = (int)std::lround(std::clamp(cut, 0.0f, fullW - (float)startCrop.right - minimum));
+			pos.x = startPos.x + (float)(crop.left - startCrop.left) * sx;
+		} else if (activeHandle == 6) {
+			float edge = snapEdge(startBox.bottom + dy, (float)PL_VERTICAL_HEIGHT);
+			float cut = (float)startCrop.bottom - (edge - startBox.bottom) / sy;
+			crop.bottom = (int)std::lround(std::clamp(cut, 0.0f, fullH - (float)startCrop.top - minimum));
+		} else if (activeHandle == 4) {
+			float edge = snapEdge(startBox.top + dy, (float)PL_VERTICAL_HEIGHT);
+			float cut = (float)startCrop.top + (edge - startBox.top) / sy;
+			crop.top = (int)std::lround(std::clamp(cut, 0.0f, fullH - (float)startCrop.bottom - minimum));
+			pos.y = startPos.y + (float)(crop.top - startCrop.top) * sy;
+		}
+
+		obs_sceneitem_defer_update_begin(item);
+		obs_sceneitem_set_crop(item, &crop);
+		obs_sceneitem_set_pos(item, &pos);
+		obs_sceneitem_defer_update_end(item);
 	}
 
 	/* Move, grudando as bordas e o meio da fonte nas bordas e no meio da tela. */
@@ -483,8 +663,8 @@ private:
 	/* Redimensiona pelo canto, sem deformar; o canto oposto fica parado. */
 	void resizeItem(obs_sceneitem_t *item, float x, float y)
 	{
-		bool right = activeCorner == 1 || activeCorner == 2;
-		bool bottom = activeCorner == 2 || activeCorner == 3;
+		bool right = activeHandle == 1 || activeHandle == 2;
+		bool bottom = activeHandle == 2 || activeHandle == 3;
 		float anchorX = right ? startBox.left : startBox.right;
 		float anchorY = bottom ? startBox.top : startBox.bottom;
 		float w0 = std::max(startBox.width(), 1.0f);
@@ -566,67 +746,13 @@ private:
 	Box startBox = {0.0f, 0.0f, 0.0f, 0.0f};
 	vec2 startPos = {};
 	vec2 startScale = {};
+	obs_sceneitem_crop startCrop = {};
 	float startMouseX = 0.0f;
 	float startMouseY = 0.0f;
-	int activeCorner = -1;
+	int activeHandle = -1;
 };
 
 void placeEmbedded();
-
-/* ------------------------------------------------------------------------- */
-/* Painel "Programa vertical"                                                 */
-
-class ProgramDock : public QWidget {
-public:
-	explicit ProgramDock(QWidget *parent) : QWidget(parent)
-	{
-		auto *layout = new QVBoxLayout(this);
-		layout->setContentsMargins(4, 4, 4, 4);
-
-		layout->addWidget(new VerticalDisplay(this), 1);
-
-		status = new QLabel(this);
-		status->setWordWrap(true);
-		status->setTextFormat(Qt::RichText);
-		layout->addWidget(status);
-
-		follow = new QPushButton(moduleText("Vertical.Follow"), this);
-		connect(follow, &QPushButton::clicked, this, []() { pl_vertical_follow_program(); });
-		layout->addWidget(follow);
-
-		auto *embed = new QCheckBox(moduleText("Vertical.Embed"), this);
-		embed->setChecked(pl_vertical_pref("embed"));
-		connect(embed, &QCheckBox::toggled, this, [](bool on) {
-			pl_vertical_set_pref("embed", on);
-			placeEmbedded();
-		});
-		layout->addWidget(embed);
-
-		auto *record = new QCheckBox(moduleText("Vertical.Record"), this);
-		record->setChecked(pl_vertical_pref("record"));
-		connect(record, &QCheckBox::toggled, this, [](bool on) { pl_vertical_set_pref("record", on); });
-		layout->addWidget(record);
-
-		refresh();
-	}
-
-	void refresh()
-	{
-		obs_source_t *current = pl_vertical_current();
-		QString name = current ? QString::fromUtf8(obs_source_get_name(current)).toHtmlEscaped()
-				       : moduleText("Vertical.Nothing");
-		obs_source_release(current);
-
-		bool following = pl_vertical_following();
-		status->setText(
-			moduleText(following ? "Vertical.Status.Following" : "Vertical.Status.Manual").arg(name));
-		follow->setEnabled(!following);
-	}
-
-private:
-	QLabel *status = nullptr;
-	QPushButton *follow = nullptr;
-};
 
 /* ------------------------------------------------------------------------- */
 /* Painel "Cenas verticais"                                                   */
@@ -1132,9 +1258,182 @@ private:
 };
 
 /* ------------------------------------------------------------------------- */
+/* Programa vertical: ao lado do preview ou numa janela solta                 */
+
+bool floating = false;
+
+class VerticalProgram : public QWidget {
+public:
+	VerticalProgram(QWidget *parent, bool isFloating) : QWidget(parent)
+	{
+		auto *layout = new QVBoxLayout(this);
+		layout->setContentsMargins(4, isFloating ? 4 : 0, isFloating ? 4 : 0, isFloating ? 4 : 0);
+		layout->setSpacing(2);
+
+		auto *header = new QHBoxLayout();
+		header->setSpacing(4);
+		status = new QLabel(this);
+		status->setTextFormat(Qt::RichText);
+		status->setWordWrap(true);
+		status->setStyleSheet("color: #a0a0a0;");
+		follow = new QPushButton(moduleText("Vertical.Follow"), this);
+		follow->setToolTip(moduleText("Vertical.Follow"));
+		connect(follow, &QPushButton::clicked, this, []() { pl_vertical_follow_program(); });
+		auto *detach = new QPushButton(moduleText(isFloating ? "Vertical.Attach" : "Vertical.Detach"), this);
+		connect(detach, &QPushButton::clicked, this, [isFloating]() {
+			floating = !isFloating;
+			QTimer::singleShot(0, []() { placeEmbedded(); });
+		});
+		header->addWidget(status, 1);
+		header->addWidget(follow);
+		header->addWidget(detach);
+		layout->addLayout(header);
+		layout->addWidget(new VerticalDisplay(this), 1);
+
+		if (!isFloating && parent) {
+			parent->installEventFilter(this);
+		}
+		embeddedMode = !isFloating;
+		refresh();
+		fitWidth();
+	}
+
+	void refresh()
+	{
+		obs_source_t *current = pl_vertical_current();
+		QString name = current ? QString::fromUtf8(obs_source_get_name(current)).toHtmlEscaped()
+				       : moduleText("Vertical.Nothing");
+		obs_source_release(current);
+		bool following = pl_vertical_following();
+		status->setText(moduleText(following ? "Vertical.Short.Following" : "Vertical.Short.Manual").arg(name));
+		follow->setVisible(!following);
+	}
+
+	/* Ao lado do preview: largura certa para a tela em pé caber na altura da área. */
+	void fitWidth()
+	{
+		if (!embeddedMode) {
+			return;
+		}
+		QWidget *area = parentWidget();
+		int height = (area ? area->height() : 400) - 28;
+		setFixedWidth(std::max(140, height * 9 / 16 + 4));
+	}
+
+protected:
+	bool eventFilter(QObject *object, QEvent *event) override
+	{
+		if (embeddedMode && object == parentWidget() && event->type() == QEvent::Resize) {
+			fitWidth();
+		}
+		return QWidget::eventFilter(object, event);
+	}
+
+private:
+	QLabel *status = nullptr;
+	QPushButton *follow = nullptr;
+	bool embeddedMode = true;
+};
+
+/* Janela solta: fechar põe o Programa vertical de volta ao lado do preview. */
+class FloatingWindow : public QWidget {
+public:
+	explicit FloatingWindow(QWidget *parent) : QWidget(parent, Qt::Window)
+	{
+		setWindowTitle(moduleText("Vertical.Embedded.Label"));
+		auto *layout = new QVBoxLayout(this);
+		layout->setContentsMargins(0, 0, 0, 0);
+		program = new VerticalProgram(this, true);
+		layout->addWidget(program);
+		resize(380, 700);
+	}
+
+	VerticalProgram *program = nullptr;
+
+protected:
+	void closeEvent(QCloseEvent *event) override
+	{
+		QWidget::closeEvent(event);
+		floating = false;
+		QTimer::singleShot(0, []() { placeEmbedded(); });
+	}
+};
+
+VerticalProgram *embedded = nullptr;
+FloatingWindow *floatingWindow = nullptr;
+QAction *menuAction = nullptr;
+
+QBoxLayout *previewRow()
+{
+	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	QWidget *area = mainWindow ? mainWindow->findChild<QWidget *>("canvasEditor") : nullptr;
+	return area ? qobject_cast<QBoxLayout *>(area->layout()) : nullptr;
+}
+
+void removeEmbedded()
+{
+	if (embedded) {
+		if (QBoxLayout *row = previewRow()) {
+			row->removeWidget(embedded);
+		}
+		delete embedded;
+		embedded = nullptr;
+	}
+}
+
+void removeFloating()
+{
+	if (floatingWindow) {
+		FloatingWindow *window = floatingWindow;
+		floatingWindow = nullptr;
+		window->hide();
+		window->deleteLater();
+	}
+}
+
+/* Mostra o Programa vertical onde a pessoa escolheu (ou some com ele). */
+void placeEmbedded()
+{
+	bool wanted = pl_vertical_pref("embed");
+	if (menuAction && menuAction->isChecked() != wanted) {
+		QSignalBlocker block(menuAction);
+		menuAction->setChecked(wanted);
+	}
+
+	if (!wanted) {
+		removeEmbedded();
+		removeFloating();
+		return;
+	}
+
+	if (floating) {
+		removeEmbedded();
+		if (!floatingWindow) {
+			floatingWindow = new FloatingWindow(static_cast<QWidget *>(obs_frontend_get_main_window()));
+		}
+		floatingWindow->show();
+		floatingWindow->raise();
+		return;
+	}
+
+	removeFloating();
+	QBoxLayout *row = previewRow();
+	if (!row) {
+		return;
+	}
+	if (!embedded) {
+		embedded = new VerticalProgram(row->parentWidget(), false);
+	} else {
+		row->removeWidget(embedded);
+	}
+	/* Sempre o último da fileira (no modo estúdio o OBS acrescenta o Programa depois). */
+	row->addWidget(embedded);
+	embedded->show();
+}
+
+/* ------------------------------------------------------------------------- */
 /* Quem atualiza os painéis                                                   */
 
-ProgramDock *programDock = nullptr;
 ScenesDock *scenesDock = nullptr;
 SourcesDock *sourcesDock = nullptr;
 QTimer *timer = nullptr;
@@ -1142,10 +1441,13 @@ uint64_t seenVersion = (uint64_t)-1;
 
 void refreshDocks()
 {
-	uint64_t now = pl_vertical_version();
-	if (programDock) {
-		programDock->refresh();
+	if (embedded) {
+		embedded->refresh();
 	}
+	if (floatingWindow && floatingWindow->program) {
+		floatingWindow->program->refresh();
+	}
+	uint64_t now = pl_vertical_version();
 	if (now == seenVersion) {
 		return;
 	}
@@ -1158,81 +1460,6 @@ void refreshDocks()
 	}
 }
 
-/* ------------------------------------------------------------------------- */
-/* Programa vertical ao lado do preview                                       */
-
-class EmbeddedVertical : public QWidget {
-public:
-	explicit EmbeddedVertical(QWidget *parent) : QWidget(parent)
-	{
-		auto *layout = new QVBoxLayout(this);
-		layout->setContentsMargins(4, 0, 0, 0);
-		layout->setSpacing(2);
-		label = new QLabel(moduleText("Vertical.Embedded.Label"), this);
-		label->setStyleSheet("color: #8a8a8a;");
-		layout->addWidget(label);
-		layout->addWidget(new VerticalDisplay(this), 1);
-		parent->installEventFilter(this);
-		fitWidth();
-	}
-
-	/* Largura certa para a tela em pé caber na altura da área do preview. */
-	void fitWidth()
-	{
-		QWidget *area = parentWidget();
-		int height = (area ? area->height() : 400) - label->sizeHint().height() - 2;
-		setFixedWidth(std::max(90, height * 9 / 16 + 4));
-	}
-
-protected:
-	bool eventFilter(QObject *object, QEvent *event) override
-	{
-		if (object == parentWidget() && event->type() == QEvent::Resize) {
-			fitWidth();
-		}
-		return QWidget::eventFilter(object, event);
-	}
-
-private:
-	QLabel *label = nullptr;
-};
-
-EmbeddedVertical *embedded = nullptr;
-
-QBoxLayout *previewRow()
-{
-	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
-	QWidget *area = mainWindow ? mainWindow->findChild<QWidget *>("canvasEditor") : nullptr;
-	return area ? qobject_cast<QBoxLayout *>(area->layout()) : nullptr;
-}
-
-void placeEmbedded()
-{
-	QBoxLayout *row = previewRow();
-	bool wanted = pl_vertical_pref("embed") && row;
-
-	if (!wanted && embedded) {
-		if (row) {
-			row->removeWidget(embedded);
-		}
-		delete embedded;
-		embedded = nullptr;
-		return;
-	}
-	if (!wanted) {
-		return;
-	}
-	if (!embedded) {
-		embedded = new EmbeddedVertical(row->parentWidget());
-		QObject::connect(embedded, &QObject::destroyed, []() { embedded = nullptr; });
-	} else {
-		row->removeWidget(embedded);
-	}
-	/* Sempre o último da fileira (no modo estúdio o OBS acrescenta o Programa depois). */
-	row->addWidget(embedded);
-	embedded->show();
-}
-
 void frontendEvent(enum obs_frontend_event event, void *)
 {
 	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_STUDIO_MODE_ENABLED ||
@@ -1241,9 +1468,13 @@ void frontendEvent(enum obs_frontend_event event, void *)
 	}
 	if (event == OBS_FRONTEND_EVENT_EXIT || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) {
 		setEditingScene(nullptr);
+		setSelection(nullptr, 0);
 	}
-	if (event == OBS_FRONTEND_EVENT_EXIT && timer) {
-		timer->stop();
+	if (event == OBS_FRONTEND_EVENT_EXIT) {
+		if (timer) {
+			timer->stop();
+		}
+		removeFloating();
 	}
 }
 
@@ -1266,17 +1497,30 @@ void pl_vertical_dock_load(void)
 		return;
 	}
 
-	programDock = addDock<ProgramDock>(mainWindow, "projeto-live-vertical-programa", "Vertical.Program.Title");
 	scenesDock = addDock<ScenesDock>(mainWindow, "projeto-live-vertical-cenas", "Vertical.Scenes.Title");
 	sourcesDock = addDock<SourcesDock>(mainWindow, "projeto-live-vertical-fontes", "Vertical.Sources.Title.Dock");
-	if (programDock) {
-		QObject::connect(programDock, &QObject::destroyed, []() { programDock = nullptr; });
-	}
 	if (scenesDock) {
 		QObject::connect(scenesDock, &QObject::destroyed, []() { scenesDock = nullptr; });
 	}
 	if (sourcesDock) {
 		QObject::connect(sourcesDock, &QObject::destroyed, []() { sourcesDock = nullptr; });
+	}
+
+	/* Painéis > "Programa vertical": liga e desliga o vertical ao lado do preview. */
+	QMenu *docksMenu = mainWindow->findChild<QMenu *>("menuDocks");
+	if (docksMenu) {
+		menuAction = docksMenu->addAction(moduleText("Vertical.Menu"));
+	} else {
+		menuAction =
+			static_cast<QAction *>(obs_frontend_add_tools_menu_qaction(obs_module_text("Vertical.Menu")));
+	}
+	if (menuAction) {
+		menuAction->setCheckable(true);
+		menuAction->setChecked(pl_vertical_pref("embed"));
+		QObject::connect(menuAction, &QAction::toggled, [](bool on) {
+			pl_vertical_set_pref("embed", on);
+			placeEmbedded();
+		});
 	}
 
 	timer = new QTimer(mainWindow);
