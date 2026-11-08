@@ -8,6 +8,7 @@ add_library(OBS::projeto-live ALIAS projeto-live)
 target_sources(
   projeto-live
   PRIVATE
+    caption-source.c
     control-server.c
     control-server.h
     director-dock.cpp

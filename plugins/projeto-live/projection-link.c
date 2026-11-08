@@ -41,6 +41,9 @@
 #define PING_INTERVAL_NS (2 * SECOND_NS)
 #define BIND_RETRY_NS (5 * SECOND_NS)
 #define TRUST_FILE "projecao.json"
+/* Uma linha "TEXT <base64>" com o texto de um slide inteiro. */
+#define LINE_MAX_BYTES 24576
+#define CAPTION_MAX 16384
 
 enum peer_state {
 	PEER_EMPTY,
@@ -52,7 +55,8 @@ enum peer_state {
 struct peer {
 	enum peer_state state;
 	pl_socket_t sock;
-	struct pl_line_buffer lines;
+	char lines[LINE_MAX_BYTES];
+	size_t lines_used;
 	uint64_t since_ns;
 	uint64_t last_recv_ns;
 	uint64_t last_send_ns;
@@ -82,6 +86,9 @@ static int connected_count;
 static unsigned int answer_ticket;
 static int answer_value; /* 1 = sim, -1 = não, 0 = sem resposta */
 static bool forget_requested;
+
+static char caption_text[CAPTION_MAX];
+static uint64_t caption_version;
 
 static unsigned int next_ticket;
 static uint64_t nonce_counter;
@@ -414,6 +421,79 @@ static int take_answer(unsigned int ticket)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Texto do telão (legenda)                                                  */
+
+static int base64_value(char c)
+{
+	if (c >= 'A' && c <= 'Z') {
+		return c - 'A';
+	}
+	if (c >= 'a' && c <= 'z') {
+		return c - 'a' + 26;
+	}
+	if (c >= '0' && c <= '9') {
+		return c - '0' + 52;
+	}
+	if (c == '+') {
+		return 62;
+	}
+	if (c == '/') {
+		return 63;
+	}
+	return -1;
+}
+
+/* Decodifica base64 em `out` (com 0 no fim). Devolve false se o texto vier estragado. */
+static bool base64_decode(const char *in, char *out, size_t size)
+{
+	size_t used = 0;
+	uint32_t bits = 0;
+	int count = 0;
+	for (; *in && *in != '='; in++) {
+		int value = base64_value(*in);
+		if (value < 0) {
+			return false;
+		}
+		bits = (bits << 6) | (uint32_t)value;
+		count += 6;
+		if (count >= 8) {
+			count -= 8;
+			if (used + 1 >= size) {
+				return false;
+			}
+			out[used++] = (char)((bits >> count) & 0xFF);
+		}
+	}
+	out[used] = 0;
+	return true;
+}
+
+static void set_caption(const char *text)
+{
+	pthread_mutex_lock(&mutex);
+	if (strcmp(caption_text, text) != 0) {
+		snprintf(caption_text, sizeof(caption_text), "%s", text);
+		caption_version++;
+	}
+	pthread_mutex_unlock(&mutex);
+}
+
+uint64_t pl_projection_caption(char *text, size_t size)
+{
+	if (!thread_created) {
+		if (size) {
+			text[0] = 0;
+		}
+		return 0;
+	}
+	pthread_mutex_lock(&mutex);
+	uint64_t version = caption_version;
+	snprintf(text, size, "%s", caption_text);
+	pthread_mutex_unlock(&mutex);
+	return version;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Conexões                                                                  */
 
 /*
@@ -493,8 +573,17 @@ static bool handle_line(void *param, const char *line)
 	if (strcmp(line, "PING") == 0) {
 		return true;
 	}
+	if (peer->state == PEER_READY && strncmp(line, "TEXT ", 5) == 0) {
+		static char decoded[CAPTION_MAX];
+		if (strcmp(line + 5, "-") == 0) {
+			set_caption("");
+		} else if (base64_decode(line + 5, decoded, sizeof(decoded))) {
+			set_caption(decoded);
+		}
+		return true;
+	}
 	if (peer->state != PEER_HELLO || strncmp(line, "HELLO ", 6) != 0) {
-		/* Outras linhas ficam para as próximas etapas (letra, comandos). */
+		/* Outras linhas ficam para as próximas etapas. */
 		return peer->state == PEER_READY;
 	}
 
@@ -555,11 +644,38 @@ static bool handle_line(void *param, const char *line)
 	return true;
 }
 
+/* Como pl_read_lines (pl-socket.h), mas com espaço para uma linha comprida ("TEXT ..."). */
 static bool read_peer(struct peer *peer, struct peer *peers)
 {
 	peer->last_recv_ns = os_gettime_ns();
 	struct line_context context = {peer, peers};
-	return pl_read_lines(peer->sock, &peer->lines, handle_line, &context);
+	size_t room = sizeof(peer->lines) - peer->lines_used;
+	int got = (int)recv(peer->sock, peer->lines + peer->lines_used, (int)room, 0);
+	if (got <= 0) {
+		return false;
+	}
+	peer->lines_used += (size_t)got;
+
+	char *start = peer->lines;
+	char *end = peer->lines + peer->lines_used;
+	char *newline;
+	while ((newline = (char *)memchr(start, '\n', (size_t)(end - start))) != NULL) {
+		*newline = 0;
+		if (newline > start && newline[-1] == '\r') {
+			newline[-1] = 0;
+		}
+		if (!handle_line(&context, start)) {
+			return false;
+		}
+		if (peer->sock == PL_INVALID_SOCKET) {
+			return false;
+		}
+		start = newline + 1;
+	}
+	size_t rest = (size_t)(end - start);
+	memmove(peer->lines, start, rest);
+	peer->lines_used = rest;
+	return peer->lines_used < sizeof(peer->lines);
 }
 
 /* Resposta do "Permitir?" chegou (ou o tempo acabou). */
@@ -661,6 +777,11 @@ static void publish_status(const struct peer *peers)
 	}
 	pthread_mutex_lock(&mutex);
 	snprintf(connected_names, sizeof(connected_names), "%s", names);
+	/* Projeção desconectou: a legenda não fica presa na tela. */
+	if (!count && caption_text[0]) {
+		caption_text[0] = 0;
+		caption_version++;
+	}
 	connected_count = count;
 	pthread_mutex_unlock(&mutex);
 }
@@ -670,7 +791,8 @@ static void *link_thread(void *data)
 	(void)data;
 	os_set_thread_name("projeto-live: projeção");
 
-	struct peer peers[MAX_PEERS];
+	/* Fora da pilha: cada conexão guarda até 24 KB de texto chegando. */
+	static struct peer peers[MAX_PEERS];
 	for (int i = 0; i < MAX_PEERS; i++) {
 		peer_reset(&peers[i]);
 	}

@@ -14,6 +14,8 @@
  *   conectado:           "OK <nome deste OBS>", depois "WS <porta> <senha cifrada>" com os dados do
  *                        obs-websocket (é por ele que a projeção troca cena e liga a live), ou
  *                        "WS off" se o servidor do obs-websocket estiver desligado.
+ *   projeção -> OBS:     "TEXT <texto em base64>" (texto do slide no telão, para a fonte "Legenda
+ *                        (projeção)"; "TEXT -" = telão sem texto)
  *   os dois lados:       "PING" a cada 2 segundos; 6 segundos sem nada = conexão caiu
  *
  * A senha do obs-websocket vai cifrada com SHA-256(chave + desafio + "ws" + bloco), então nunca
@@ -29,6 +31,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,6 +44,9 @@ void pl_projection_stop(void);
 
 /* Quantas projeções estão conectadas agora; `names` recebe os nomes separados por ", ". */
 int pl_projection_status(char *names, size_t size);
+
+/* Texto do telão agora (para a legenda). Devolve um número que muda a cada texto novo. */
+uint64_t pl_projection_caption(char *text, size_t size);
 
 /* Resposta da pergunta "Permitir?" (chamada pela interface). */
 void pl_projection_answer(unsigned int ticket, bool allow);
