@@ -416,6 +416,15 @@ static int take_answer(unsigned int ticket)
 /* ------------------------------------------------------------------------- */
 /* Conexões                                                                  */
 
+/*
+ * Tempo desde `then`. As marcas de tempo das conexões são pegas na hora (depois de `now`), então
+ * `then` pode ser um pouco maior que `now`: conta como zero, e não como um número enorme.
+ */
+static uint64_t elapsed(uint64_t now, uint64_t then)
+{
+	return now > then ? now - then : 0;
+}
+
 static void peer_reset(struct peer *peer)
 {
 	memset(peer, 0, sizeof(*peer));
@@ -557,12 +566,12 @@ static bool read_peer(struct peer *peer, struct peer *peers)
 static bool check_approval(struct peer *peer, uint64_t now)
 {
 	int value = take_answer(peer->ticket);
-	if (!value && now - peer->since_ns > APPROVAL_TIMEOUT_NS) {
+	if (!value && elapsed(now, peer->since_ns) > APPROVAL_TIMEOUT_NS) {
 		value = -1;
 	}
 	if (!value) {
 		/* Enquanto a pessoa pensa, a conexão não cai. */
-		if (now - peer->last_send_ns > PING_INTERVAL_NS) {
+		if (elapsed(now, peer->last_send_ns) > PING_INTERVAL_NS) {
 			return send_line(peer, "PING");
 		}
 		return true;
@@ -746,13 +755,13 @@ static void *link_thread(void *data)
 			if (ok && peer->state == PEER_WAITING) {
 				ok = check_approval(peer, now);
 			}
-			if (ok && peer->state == PEER_HELLO && now - peer->since_ns > HELLO_TIMEOUT_NS) {
+			if (ok && peer->state == PEER_HELLO && elapsed(now, peer->since_ns) > HELLO_TIMEOUT_NS) {
 				ok = false;
 			}
 			if (ok && peer->state == PEER_READY) {
-				if (now - peer->last_recv_ns > SILENCE_TIMEOUT_NS) {
+				if (elapsed(now, peer->last_recv_ns) > SILENCE_TIMEOUT_NS) {
 					ok = false;
-				} else if (now - peer->last_send_ns > PING_INTERVAL_NS) {
+				} else if (elapsed(now, peer->last_send_ns) > PING_INTERVAL_NS) {
 					ok = send_line(peer, "PING");
 				}
 			}
