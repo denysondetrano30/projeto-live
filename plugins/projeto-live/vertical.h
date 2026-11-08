@@ -32,31 +32,28 @@ uint64_t pl_vertical_version(void);
 void pl_vertical_touch(void);
 
 /*
- * Cenas verticais, na ordem em que foram criadas. `linked_to` é o nome da cena horizontal ligada a
- * ela, ou NULL. Funções abaixo: thread da interface (menos pl_vertical_active_scene).
+ * Versão vertical da cena que está no ar (nova referência ou NULL). Cada cena do OBS tem a sua,
+ * criada sozinha; o vertical sempre acompanha o Programa. Thread da interface.
  */
-typedef bool (*pl_vertical_scene_cb)(void *param, obs_source_t *scene, const char *linked_to);
-void pl_vertical_enum_scenes(pl_vertical_scene_cb callback, void *param);
-
-/* Cena que está no ar na tela vertical (nova referência ou NULL). */
 obs_source_t *pl_vertical_current(void);
 /* O mesmo, para uma tela já em mãos (serve na thread de vídeo). */
 obs_source_t *pl_vertical_active_scene(obs_canvas_t *canvas);
-/* Põe uma cena vertical no ar (com a transição do vertical). */
-void pl_vertical_select(obs_source_t *scene);
 
-/* Cenas verticais: criar (nova referência), renomear e apagar. */
-obs_source_t *pl_vertical_add_scene(const char *name);
-bool pl_vertical_rename_scene(obs_source_t *scene, const char *name);
-void pl_vertical_remove_scene(obs_source_t *scene);
+/* A fonte original (da cena horizontal) que um item vertical representa (nova referência). */
+obs_source_t *pl_vertical_item_original(obs_sceneitem_t *item);
 
 /*
- * Ligar uma cena vertical a uma cena horizontal: quando o Programa troca para a horizontal, o
- * vertical troca para a ligada. Cada cena horizontal liga com uma vertical só. NULL desliga.
+ * Trocar fonte no vertical (vale em todas as cenas). SAME: no vertical vai a própria fonte (o
+ * normal). OTHER: vai outra fonte (ex.: a mesma contagem em 9:16). HIDE: a fonte não vai ao vertical.
  */
-void pl_vertical_link(obs_source_t *vertical, obs_source_t *horizontal);
-/* A cena horizontal ligada (nova referência ou NULL). */
-obs_source_t *pl_vertical_linked(obs_source_t *vertical);
+enum pl_vertical_pair_mode {
+	PL_PAIR_SAME,
+	PL_PAIR_OTHER,
+	PL_PAIR_HIDE,
+};
+/* `*other` recebe uma nova referência (ou NULL) quando o modo é OTHER. */
+enum pl_vertical_pair_mode pl_vertical_get_pair(obs_source_t *source, obs_source_t **other);
+void pl_vertical_set_pair(obs_source_t *source, enum pl_vertical_pair_mode mode, obs_source_t *other);
 
 /*
  * Transição do vertical: por padrão a mesma do Programa; com a preferência "transition_own", uma
@@ -65,9 +62,6 @@ obs_source_t *pl_vertical_linked(obs_source_t *vertical);
 void pl_vertical_transition_changed(void);
 /* A transição que o vertical está usando (nova referência ou NULL), para abrir as propriedades. */
 obs_source_t *pl_vertical_get_transition(void);
-
-/* Coloca uma fonte numa cena vertical com o enquadramento automático. */
-obs_sceneitem_t *pl_vertical_add_source(obs_source_t *scene, obs_source_t *source);
 
 /*
  * Enquadramentos rápidos para um item da tela vertical. FILL: preenche a tela inteira, cortando as

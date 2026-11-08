@@ -4,13 +4,10 @@
  * - Programa vertical: fica ao lado do preview do OBS (liga e desliga em Painéis > "Programa
  *   vertical"), com o nome da cena no ar, "Seguir o Programa" quando foi escolhida à mão e
  *   "Soltar", que leva para uma janela solta (fechar a janela traz de volta).
- * - "Cenas verticais" (como no Aitum Vertical): as cenas da tela vertical, criadas pela pessoa. Um
- *   clique põe a cena no ar no vertical e mostra as fontes dela; ⇄ mostra a cena do OBS ligada
- *   (quando o Programa troca para ela, o vertical troca junto). Botão direito: ligar, desligar,
- *   renomear, remover. Embaixo, a transição do vertical.
- * - "Fontes verticais": as fontes da cena escolhida, com a caixa de aparecer/sumir, a ordem, os
- *   enquadramentos rápidos (preencher, inteira, largura toda), propriedades e filtros. "+ Fonte"
- *   cria uma fonte nova ou usa uma que já existe.
+ * - "Fontes verticais": as fontes da versão vertical da cena no ar (é uma live só: o vertical
+ *   acompanha o Programa). Um botão, "Trocar fonte...", troca a fonte pela versão em pé dela (vale
+ *   em todas as cenas); botão direito: trocar, propriedades, filtros. Fonte cinza = escondida na
+ *   cena horizontal.
  * - Nas duas janelas de vídeo do vertical dá para mexer com o mouse, como no preview do OBS: um
  *   clique escolhe a fonte (moldura vermelha em volta da imagem), arrastar move (gruda nas bordas e
  *   no meio), os cantos redimensionam sem deformar e os meios dos lados cortam. Mexe na cena
@@ -28,6 +25,7 @@
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
+#include <obs.hpp>
 #if !defined(_WIN32) && !defined(__APPLE__)
 #include <obs-nix-platform.h>
 #endif
@@ -56,7 +54,6 @@
 #include <QPoint>
 #include <QPushButton>
 #include <QResizeEvent>
-#include <QSpinBox>
 #include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -83,20 +80,11 @@ QString moduleText(const char *key)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Cena escolhida para mexer (compartilhada pelos painéis de cenas e fontes)   */
-
-obs_weak_source_t *editing = nullptr;
+/* A cena vertical em que se mexe é sempre a que está no ar (uma live só)   */
 
 obs_source_t *editingScene()
 {
-	return editing ? obs_weak_source_get_source(editing) : nullptr;
-}
-
-void setEditingScene(obs_source_t *scene)
-{
-	obs_weak_source_release(editing);
-	editing = scene ? obs_source_get_weak_source(scene) : nullptr;
-	pl_vertical_touch();
+	return pl_vertical_current();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -438,11 +426,6 @@ protected:
 		}
 		obs_sceneitem_release(item);
 
-		obs_source_t *editingNow = editingScene();
-		if (current && editingNow != current) {
-			setEditingScene(current);
-		}
-		obs_source_release(editingNow);
 		obs_source_release(current);
 		pl_vertical_touch();
 	}
@@ -773,295 +756,6 @@ void placeEmbedded();
 /* ------------------------------------------------------------------------- */
 /* Painel "Cenas verticais"                                                   */
 
-struct SceneEntry {
-	obs_weak_source_t *weak = nullptr;
-};
-
-class ScenesDock : public QWidget {
-public:
-	explicit ScenesDock(QWidget *parent) : QWidget(parent)
-	{
-		auto *layout = new QVBoxLayout(this);
-		layout->setContentsMargins(4, 4, 4, 4);
-
-		list = new QListWidget(this);
-		list->setContextMenuPolicy(Qt::CustomContextMenu);
-		layout->addWidget(list, 1);
-		/* Como no OBS: clicar numa cena põe ela no ar (no vertical) e mostra as fontes dela. */
-		connect(list, &QListWidget::currentRowChanged, this, [this](int row) {
-			if (!rebuilding) {
-				chooseRow(row);
-			}
-		});
-		connect(list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) { rename(); });
-		connect(list, &QListWidget::customContextMenuRequested, this,
-			[this](const QPoint &point) { showMenu(list->mapToGlobal(point)); });
-
-		auto *help = new QLabel(moduleText("Vertical.Scenes.Help"), this);
-		help->setWordWrap(true);
-		help->setStyleSheet("color: #8a8a8a;");
-		layout->addWidget(help);
-
-		auto *row1 = new QHBoxLayout();
-		auto *add = new QPushButton(moduleText("Vertical.AddScene"), this);
-		auto *link = new QPushButton(moduleText("Vertical.Link"), this);
-		auto *remove = new QPushButton(moduleText("Vertical.RemoveScene"), this);
-		connect(add, &QPushButton::clicked, this, [this]() { addScene(); });
-		connect(link, &QPushButton::clicked, this,
-			[this, link]() { showMenu(link->mapToGlobal(QPoint(0, link->height()))); });
-		connect(remove, &QPushButton::clicked, this, [this]() { removeScene(); });
-		row1->addWidget(add);
-		row1->addWidget(link);
-		row1->addWidget(remove);
-		layout->addLayout(row1);
-
-		/* Transição do vertical: acompanha a do Programa (padrão) ou uma só dele. */
-		auto *row2 = new QHBoxLayout();
-		transitionType = new QComboBox(this);
-		transitionType->addItem(moduleText("Vertical.Transition.Follow"), QString());
-		const char *id;
-		for (size_t i = 0; obs_enum_transition_types(i, &id); i++) {
-			if (obs_get_source_output_flags(id) & (OBS_SOURCE_DEPRECATED | OBS_SOURCE_CAP_DISABLED)) {
-				continue;
-			}
-			const char *label = obs_source_get_display_name(id);
-			transitionType->addItem(QString::fromUtf8(label ? label : id), QString::fromUtf8(id));
-		}
-		transitionMs = new QSpinBox(this);
-		transitionMs->setRange(50, 20000);
-		transitionMs->setSingleStep(50);
-		transitionMs->setSuffix(" ms");
-		transitionMs->setValue(pl_vertical_pref_int("transition_ms"));
-		transitionProps = new QPushButton(QString::fromUtf8("⚙"), this);
-		transitionProps->setToolTip(moduleText("Vertical.Transition.Properties"));
-		row2->addWidget(new QLabel(moduleText("Vertical.Transition"), this));
-		row2->addWidget(transitionType, 1);
-		row2->addWidget(transitionMs);
-		row2->addWidget(transitionProps);
-		layout->addLayout(row2);
-
-		int chosen = 0;
-		if (pl_vertical_pref("transition_own")) {
-			chosen = transitionType->findData(QString::fromUtf8(pl_vertical_pref_string("transition_id")));
-		}
-		transitionType->setCurrentIndex(chosen < 0 ? 0 : chosen);
-		updateTransitionControls();
-
-		connect(transitionType, &QComboBox::currentIndexChanged, this, [this](int) {
-			QByteArray chosenId = transitionType->currentData().toString().toUtf8();
-			bool own = !chosenId.isEmpty();
-			pl_vertical_set_pref("transition_own", own);
-			if (own) {
-				pl_vertical_set_pref_string("transition_id", chosenId.constData());
-			}
-			pl_vertical_transition_changed();
-			updateTransitionControls();
-		});
-		connect(transitionMs, &QSpinBox::valueChanged, this,
-			[](int ms) { pl_vertical_set_pref_int("transition_ms", ms); });
-		connect(transitionProps, &QPushButton::clicked, this, []() {
-			obs_source_t *current = pl_vertical_get_transition();
-			if (current) {
-				obs_frontend_open_source_properties(current);
-			}
-			obs_source_release(current);
-		});
-	}
-
-	~ScenesDock() override { clearEntries(); }
-
-	void rebuild()
-	{
-		rebuilding = true;
-		obs_source_t *current = pl_vertical_current();
-		clearEntries();
-		list->clear();
-		struct Collect {
-			ScenesDock *self;
-			obs_source_t *current;
-			int currentRow;
-		} collect = {this, current, -1};
-
-		pl_vertical_enum_scenes(
-			[](void *param, obs_source_t *scene, const char *linkedTo) -> bool {
-				auto *c = static_cast<Collect *>(param);
-				QString text = QString::fromUtf8(obs_source_get_name(scene));
-				if (linkedTo) {
-					text += QString::fromUtf8("   ⇄ ") + QString::fromUtf8(linkedTo);
-				}
-				auto *item = new QListWidgetItem(text);
-				if (scene == c->current) {
-					QFont font = item->font();
-					font.setBold(true);
-					item->setFont(font);
-					item->setText(text + QString::fromUtf8("  ●"));
-					item->setForeground(QColor(229, 72, 77));
-					c->currentRow = (int)c->self->entries.size();
-				}
-				c->self->list->addItem(item);
-				SceneEntry entry;
-				entry.weak = obs_source_get_weak_source(scene);
-				c->self->entries.push_back(entry);
-				return true;
-			},
-			&collect);
-
-		list->setCurrentRow(collect.currentRow);
-		obs_source_t *chosen = collect.currentRow >= 0 ? sceneAt(collect.currentRow) : nullptr;
-		obs_source_t *editingNow = editingScene();
-		if (chosen && chosen != editingNow) {
-			obs_weak_source_release(editing);
-			editing = obs_source_get_weak_source(chosen);
-		}
-		obs_source_release(editingNow);
-		obs_source_release(chosen);
-		obs_source_release(current);
-		rebuilding = false;
-	}
-
-private:
-	void clearEntries()
-	{
-		for (SceneEntry &entry : entries) {
-			obs_weak_source_release(entry.weak);
-		}
-		entries.clear();
-	}
-
-	void updateTransitionControls()
-	{
-		bool own = transitionType->currentIndex() > 0;
-		transitionMs->setEnabled(own);
-		transitionProps->setEnabled(own);
-	}
-
-	obs_source_t *sceneAt(int row)
-	{
-		if (row < 0 || row >= (int)entries.size()) {
-			return nullptr;
-		}
-		return obs_weak_source_get_source(entries[row].weak);
-	}
-
-	void chooseRow(int row)
-	{
-		obs_source_t *scene = sceneAt(row);
-		if (scene) {
-			setEditingScene(scene);
-			pl_vertical_select(scene);
-		}
-		obs_source_release(scene);
-	}
-
-	/* Menu do botão direito (e do botão "Ligar"): ligar, desligar, renomear, remover. */
-	void showMenu(const QPoint &where)
-	{
-		obs_source_t *scene = sceneAt(list->currentRow());
-		if (!scene) {
-			return;
-		}
-		obs_source_t *linked = pl_vertical_linked(scene);
-
-		QMenu menu(this);
-		QMenu *linkMenu = menu.addMenu(moduleText("Vertical.Link.To"));
-		struct obs_frontend_source_list horizontals = {};
-		obs_frontend_get_scenes(&horizontals);
-		for (size_t i = 0; i < horizontals.sources.num; i++) {
-			obs_source_t *horizontal = horizontals.sources.array[i];
-			QAction *action = linkMenu->addAction(QString::fromUtf8(obs_source_get_name(horizontal)));
-			action->setCheckable(true);
-			action->setChecked(horizontal == linked);
-			QString uuid = QString::fromUtf8(obs_source_get_uuid(horizontal));
-			QString sceneUuid = QString::fromUtf8(obs_source_get_uuid(scene));
-			connect(action, &QAction::triggered, this, [uuid, sceneUuid]() {
-				QByteArray h = uuid.toUtf8();
-				QByteArray v = sceneUuid.toUtf8();
-				obs_source_t *horizontalNow = obs_get_source_by_uuid(h.constData());
-				obs_source_t *verticalNow = obs_get_source_by_uuid(v.constData());
-				pl_vertical_link(verticalNow, horizontalNow);
-				obs_source_release(verticalNow);
-				obs_source_release(horizontalNow);
-			});
-		}
-		obs_frontend_source_list_free(&horizontals);
-
-		QAction *unlink = menu.addAction(moduleText("Vertical.Unlink"));
-		unlink->setEnabled(linked != nullptr);
-		connect(unlink, &QAction::triggered, this, [this]() {
-			obs_source_t *chosen = sceneAt(list->currentRow());
-			pl_vertical_link(chosen, nullptr);
-			obs_source_release(chosen);
-		});
-		menu.addSeparator();
-		connect(menu.addAction(moduleText("Vertical.Rename")), &QAction::triggered, this,
-			[this]() { rename(); });
-		connect(menu.addAction(moduleText("Vertical.RemoveScene")), &QAction::triggered, this,
-			[this]() { removeScene(); });
-
-		obs_source_release(linked);
-		obs_source_release(scene);
-		menu.exec(where);
-	}
-
-	void addScene()
-	{
-		bool ok = false;
-		QString name = QInputDialog::getText(this, moduleText("Vertical.AddScene"),
-						     moduleText("Vertical.AddScene.Name"), QLineEdit::Normal,
-						     moduleText("Vertical.AddScene.Default"), &ok);
-		if (!ok) {
-			return;
-		}
-		QByteArray bytes = name.trimmed().toUtf8();
-		obs_source_t *scene = pl_vertical_add_scene(bytes.constData());
-		if (scene) {
-			setEditingScene(scene);
-			pl_vertical_select(scene);
-		}
-		obs_source_release(scene);
-	}
-
-	void rename()
-	{
-		obs_source_t *scene = sceneAt(list->currentRow());
-		if (!scene) {
-			return;
-		}
-		bool ok = false;
-		QString name = QInputDialog::getText(this, moduleText("Vertical.Rename"),
-						     moduleText("Vertical.AddScene.Name"), QLineEdit::Normal,
-						     QString::fromUtf8(obs_source_get_name(scene)), &ok);
-		if (ok) {
-			QByteArray bytes = name.trimmed().toUtf8();
-			pl_vertical_rename_scene(scene, bytes.constData());
-		}
-		obs_source_release(scene);
-	}
-
-	void removeScene()
-	{
-		obs_source_t *scene = sceneAt(list->currentRow());
-		if (!scene) {
-			return;
-		}
-		QString question =
-			moduleText("Vertical.RemoveScene.Question").arg(QString::fromUtf8(obs_source_get_name(scene)));
-		if (QMessageBox::question(this, moduleText("Vertical.RemoveScene"), question) == QMessageBox::Yes) {
-			setEditingScene(nullptr);
-			setSelection(nullptr, 0);
-			pl_vertical_remove_scene(scene);
-		}
-		obs_source_release(scene);
-	}
-
-	QListWidget *list = nullptr;
-	QComboBox *transitionType = nullptr;
-	QSpinBox *transitionMs = nullptr;
-	QPushButton *transitionProps = nullptr;
-	std::vector<SceneEntry> entries;
-	bool rebuilding = false;
-};
-
 QStringList allSourceNames()
 {
 	QStringList names;
@@ -1074,6 +768,130 @@ QStringList allSourceNames()
 	names.sort(Qt::CaseInsensitive);
 	return names;
 }
+
+/* ------------------------------------------------------------------------- */
+/* Janela "Trocar fonte"                                                      */
+
+class SwapDialog : public QDialog {
+public:
+	SwapDialog(QWidget *parent, obs_source_t *original) : QDialog(parent), source(obs_source_get_ref(original))
+	{
+		setWindowTitle(moduleText("Vertical.Swap.Title"));
+		setMinimumWidth(420);
+		auto *layout = new QVBoxLayout(this);
+		auto *question =
+			new QLabel(moduleText("Vertical.Swap.Question")
+					   .arg(QString::fromUtf8(obs_source_get_name(original)).toHtmlEscaped()),
+				   this);
+		question->setTextFormat(Qt::RichText);
+		question->setWordWrap(true);
+		layout->addWidget(question);
+
+		choice = new QComboBox(this);
+		choice->addItem(moduleText("Vertical.Swap.Same"), QStringLiteral("same"));
+		choice->addItem(moduleText("Vertical.Swap.Hide"), QStringLiteral("hide"));
+		choice->addItem(moduleText("Vertical.Swap.New"), QStringLiteral("new"));
+		for (const QString &name : allSourceNames()) {
+			if (name != QString::fromUtf8(obs_source_get_name(original))) {
+				choice->addItem(name, name);
+			}
+		}
+		layout->addWidget(choice);
+
+		auto *help = new QLabel(moduleText("Vertical.Swap.Help"), this);
+		help->setWordWrap(true);
+		help->setStyleSheet("color: #8a8a8a;");
+		layout->addWidget(help);
+
+		auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+		connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+		connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+		layout->addWidget(buttons);
+
+		obs_source_t *other = nullptr;
+		enum pl_vertical_pair_mode mode = pl_vertical_get_pair(original, &other);
+		int index = 0;
+		if (mode == PL_PAIR_HIDE) {
+			index = 1;
+		} else if (mode == PL_PAIR_OTHER && other) {
+			index = choice->findData(QString::fromUtf8(obs_source_get_name(other)));
+		}
+		choice->setCurrentIndex(index < 0 ? 0 : index);
+		obs_source_release(other);
+	}
+
+	~SwapDialog() override { obs_source_release(source); }
+
+	void apply()
+	{
+		QString data = choice->currentData().toString();
+		if (data == QStringLiteral("same")) {
+			pl_vertical_set_pair(source, PL_PAIR_SAME, nullptr);
+		} else if (data == QStringLiteral("hide")) {
+			pl_vertical_set_pair(source, PL_PAIR_HIDE, nullptr);
+		} else if (data == QStringLiteral("new")) {
+			obs_source_t *fresh = createSource();
+			if (fresh) {
+				pl_vertical_set_pair(source, PL_PAIR_OTHER, fresh);
+				obs_frontend_open_source_properties(fresh);
+			}
+			obs_source_release(fresh);
+		} else {
+			QByteArray name = data.toUtf8();
+			obs_source_t *other = obs_get_source_by_name(name.constData());
+			pl_vertical_set_pair(source, other ? PL_PAIR_OTHER : PL_PAIR_SAME, other);
+			obs_source_release(other);
+		}
+	}
+
+private:
+	/* Uma fonte nova (ex.: o arquivo da contagem em 9:16), do tipo que a pessoa escolher. */
+	obs_source_t *createSource()
+	{
+		QStringList labels;
+		QStringList ids;
+		const char *id;
+		for (size_t i = 0; obs_enum_input_types(i, &id); i++) {
+			if (obs_get_source_output_flags(id) & (OBS_SOURCE_DEPRECATED | OBS_SOURCE_CAP_DISABLED)) {
+				continue;
+			}
+			const char *label = obs_source_get_display_name(id);
+			labels.append(QString::fromUtf8(label ? label : id));
+			ids.append(QString::fromUtf8(id));
+		}
+		bool ok = false;
+		QString type = QInputDialog::getItem(this, moduleText("Vertical.Swap.New"),
+						     moduleText("Vertical.Swap.Type"), labels, 0, false, &ok);
+		int index = labels.indexOf(type);
+		if (!ok || index < 0) {
+			return nullptr;
+		}
+		QString wanted = QString::fromUtf8(obs_source_get_name(source)) + QStringLiteral(" (vertical)");
+		QString name = QInputDialog::getText(this, moduleText("Vertical.Swap.New"),
+						     moduleText("Vertical.Swap.Name"), QLineEdit::Normal, wanted, &ok)
+				       .trimmed();
+		if (!ok || name.isEmpty()) {
+			return nullptr;
+		}
+		QString unique = name;
+		for (int n = 2; n < 1000; n++) {
+			QByteArray probe = unique.toUtf8();
+			obs_source_t *other = obs_get_source_by_name(probe.constData());
+			bool taken = other != nullptr;
+			obs_source_release(other);
+			if (!taken) {
+				break;
+			}
+			unique = name + QStringLiteral(" ") + QString::number(n);
+		}
+		QByteArray typeId = ids[index].toUtf8();
+		QByteArray bytes = unique.toUtf8();
+		return obs_source_create(typeId.constData(), bytes.constData(), nullptr, nullptr);
+	}
+
+	obs_source_t *source = nullptr;
+	QComboBox *choice = nullptr;
+};
 
 /* ------------------------------------------------------------------------- */
 /* Painel "Fontes verticais"                                                  */
@@ -1091,6 +909,7 @@ public:
 		layout->addWidget(title);
 
 		list = new QListWidget(this);
+		list->setContextMenuPolicy(Qt::CustomContextMenu);
 		layout->addWidget(list, 1);
 		connect(list, &QListWidget::currentRowChanged, this, [this](int row) {
 			if (rebuilding || row < 0 || row >= (int)ids.size()) {
@@ -1101,66 +920,13 @@ public:
 			setSelection(sceneSource, ids[row]);
 			obs_source_release(sceneSource);
 		});
-		connect(list, &QListWidget::itemChanged, this, [this](QListWidgetItem *item) {
-			if (rebuilding) {
-				return;
-			}
-			obs_sceneitem_t *sceneItem = itemAt(list->row(item));
-			if (sceneItem) {
-				obs_sceneitem_set_visible(sceneItem, item->checkState() == Qt::Checked);
-				obs_sceneitem_release(sceneItem);
-			}
-		});
+		connect(list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) { swap(); });
+		connect(list, &QListWidget::customContextMenuRequested, this,
+			[this](const QPoint &point) { showMenu(list->mapToGlobal(point)); });
 
-		auto *row1 = new QHBoxLayout();
-		auto *add = new QPushButton(moduleText("Vertical.Sources.Add"), this);
-		auto *remove = new QPushButton(moduleText("Vertical.Sources.Remove"), this);
-		auto *up = new QPushButton(QString::fromUtf8("↑"), this);
-		auto *down = new QPushButton(QString::fromUtf8("↓"), this);
-		up->setToolTip(moduleText("Vertical.Sources.Up"));
-		down->setToolTip(moduleText("Vertical.Sources.Down"));
-		connect(add, &QPushButton::clicked, this, [this]() { addSource(); });
-		connect(remove, &QPushButton::clicked, this, [this]() { removeSource(); });
-		connect(up, &QPushButton::clicked, this, [this]() { move(OBS_ORDER_MOVE_UP); });
-		connect(down, &QPushButton::clicked, this, [this]() { move(OBS_ORDER_MOVE_DOWN); });
-		row1->addWidget(add);
-		row1->addWidget(remove);
-		row1->addWidget(up);
-		row1->addWidget(down);
-		layout->addLayout(row1);
-
-		auto *row2 = new QHBoxLayout();
-		auto *fill = new QPushButton(moduleText("Vertical.Fit.Fill"), this);
-		auto *whole = new QPushButton(moduleText("Vertical.Fit.Whole"), this);
-		auto *width = new QPushButton(moduleText("Vertical.Fit.Width"), this);
-		connect(fill, &QPushButton::clicked, this, [this]() { fit(PL_FIT_FILL); });
-		connect(whole, &QPushButton::clicked, this, [this]() { fit(PL_FIT_WHOLE); });
-		connect(width, &QPushButton::clicked, this, [this]() { fit(PL_FIT_WIDTH); });
-		row2->addWidget(fill);
-		row2->addWidget(whole);
-		row2->addWidget(width);
-		layout->addLayout(row2);
-
-		auto *row3 = new QHBoxLayout();
-		auto *properties = new QPushButton(moduleText("Vertical.Sources.Properties"), this);
-		auto *filters = new QPushButton(moduleText("Vertical.Sources.Filters"), this);
-		connect(properties, &QPushButton::clicked, this, [this]() {
-			obs_sceneitem_t *item = itemAt(list->currentRow());
-			if (item) {
-				obs_frontend_open_source_properties(obs_sceneitem_get_source(item));
-				obs_sceneitem_release(item);
-			}
-		});
-		connect(filters, &QPushButton::clicked, this, [this]() {
-			obs_sceneitem_t *item = itemAt(list->currentRow());
-			if (item) {
-				obs_frontend_open_source_filters(obs_sceneitem_get_source(item));
-				obs_sceneitem_release(item);
-			}
-		});
-		row3->addWidget(properties);
-		row3->addWidget(filters);
-		layout->addLayout(row3);
+		auto *swapButton = new QPushButton(moduleText("Vertical.Swap.Button"), this);
+		connect(swapButton, &QPushButton::clicked, this, [this]() { swap(); });
+		layout->addWidget(swapButton);
 	}
 
 	void rebuild()
@@ -1175,9 +941,9 @@ public:
 		if (!scene) {
 			title->setText(moduleText("Vertical.Sources.NoScene"));
 		} else {
-			title->setText(
-				moduleText("Vertical.Sources.Title")
-					.arg(QString::fromUtf8(obs_source_get_name(sceneSource)).toHtmlEscaped()));
+			QString name = QString::fromUtf8(obs_source_get_name(sceneSource));
+			name.remove(QStringLiteral(" (vertical)"));
+			title->setText(moduleText("Vertical.Sources.Title").arg(name.toHtmlEscaped()));
 
 			/* O OBS lista de baixo para cima; o painel mostra o que fica por cima primeiro. */
 			std::vector<obs_sceneitem_t *> items;
@@ -1190,14 +956,24 @@ public:
 				&items);
 			std::reverse(items.begin(), items.end());
 			for (obs_sceneitem_t *item : items) {
-				obs_source_t *source = obs_sceneitem_get_source(item);
-				auto *row = new QListWidgetItem(QString::fromUtf8(obs_source_get_name(source)));
-				row->setFlags(row->flags() | Qt::ItemIsUserCheckable);
-				row->setCheckState(obs_sceneitem_visible(item) ? Qt::Checked : Qt::Unchecked);
+				obs_source_t *shown = obs_sceneitem_get_source(item);
+				obs_source_t *original = pl_vertical_item_original(item);
+				QString text = QString::fromUtf8(obs_source_get_name(shown));
+				if (original && original != shown) {
+					text += QStringLiteral("   ") +
+						moduleText("Vertical.Sources.InsteadOf")
+							.arg(QString::fromUtf8(obs_source_get_name(original)));
+				}
+				obs_source_release(original);
+				auto *row = new QListWidgetItem(text);
+				if (!obs_sceneitem_visible(item)) {
+					row->setForeground(QColor(128, 128, 128));
+				}
 				list->addItem(row);
 				ids.push_back(obs_sceneitem_get_id(item));
 			}
 		}
+
 		/* A fonte escolhida com o mouse fica marcada na lista. */
 		obs_sceneitem_t *selected = sceneSource ? selectedItemIn(sceneSource) : nullptr;
 		if (selected) {
@@ -1217,7 +993,7 @@ public:
 	}
 
 private:
-	/* Item da cena escolhida na linha `row` (nova referência). */
+	/* Item da cena no ar na linha `row` (nova referência). */
 	obs_sceneitem_t *itemAt(int row)
 	{
 		if (row < 0 || row >= (int)ids.size()) {
@@ -1233,121 +1009,43 @@ private:
 		return item;
 	}
 
-	/* "+ Fonte": uma fonte nova (como no OBS) ou uma que já existe na tela horizontal. */
-	void addSource()
+	void swap()
 	{
-		obs_source_t *sceneSource = editingScene();
-		if (!sceneSource) {
+		obs_sceneitem_t *item = itemAt(list->currentRow());
+		if (!item) {
 			return;
 		}
+		obs_source_t *original = pl_vertical_item_original(item);
+		obs_sceneitem_release(item);
+		if (original) {
+			SwapDialog dialog(this, original);
+			if (dialog.exec() == QDialog::Accepted) {
+				dialog.apply();
+			}
+		}
+		obs_source_release(original);
+	}
+
+	/* Botão direito: trocar, propriedades e filtros. */
+	void showMenu(const QPoint &where)
+	{
+		obs_sceneitem_t *item = itemAt(list->currentRow());
+		if (!item) {
+			return;
+		}
+		OBSSourceAutoRelease shown = obs_source_get_ref(obs_sceneitem_get_source(item));
+		obs_sceneitem_release(item);
+
 		QMenu menu(this);
-		QAction *fresh = menu.addAction(moduleText("Vertical.Sources.New"));
-		QAction *existing = menu.addAction(moduleText("Vertical.Sources.Existing"));
-		QAction *chosen = menu.exec(QCursor::pos());
-		if (chosen == fresh) {
-			addNewSource(sceneSource);
-		} else if (chosen == existing) {
-			addExistingSource(sceneSource);
-		}
-		obs_source_release(sceneSource);
-	}
-
-	void addNewSource(obs_source_t *sceneSource)
-	{
-		QStringList labels;
-		QStringList ids;
-		const char *id;
-		for (size_t i = 0; obs_enum_input_types(i, &id); i++) {
-			uint32_t flags = obs_get_source_output_flags(id);
-			if (flags & (OBS_SOURCE_DEPRECATED | OBS_SOURCE_CAP_DISABLED)) {
-				continue;
-			}
-			const char *label = obs_source_get_display_name(id);
-			labels.append(QString::fromUtf8(label ? label : id));
-			ids.append(QString::fromUtf8(id));
-		}
-		bool ok = false;
-		QString type = QInputDialog::getItem(this, moduleText("Vertical.Sources.New"),
-						     moduleText("Vertical.Sources.Type"), labels, 0, false, &ok);
-		int index = labels.indexOf(type);
-		if (!ok || index < 0) {
-			return;
-		}
-		QString name = QInputDialog::getText(this, moduleText("Vertical.Sources.New"),
-						     moduleText("Vertical.AddScene.Name"), QLineEdit::Normal, type,
-						     &ok);
-		if (!ok || name.trimmed().isEmpty()) {
-			return;
-		}
-
-		/* Nome que ainda não existe ("Imagem", "Imagem 2"...). */
-		QString unique = name.trimmed();
-		for (int n = 2; n < 1000; n++) {
-			QByteArray probe = unique.toUtf8();
-			obs_source_t *other = obs_get_source_by_name(probe.constData());
-			obs_source_release(other);
-			if (!other) {
-				break;
-			}
-			unique = name.trimmed() + QStringLiteral(" ") + QString::number(n);
-		}
-
-		QByteArray typeId = ids[index].toUtf8();
-		QByteArray bytes = unique.toUtf8();
-		obs_source_t *source = obs_source_create(typeId.constData(), bytes.constData(), nullptr, nullptr);
-		if (source) {
-			pl_vertical_add_source(sceneSource, source);
-			obs_frontend_open_source_properties(source);
-			obs_source_release(source);
-			pl_vertical_touch();
-		}
-	}
-
-	void addExistingSource(obs_source_t *sceneSource)
-	{
-		bool ok = false;
-		QString chosen = QInputDialog::getItem(this, moduleText("Vertical.Sources.Existing"),
-						       moduleText("Vertical.Sources.Choose"), allSourceNames(), 0,
-						       false, &ok);
-		if (ok && !chosen.isEmpty()) {
-			QByteArray bytes = chosen.toUtf8();
-			obs_source_t *source = obs_get_source_by_name(bytes.constData());
-			pl_vertical_add_source(sceneSource, source);
-			obs_source_release(source);
-			pl_vertical_touch();
-		}
-	}
-
-	void removeSource()
-	{
-		obs_sceneitem_t *item = itemAt(list->currentRow());
-		if (item) {
-			obs_sceneitem_remove(item);
-			obs_sceneitem_release(item);
-			pl_vertical_touch();
-		}
-	}
-
-	void move(enum obs_order_movement movement)
-	{
-		obs_sceneitem_t *item = itemAt(list->currentRow());
-		if (item) {
-			obs_sceneitem_set_order(item, movement);
-			obs_sceneitem_release(item);
-			int row = list->currentRow() + (movement == OBS_ORDER_MOVE_UP ? -1 : 1);
-			pl_vertical_touch();
-			rebuild();
-			list->setCurrentRow(std::clamp(row, 0, std::max(list->count() - 1, 0)));
-		}
-	}
-
-	void fit(enum pl_vertical_fit how)
-	{
-		obs_sceneitem_t *item = itemAt(list->currentRow());
-		if (item) {
-			pl_vertical_fit_item(item, how);
-			obs_sceneitem_release(item);
-		}
+		connect(menu.addAction(moduleText("Vertical.Swap.Button")), &QAction::triggered, this,
+			[this]() { swap(); });
+		menu.addSeparator();
+		obs_source_t *raw = shown.Get();
+		connect(menu.addAction(moduleText("Vertical.Sources.Properties")), &QAction::triggered, this,
+			[raw]() { obs_frontend_open_source_properties(raw); });
+		connect(menu.addAction(moduleText("Vertical.Sources.Filters")), &QAction::triggered, this,
+			[raw]() { obs_frontend_open_source_filters(raw); });
+		menu.exec(where);
 	}
 
 	QLabel *title = nullptr;
@@ -1526,7 +1224,6 @@ void placeEmbedded()
 /* ------------------------------------------------------------------------- */
 /* Quem atualiza os painéis                                                   */
 
-ScenesDock *scenesDock = nullptr;
 SourcesDock *sourcesDock = nullptr;
 QTimer *timer = nullptr;
 uint64_t seenVersion = (uint64_t)-1;
@@ -1544,9 +1241,6 @@ void refreshDocks()
 		return;
 	}
 	seenVersion = now;
-	if (scenesDock) {
-		scenesDock->rebuild();
-	}
 	if (sourcesDock) {
 		sourcesDock->rebuild();
 	}
@@ -1559,7 +1253,6 @@ void frontendEvent(enum obs_frontend_event event, void *)
 		QTimer::singleShot(0, []() { placeEmbedded(); });
 	}
 	if (event == OBS_FRONTEND_EVENT_EXIT || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) {
-		setEditingScene(nullptr);
 		setSelection(nullptr, 0);
 	}
 	if (event == OBS_FRONTEND_EVENT_EXIT) {
@@ -1589,11 +1282,7 @@ void pl_vertical_dock_load(void)
 		return;
 	}
 
-	scenesDock = addDock<ScenesDock>(mainWindow, "projeto-live-vertical-cenas", "Vertical.Scenes.Title");
 	sourcesDock = addDock<SourcesDock>(mainWindow, "projeto-live-vertical-fontes", "Vertical.Sources.Title.Dock");
-	if (scenesDock) {
-		QObject::connect(scenesDock, &QObject::destroyed, []() { scenesDock = nullptr; });
-	}
 	if (sourcesDock) {
 		QObject::connect(sourcesDock, &QObject::destroyed, []() { sourcesDock = nullptr; });
 	}

@@ -8,7 +8,8 @@
  *   do YouTube etc.); embaixo, na mesma aba, entram os destinos horizontais (YouTube, Facebook ou
  *   outro endereço) e os verticais (Instagram, TikTok ou outro endereço). Tudo fica numa área com
  *   rolagem.
- * - Aba Saída do OBS: no fim, a caixa "Gravação vertical" (ligar, pasta e qualidade).
+ * - Aba Saída do OBS: no fim, a caixa "Tela vertical": gravação vertical (ligar, pasta e qualidade)
+ *   e a transição do vertical (acompanha a do Programa ou uma só dele).
  * - As mudanças só valem no "Aplicar" ou "OK", como o resto das Configurações.
  * - Barra de baixo do OBS: uma bolinha por destino marcado enquanto a transmissão está no ar
  *   (verde no ar, amarelo ligando ou reconectando, vermelho com erro); passar o mouse mostra o
@@ -50,6 +51,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScrollArea>
+#include <QSpinBox>
 #include <QStatusBar>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -65,6 +67,7 @@
 
 #include "multistream.h"
 #include "vertical-record.h"
+#include "vertical.h"
 
 namespace {
 
@@ -491,7 +494,7 @@ private:
 	DestinationsBox *vertical = nullptr;
 };
 
-/* A caixa "Gravação vertical", no fim da aba Saída. */
+/* A caixa "Tela vertical" (gravação e transição do vertical), no fim da aba Saída. */
 class RecordSection : public QGroupBox {
 public:
 	RecordSection(QWidget *parent, std::function<void()> onChange)
@@ -518,6 +521,54 @@ public:
 		form->addRow(moduleText("Multistream.Record.Folder"), folderLine);
 		form->addRow(moduleText("Multistream.Record.Quality"), recordKbps);
 
+		/* Transição do vertical: acompanha a do Programa (padrão) ou uma só dele. */
+		transitionType = new QComboBox(this);
+		transitionType->addItem(moduleText("Vertical.Transition.Follow"), QString());
+		const char *id;
+		for (size_t i = 0; obs_enum_transition_types(i, &id); i++) {
+			if (obs_get_source_output_flags(id) & (OBS_SOURCE_DEPRECATED | OBS_SOURCE_CAP_DISABLED)) {
+				continue;
+			}
+			const char *label = obs_source_get_display_name(id);
+			transitionType->addItem(QString::fromUtf8(label ? label : id), QString::fromUtf8(id));
+		}
+		int chosen = 0;
+		if (pl_vertical_pref("transition_own")) {
+			chosen = transitionType->findData(QString::fromUtf8(pl_vertical_pref_string("transition_id")));
+		}
+		transitionType->setCurrentIndex(chosen < 0 ? 0 : chosen);
+		transitionMs = new QSpinBox(this);
+		transitionMs->setRange(50, 20000);
+		transitionMs->setSingleStep(50);
+		transitionMs->setSuffix(" ms");
+		transitionMs->setValue(pl_vertical_pref_int("transition_ms"));
+		auto *transitionProps = new QPushButton(QString::fromUtf8("⚙"), this);
+		transitionProps->setToolTip(moduleText("Vertical.Transition.Properties"));
+		auto *transitionLine = new QHBoxLayout();
+		transitionLine->addWidget(transitionType, 1);
+		transitionLine->addWidget(transitionMs);
+		transitionLine->addWidget(transitionProps);
+		form->addRow(moduleText("Vertical.Transition"), transitionLine);
+		auto updateTransition = [this, transitionProps]() {
+			bool own = transitionType->currentIndex() > 0;
+			transitionMs->setEnabled(own);
+			/* As propriedades são da transição que já está valendo (depois do Aplicar). */
+			transitionProps->setEnabled(own && pl_vertical_pref("transition_own"));
+		};
+		updateTransition();
+		connect(transitionType, &QComboBox::currentIndexChanged, this, [this, updateTransition](int) {
+			updateTransition();
+			changed();
+		});
+		connect(transitionMs, &QSpinBox::valueChanged, this, [this](int) { changed(); });
+		connect(transitionProps, &QPushButton::clicked, this, []() {
+			obs_source_t *current = pl_vertical_get_transition();
+			if (current) {
+				obs_frontend_open_source_properties(current);
+			}
+			obs_source_release(current);
+		});
+
 		connect(browse, &QPushButton::clicked, this, [this]() {
 			QString dir = QFileDialog::getExistingDirectory(this, moduleText("Multistream.Record.Browse"),
 									folder->text());
@@ -537,6 +588,15 @@ public:
 		QByteArray path = folder->text().trimmed().toUtf8();
 		pl_vertical_set_pref_string("record_folder", path.constData());
 		pl_vertical_set_pref_int("record_kbps", (int)(recordKbps->value() * 1000.0 + 0.5));
+
+		QByteArray transitionId = transitionType->currentData().toString().toUtf8();
+		bool own = !transitionId.isEmpty();
+		pl_vertical_set_pref("transition_own", own);
+		if (own) {
+			pl_vertical_set_pref_string("transition_id", transitionId.constData());
+		}
+		pl_vertical_set_pref_int("transition_ms", transitionMs->value());
+		pl_vertical_transition_changed();
 	}
 
 private:
@@ -544,6 +604,8 @@ private:
 	QCheckBox *recordOn = nullptr;
 	QLineEdit *folder = nullptr;
 	QDoubleSpinBox *recordKbps = nullptr;
+	QComboBox *transitionType = nullptr;
+	QSpinBox *transitionMs = nullptr;
 };
 
 /* Põe as partes do Projeto Live nas abas Transmissão e Saída quando as Configurações abrem. */
