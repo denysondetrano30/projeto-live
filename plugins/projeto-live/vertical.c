@@ -48,6 +48,7 @@
 #define TWIN_KEY "pl_twin_of"
 #define OLD_LINK_KEY "pl_link"
 #define ORIGINAL_KEY "pl_original"
+#define EXTRA_ITEM_KEY "pl_extra"
 #define PAIR_KEY "pl_vertical_pair"
 #define HIDE_KEY "pl_vertical_hide"
 
@@ -1048,6 +1049,106 @@ obs_source_t *pl_vertical_item_original(obs_sceneitem_t *item)
 		original = obs_source_get_ref(obs_sceneitem_get_source(item));
 	}
 	return original;
+}
+
+bool pl_vertical_item_is_extra(obs_sceneitem_t *item)
+{
+	obs_data_t *marks = item ? obs_sceneitem_get_private_settings(item) : NULL;
+	bool extra = marks && obs_data_get_bool(marks, EXTRA_ITEM_KEY);
+	obs_data_release(marks);
+	return extra;
+}
+
+obs_sceneitem_t *pl_vertical_add_extra_source(obs_source_t *scene_source, obs_source_t *source)
+{
+	obs_scene_t *scene = in_vertical(scene_source) ? obs_scene_from_source(scene_source) : NULL;
+	if (!scene || !source) {
+		return NULL;
+	}
+	obs_sceneitem_t *item = obs_scene_add(scene, source);
+	if (item) {
+		obs_data_t *marks = obs_sceneitem_get_private_settings(item);
+		obs_data_set_bool(marks, EXTRA_ITEM_KEY, true);
+		obs_data_release(marks);
+		pl_vertical_fit_item(item, is_camera(source) ? PL_FIT_FILL : PL_FIT_WHOLE);
+	}
+	pl_vertical_touch();
+	return item;
+}
+
+/* A cena horizontal de uma versão vertical (nova referência ou NULL). */
+static obs_source_t *horizontal_of(obs_source_t *twin)
+{
+	const char *uuid = twin ? private_string(twin, TWIN_KEY) : "";
+	return *uuid ? obs_get_source_by_uuid(uuid) : NULL;
+}
+
+void pl_vertical_enum_missing(obs_source_t *twin, pl_vertical_missing_cb callback, void *param)
+{
+	obs_source_t *horizontal = in_vertical(twin) ? horizontal_of(twin) : NULL;
+	obs_scene_t *scene = horizontal ? obs_scene_from_source(horizontal) : NULL;
+	if (!scene) {
+		obs_source_release(horizontal);
+		return;
+	}
+
+	struct item_refs list;
+	collect_refs(scene, &list);
+	DARRAY(obs_source_t *) seen;
+	da_init(seen);
+	for (size_t i = 0; i < list.refs.num; i++) {
+		obs_source_t *source = obs_sceneitem_get_source(list.refs.array[i].item);
+		bool repeated = false;
+		for (size_t j = 0; j < seen.num; j++) {
+			repeated = repeated || seen.array[j] == source;
+		}
+		if (repeated) {
+			continue;
+		}
+		da_push_back(seen, &source);
+
+		obs_source_t *pair = vertical_pair(source);
+		bool present = false;
+		if (pair) {
+			struct twin_items found;
+			collect_twin_items(twin, pair, &found);
+			present = found.items.num > 0;
+			free_twin_items(&found);
+		}
+		if (!present) {
+			callback(param, source, pair == NULL);
+		}
+		obs_source_release(pair);
+	}
+	da_free(seen);
+	free_refs(&list);
+	obs_source_release(horizontal);
+}
+
+void pl_vertical_restore(obs_source_t *twin, obs_source_t *source)
+{
+	if (!source || !in_vertical(twin)) {
+		return;
+	}
+	if (private_bool(source, HIDE_KEY)) {
+		/* Tira o "Nada": volta em todas as cenas. */
+		pl_vertical_set_pair(source, PL_PAIR_SAME, NULL);
+		return;
+	}
+	obs_source_t *horizontal = horizontal_of(twin);
+	obs_scene_t *scene = horizontal ? obs_scene_from_source(horizontal) : NULL;
+	if (scene) {
+		struct item_refs list;
+		collect_refs(scene, &list);
+		for (size_t i = 0; i < list.refs.num; i++) {
+			if (obs_sceneitem_get_source(list.refs.array[i].item) == source) {
+				add_twin_item(twin, list.refs.array[i].item, list.refs.array[i].group);
+			}
+		}
+		free_refs(&list);
+	}
+	obs_source_release(horizontal);
+	pl_vertical_touch();
 }
 
 /* ------------------------------------------------------------------------- */

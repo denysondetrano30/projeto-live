@@ -66,6 +66,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <mutex>
 #include <vector>
 
@@ -120,12 +121,6 @@ obs_sceneitem_t *selectedItemIn(obs_source_t *scene)
 		obs_sceneitem_addref(item);
 	}
 	return item;
-}
-
-int64_t selectedItemId()
-{
-	std::lock_guard<std::mutex> lock(selectionMutex);
-	return selectedId;
 }
 
 struct Box {
@@ -281,6 +276,106 @@ void handlePoints(const Box &box, float x[8], float y[8])
 	}
 }
 
+/*
+ * Medidas em px da fonte escolhida até as bordas da tela, como no preview do OBS: o texto é feito
+ * com fontes de texto privadas (uma por lado), criadas e atualizadas na thread de vídeo.
+ */
+obs_source_t *spacingLabels[4] = {};
+int spacingPx[4] = {-1, -1, -1, -1};
+
+obs_source_t *createLabel(int index)
+{
+	obs_data_t *settings = obs_data_create();
+	obs_data_t *font = obs_data_create();
+#if defined(_WIN32)
+	obs_data_set_string(font, "face", "Arial");
+#elif defined(__APPLE__)
+	obs_data_set_string(font, "face", "Helvetica");
+#else
+	obs_data_set_string(font, "face", "Monospace");
+#endif
+	obs_data_set_int(font, "flags", 1);
+	obs_data_set_int(font, "size", 16);
+	obs_data_set_obj(settings, "font", font);
+	obs_data_set_bool(settings, "outline", true);
+#ifdef _WIN32
+	obs_data_set_int(settings, "outline_color", 0x000000);
+	obs_data_set_int(settings, "outline_size", 3);
+	const char *id = "text_gdiplus";
+#else
+	const char *id = "text_ft2_source";
+#endif
+	char name[64];
+	snprintf(name, sizeof(name), "Projeto Live: medida vertical %d", index);
+	obs_source_t *label = obs_source_create_private(id, name, settings);
+	obs_data_release(font);
+	obs_data_release(settings);
+	return label;
+}
+
+void releaseLabels()
+{
+	for (int i = 0; i < 4; i++) {
+		obs_source_release(spacingLabels[i]);
+		spacingLabels[i] = nullptr;
+		spacingPx[i] = -1;
+	}
+}
+
+/* Uma linha da fonte até a borda da tela, com a medida em px no meio. */
+void drawSpacing(int index, bool horizontal, float x1, float y1, float x2, float y2, float pixelsPerUnit)
+{
+	int px = (int)std::lround(horizontal ? x2 - x1 : y2 - y1);
+	if (px <= 0) {
+		return;
+	}
+
+	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+	vec4 red;
+	vec4_set(&red, 0.9f, 0.2f, 0.2f, 1.0f);
+	gs_effect_set_vec4(gs_effect_get_param_by_name(solid, "color"), &red);
+	while (gs_effect_loop(solid, "Solid")) {
+		gs_render_start(true);
+		gs_vertex2f(x1, y1);
+		gs_vertex2f(x2, y2);
+		gs_render_stop(GS_LINESTRIP);
+	}
+
+	if (!spacingLabels[index]) {
+		spacingLabels[index] = createLabel(index);
+	}
+	obs_source_t *label = spacingLabels[index];
+	if (!label) {
+		return;
+	}
+	if (spacingPx[index] != px) {
+		obs_data_t *settings = obs_source_get_settings(label);
+		char text[32];
+		snprintf(text, sizeof(text), "%d px", px);
+		obs_data_set_string(settings, "text", text);
+		obs_source_update(label, settings);
+		obs_data_release(settings);
+		spacingPx[index] = px;
+	}
+
+	float labelW = (float)obs_source_get_width(label) / pixelsPerUnit;
+	float labelH = (float)obs_source_get_height(label) / pixelsPerUnit;
+	float margin = 4.0f / pixelsPerUnit;
+	float x, y;
+	if (horizontal) {
+		x = (x1 + x2) / 2.0f - labelW / 2.0f;
+		y = y1 - labelH - margin;
+	} else {
+		x = x1 + margin;
+		y = (y1 + y2) / 2.0f - labelH / 2.0f;
+	}
+	gs_matrix_push();
+	gs_matrix_translate3f(x, y, 0.0f);
+	gs_matrix_scale3f(1.0f / pixelsPerUnit, 1.0f / pixelsPerUnit, 1.0f);
+	obs_source_video_render(label);
+	gs_matrix_pop();
+}
+
 /* Moldura vermelha e quadradinhos da fonte escolhida. */
 void drawSelection(obs_canvas_t *canvas, float pixelsPerUnit)
 {
@@ -320,6 +415,15 @@ void drawSelection(obs_canvas_t *canvas, float pixelsPerUnit)
 			gs_render_stop(GS_TRISTRIP);
 		}
 	}
+
+	const float width = PL_VERTICAL_WIDTH;
+	const float height = PL_VERTICAL_HEIGHT;
+	float midX = (box.left + box.right) / 2.0f;
+	float midY = (box.top + box.bottom) / 2.0f;
+	drawSpacing(0, false, midX, 0.0f, midX, box.top, pixelsPerUnit);
+	drawSpacing(1, false, midX, box.bottom, midX, height, pixelsPerUnit);
+	drawSpacing(2, true, 0.0f, midY, box.left, midY, pixelsPerUnit);
+	drawSpacing(3, true, box.right, midY, width, midY, pixelsPerUnit);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -420,7 +524,7 @@ protected:
 			obs_sceneitem_get_scale(item, &startScale);
 			obs_sceneitem_get_crop(item, &startCrop);
 			activeHandle = handle;
-			mode = handle < 0 ? Mode::Move : handle < 4 ? Mode::Resize : Mode::Crop;
+			mode = handle < 0 ? Mode::Move : Mode::Handle;
 		} else {
 			setSelection(item ? current : nullptr, item ? obs_sceneitem_get_id(item) : 0);
 		}
@@ -444,10 +548,13 @@ protected:
 		}
 		if (mode == Mode::Move) {
 			moveItem(item, x - startMouseX, y - startMouseY);
-		} else if (mode == Mode::Resize) {
-			resizeItem(item, x, y);
-		} else if (mode == Mode::Crop) {
-			cropItem(item, x - startMouseX, y - startMouseY);
+		} else if (mode == Mode::Handle) {
+			/* Como no OBS: segurando Alt corta; sem Alt aumenta ou diminui sem deformar. */
+			if (event->modifiers() & Qt::AltModifier) {
+				cropItem(item, x - startMouseX, y - startMouseY);
+			} else {
+				scaleItem(item, x, y);
+			}
 		} else {
 			int handle = handleAt(visibleBox(item), x, y);
 			if (handle == 0 || handle == 2) {
@@ -499,7 +606,7 @@ protected:
 	}
 
 private:
-	enum class Mode { None, Move, Resize, Crop };
+	enum class Mode { None, Move, Handle };
 
 	/* Quanto da tela vertical cabe em cada pixel da janela, e onde ela começa. */
 	void viewMap(float &scale, float &offsetX, float &offsetY) const
@@ -586,7 +693,7 @@ private:
 		return value;
 	}
 
-	/* Corta pelo lado puxado (o lado oposto fica parado). */
+	/* Com Alt: corta pelos lados do quadradinho puxado (os lados opostos ficam parados). */
 	void cropItem(obs_sceneitem_t *item, float dx, float dy)
 	{
 		obs_source_t *source = obs_sceneitem_get_source(item);
@@ -595,23 +702,31 @@ private:
 		float sx = std::max(std::fabs(startScale.x), 0.0001f);
 		float sy = std::max(std::fabs(startScale.y), 0.0001f);
 		const float minimum = 8.0f;
+		int h = activeHandle;
+		bool left = h == 0 || h == 3 || h == 7;
+		bool right = h == 1 || h == 2 || h == 5;
+		bool top = h == 0 || h == 1 || h == 4;
+		bool bottom = h == 2 || h == 3 || h == 6;
 
 		obs_sceneitem_crop crop = startCrop;
 		vec2 pos = startPos;
-		if (activeHandle == 5) {
+		if (right) {
 			float edge = snapEdge(startBox.right + dx, (float)PL_VERTICAL_WIDTH);
 			float cut = (float)startCrop.right - (edge - startBox.right) / sx;
 			crop.right = (int)std::lround(std::clamp(cut, 0.0f, fullW - (float)startCrop.left - minimum));
-		} else if (activeHandle == 7) {
+		}
+		if (left) {
 			float edge = snapEdge(startBox.left + dx, (float)PL_VERTICAL_WIDTH);
 			float cut = (float)startCrop.left + (edge - startBox.left) / sx;
 			crop.left = (int)std::lround(std::clamp(cut, 0.0f, fullW - (float)startCrop.right - minimum));
 			pos.x = startPos.x + (float)(crop.left - startCrop.left) * sx;
-		} else if (activeHandle == 6) {
+		}
+		if (bottom) {
 			float edge = snapEdge(startBox.bottom + dy, (float)PL_VERTICAL_HEIGHT);
 			float cut = (float)startCrop.bottom - (edge - startBox.bottom) / sy;
 			crop.bottom = (int)std::lround(std::clamp(cut, 0.0f, fullH - (float)startCrop.top - minimum));
-		} else if (activeHandle == 4) {
+		}
+		if (top) {
 			float edge = snapEdge(startBox.top + dy, (float)PL_VERTICAL_HEIGHT);
 			float cut = (float)startCrop.top + (edge - startBox.top) / sy;
 			crop.top = (int)std::lround(std::clamp(cut, 0.0f, fullH - (float)startCrop.bottom - minimum));
@@ -652,37 +767,52 @@ private:
 		obs_sceneitem_set_pos(item, &pos);
 	}
 
-	/* Redimensiona pelo canto, sem deformar; o canto oposto fica parado. */
-	void resizeItem(obs_sceneitem_t *item, float x, float y)
+	/*
+	 * Sem Alt: aumenta ou diminui sem deformar. Canto: o canto oposto fica parado. Meio de um lado:
+	 * o lado oposto fica parado e a fonte cresce igual para os dois lados no outro sentido.
+	 */
+	void scaleItem(obs_sceneitem_t *item, float x, float y)
 	{
-		bool right = activeHandle == 1 || activeHandle == 2;
-		bool bottom = activeHandle == 2 || activeHandle == 3;
-		float anchorX = right ? startBox.left : startBox.right;
-		float anchorY = bottom ? startBox.top : startBox.bottom;
 		float w0 = std::max(startBox.width(), 1.0f);
 		float h0 = std::max(startBox.height(), 1.0f);
+		float minimum = 16.0f / std::min(w0, h0);
+		float factor;
+		float left, top;
+		int h = activeHandle;
 
-		float factor = std::max(std::fabs(x - anchorX) / w0, std::fabs(y - anchorY) / h0);
-		factor = std::max(factor, 16.0f / std::min(w0, h0));
-		float w = w0 * factor;
-		float h = h0 * factor;
-		float left = right ? anchorX : anchorX - w;
-		float top = bottom ? anchorY : anchorY - h;
+		if (h < 4) {
+			bool right = h == 1 || h == 2;
+			bool bottom = h == 2 || h == 3;
+			float anchorX = right ? startBox.left : startBox.right;
+			float anchorY = bottom ? startBox.top : startBox.bottom;
+			factor = std::max(std::fabs(x - anchorX) / w0, std::fabs(y - anchorY) / h0);
+			factor = std::max(factor, minimum);
+			left = right ? anchorX : anchorX - w0 * factor;
+			top = bottom ? anchorY : anchorY - h0 * factor;
+		} else if (h == 5 || h == 7) {
+			float edge = snapEdge(x, (float)PL_VERTICAL_WIDTH);
+			float width = h == 5 ? edge - startBox.left : startBox.right - edge;
+			factor = std::max(width / w0, minimum);
+			left = h == 5 ? startBox.left : startBox.right - w0 * factor;
+			top = (startBox.top + startBox.bottom) / 2.0f - h0 * factor / 2.0f;
+		} else {
+			float edge = snapEdge(y, (float)PL_VERTICAL_HEIGHT);
+			float height = h == 6 ? edge - startBox.top : startBox.bottom - edge;
+			factor = std::max(height / h0, minimum);
+			top = h == 6 ? startBox.top : startBox.bottom - h0 * factor;
+			left = (startBox.left + startBox.right) / 2.0f - w0 * factor / 2.0f;
+		}
 
 		obs_sceneitem_defer_update_begin(item);
 		obs_sceneitem_set_alignment(item, OBS_ALIGN_LEFT | OBS_ALIGN_TOP);
+		obs_sceneitem_crop crop = startCrop;
+		obs_sceneitem_set_crop(item, &crop);
 		vec2 pos;
 		vec2_set(&pos, left, top);
 		obs_sceneitem_set_pos(item, &pos);
-		if (obs_sceneitem_get_bounds_type(item) != OBS_BOUNDS_NONE) {
-			vec2 bounds;
-			vec2_set(&bounds, w, h);
-			obs_sceneitem_set_bounds(item, &bounds);
-		} else {
-			vec2 scale;
-			vec2_set(&scale, startScale.x * factor, startScale.y * factor);
-			obs_sceneitem_set_scale(item, &scale);
-		}
+		vec2 scale;
+		vec2_set(&scale, startScale.x * factor, startScale.y * factor);
+		obs_sceneitem_set_scale(item, &scale);
 		obs_sceneitem_defer_update_end(item);
 	}
 
@@ -769,6 +899,49 @@ QStringList allSourceNames()
 	return names;
 }
 
+/* Uma fonte nova (ex.: o arquivo da contagem em 9:16), do tipo que a pessoa escolher (nova ref.). */
+obs_source_t *createSourceDialog(QWidget *parent, const QString &suggested)
+{
+	QStringList labels;
+	QStringList ids;
+	const char *id;
+	for (size_t i = 0; obs_enum_input_types(i, &id); i++) {
+		if (obs_get_source_output_flags(id) & (OBS_SOURCE_DEPRECATED | OBS_SOURCE_CAP_DISABLED)) {
+			continue;
+		}
+		const char *label = obs_source_get_display_name(id);
+		labels.append(QString::fromUtf8(label ? label : id));
+		ids.append(QString::fromUtf8(id));
+	}
+	bool ok = false;
+	QString type = QInputDialog::getItem(parent, moduleText("Vertical.Swap.New"), moduleText("Vertical.Swap.Type"),
+					     labels, 0, false, &ok);
+	int index = labels.indexOf(type);
+	if (!ok || index < 0) {
+		return nullptr;
+	}
+	QString name = QInputDialog::getText(parent, moduleText("Vertical.Swap.New"), moduleText("Vertical.Swap.Name"),
+					     QLineEdit::Normal, suggested.isEmpty() ? type : suggested, &ok)
+			       .trimmed();
+	if (!ok || name.isEmpty()) {
+		return nullptr;
+	}
+	QString unique = name;
+	for (int n = 2; n < 1000; n++) {
+		QByteArray probe = unique.toUtf8();
+		obs_source_t *other = obs_get_source_by_name(probe.constData());
+		bool taken = other != nullptr;
+		obs_source_release(other);
+		if (!taken) {
+			break;
+		}
+		unique = name + QStringLiteral(" ") + QString::number(n);
+	}
+	QByteArray typeId = ids[index].toUtf8();
+	QByteArray bytes = unique.toUtf8();
+	return obs_source_create(typeId.constData(), bytes.constData(), nullptr, nullptr);
+}
+
 /* ------------------------------------------------------------------------- */
 /* Janela "Trocar fonte"                                                      */
 
@@ -830,7 +1003,8 @@ public:
 		} else if (data == QStringLiteral("hide")) {
 			pl_vertical_set_pair(source, PL_PAIR_HIDE, nullptr);
 		} else if (data == QStringLiteral("new")) {
-			obs_source_t *fresh = createSource();
+			obs_source_t *fresh = createSourceDialog(this, QString::fromUtf8(obs_source_get_name(source)) +
+									       QStringLiteral(" (vertical)"));
 			if (fresh) {
 				pl_vertical_set_pair(source, PL_PAIR_OTHER, fresh);
 				obs_frontend_open_source_properties(fresh);
@@ -845,50 +1019,6 @@ public:
 	}
 
 private:
-	/* Uma fonte nova (ex.: o arquivo da contagem em 9:16), do tipo que a pessoa escolher. */
-	obs_source_t *createSource()
-	{
-		QStringList labels;
-		QStringList ids;
-		const char *id;
-		for (size_t i = 0; obs_enum_input_types(i, &id); i++) {
-			if (obs_get_source_output_flags(id) & (OBS_SOURCE_DEPRECATED | OBS_SOURCE_CAP_DISABLED)) {
-				continue;
-			}
-			const char *label = obs_source_get_display_name(id);
-			labels.append(QString::fromUtf8(label ? label : id));
-			ids.append(QString::fromUtf8(id));
-		}
-		bool ok = false;
-		QString type = QInputDialog::getItem(this, moduleText("Vertical.Swap.New"),
-						     moduleText("Vertical.Swap.Type"), labels, 0, false, &ok);
-		int index = labels.indexOf(type);
-		if (!ok || index < 0) {
-			return nullptr;
-		}
-		QString wanted = QString::fromUtf8(obs_source_get_name(source)) + QStringLiteral(" (vertical)");
-		QString name = QInputDialog::getText(this, moduleText("Vertical.Swap.New"),
-						     moduleText("Vertical.Swap.Name"), QLineEdit::Normal, wanted, &ok)
-				       .trimmed();
-		if (!ok || name.isEmpty()) {
-			return nullptr;
-		}
-		QString unique = name;
-		for (int n = 2; n < 1000; n++) {
-			QByteArray probe = unique.toUtf8();
-			obs_source_t *other = obs_get_source_by_name(probe.constData());
-			bool taken = other != nullptr;
-			obs_source_release(other);
-			if (!taken) {
-				break;
-			}
-			unique = name + QStringLiteral(" ") + QString::number(n);
-		}
-		QByteArray typeId = ids[index].toUtf8();
-		QByteArray bytes = unique.toUtf8();
-		return obs_source_create(typeId.constData(), bytes.constData(), nullptr, nullptr);
-	}
-
 	obs_source_t *source = nullptr;
 	QComboBox *choice = nullptr;
 };
@@ -912,29 +1042,44 @@ public:
 		list->setContextMenuPolicy(Qt::CustomContextMenu);
 		layout->addWidget(list, 1);
 		connect(list, &QListWidget::currentRowChanged, this, [this](int row) {
-			if (rebuilding || row < 0 || row >= (int)ids.size()) {
+			if (rebuilding || row < 0 || row >= (int)rows.size() || rows[row].missing) {
 				return;
 			}
 			/* Escolher na lista também mostra a moldura vermelha no vídeo. */
 			obs_source_t *sceneSource = editingScene();
-			setSelection(sceneSource, ids[row]);
+			setSelection(sceneSource, rows[row].id);
 			obs_source_release(sceneSource);
 		});
 		connect(list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) { swap(); });
 		connect(list, &QListWidget::customContextMenuRequested, this,
 			[this](const QPoint &point) { showMenu(list->mapToGlobal(point)); });
 
+		auto *buttons = new QHBoxLayout();
+		auto *add = new QPushButton(QStringLiteral("+"), this);
+		add->setToolTip(moduleText("Vertical.Sources.Add"));
+		add->setFixedWidth(36);
+		auto *remove = new QPushButton(QString::fromUtf8("−"), this);
+		remove->setToolTip(moduleText("Vertical.Sources.Remove"));
+		remove->setFixedWidth(36);
 		auto *swapButton = new QPushButton(moduleText("Vertical.Swap.Button"), this);
+		connect(add, &QPushButton::clicked, this,
+			[this, add]() { addSource(add->mapToGlobal(QPoint(0, add->height()))); });
+		connect(remove, &QPushButton::clicked, this, [this]() { removeSource(); });
 		connect(swapButton, &QPushButton::clicked, this, [this]() { swap(); });
-		layout->addWidget(swapButton);
+		buttons->addWidget(add);
+		buttons->addWidget(remove);
+		buttons->addWidget(swapButton, 1);
+		layout->addLayout(buttons);
 	}
+
+	~SourcesDock() override { clearRows(); }
 
 	void rebuild()
 	{
 		rebuilding = true;
 		int previousRow = list->currentRow();
 		list->clear();
-		ids.clear();
+		clearRows();
 
 		obs_source_t *sceneSource = editingScene();
 		obs_scene_t *scene = obs_scene_from_source(sceneSource);
@@ -957,29 +1102,57 @@ public:
 			std::reverse(items.begin(), items.end());
 			for (obs_sceneitem_t *item : items) {
 				obs_source_t *shown = obs_sceneitem_get_source(item);
-				obs_source_t *original = pl_vertical_item_original(item);
 				QString text = QString::fromUtf8(obs_source_get_name(shown));
-				if (original && original != shown) {
-					text += QStringLiteral("   ") +
-						moduleText("Vertical.Sources.InsteadOf")
-							.arg(QString::fromUtf8(obs_source_get_name(original)));
+				if (pl_vertical_item_is_extra(item)) {
+					text += QStringLiteral("   ") + moduleText("Vertical.Sources.OnlyVertical");
+				} else {
+					obs_source_t *original = pl_vertical_item_original(item);
+					if (original && original != shown) {
+						text += QStringLiteral("   ") +
+							moduleText("Vertical.Sources.InsteadOf")
+								.arg(QString::fromUtf8(obs_source_get_name(original)));
+					}
+					obs_source_release(original);
 				}
-				obs_source_release(original);
 				auto *row = new QListWidgetItem(text);
 				if (!obs_sceneitem_visible(item)) {
 					row->setForeground(QColor(128, 128, 128));
 				}
 				list->addItem(row);
-				ids.push_back(obs_sceneitem_get_id(item));
+				Row entry;
+				entry.id = obs_sceneitem_get_id(item);
+				rows.push_back(entry);
 			}
+
+			/* Fontes da cena horizontal que não estão no vertical: em cinza, para poder voltar. */
+			pl_vertical_enum_missing(
+				sceneSource,
+				[](void *param, obs_source_t *source, bool hidden) {
+					auto *self = static_cast<SourcesDock *>(param);
+					QString text = QString::fromUtf8(obs_source_get_name(source)) +
+						       QStringLiteral("   ") + moduleText("Vertical.Sources.Missing");
+					auto *row = new QListWidgetItem(text);
+					row->setForeground(QColor(128, 128, 128));
+					QFont font = row->font();
+					font.setItalic(true);
+					row->setFont(font);
+					self->list->addItem(row);
+					Row entry;
+					entry.missing = obs_source_get_weak_source(source);
+					entry.hidden = hidden;
+					self->rows.push_back(entry);
+				},
+				this);
 		}
 
 		/* A fonte escolhida com o mouse fica marcada na lista. */
 		obs_sceneitem_t *selected = sceneSource ? selectedItemIn(sceneSource) : nullptr;
 		if (selected) {
-			auto found = std::find(ids.begin(), ids.end(), obs_sceneitem_get_id(selected));
-			if (found != ids.end()) {
-				previousRow = (int)(found - ids.begin());
+			int64_t id = obs_sceneitem_get_id(selected);
+			for (size_t i = 0; i < rows.size(); i++) {
+				if (!rows[i].missing && rows[i].id == id) {
+					previousRow = (int)i;
+				}
 			}
 			obs_sceneitem_release(selected);
 		}
@@ -993,15 +1166,30 @@ public:
 	}
 
 private:
-	/* Item da cena no ar na linha `row` (nova referência). */
+	struct Row {
+		int64_t id = 0;
+		/* Fonte da cena horizontal que não está no vertical (senão, nullptr). */
+		obs_weak_source_t *missing = nullptr;
+		bool hidden = false;
+	};
+
+	void clearRows()
+	{
+		for (Row &row : rows) {
+			obs_weak_source_release(row.missing);
+		}
+		rows.clear();
+	}
+
+	/* Item da cena no ar na linha `row` (nova referência; nullptr numa linha cinza). */
 	obs_sceneitem_t *itemAt(int row)
 	{
-		if (row < 0 || row >= (int)ids.size()) {
+		if (row < 0 || row >= (int)rows.size() || rows[row].missing) {
 			return nullptr;
 		}
 		obs_source_t *sceneSource = editingScene();
 		obs_scene_t *scene = obs_scene_from_source(sceneSource);
-		obs_sceneitem_t *item = scene ? obs_scene_find_sceneitem_by_id(scene, ids[row]) : nullptr;
+		obs_sceneitem_t *item = scene ? obs_scene_find_sceneitem_by_id(scene, rows[row].id) : nullptr;
 		if (item) {
 			obs_sceneitem_addref(item);
 		}
@@ -1009,48 +1197,122 @@ private:
 		return item;
 	}
 
+	/* A fonte original da linha (nova referência): a da cena horizontal. */
+	obs_source_t *originalAt(int row)
+	{
+		if (row < 0 || row >= (int)rows.size()) {
+			return nullptr;
+		}
+		if (rows[row].missing) {
+			return obs_weak_source_get_source(rows[row].missing);
+		}
+		obs_sceneitem_t *item = itemAt(row);
+		obs_source_t *original = item && !pl_vertical_item_is_extra(item) ? pl_vertical_item_original(item)
+										  : nullptr;
+		obs_sceneitem_release(item);
+		return original;
+	}
+
 	void swap()
 	{
-		obs_sceneitem_t *item = itemAt(list->currentRow());
-		if (!item) {
+		int row = list->currentRow();
+		obs_source_t *original = originalAt(row);
+		if (!original) {
 			return;
 		}
-		obs_source_t *original = pl_vertical_item_original(item);
-		obs_sceneitem_release(item);
-		if (original) {
-			SwapDialog dialog(this, original);
-			if (dialog.exec() == QDialog::Accepted) {
-				dialog.apply();
+		bool missing = rows[row].missing != nullptr;
+		SwapDialog dialog(this, original);
+		if (dialog.exec() == QDialog::Accepted) {
+			dialog.apply();
+			if (missing) {
+				/* Linha cinza: a fonte volta para esta cena vertical. */
+				obs_source_t *sceneSource = editingScene();
+				pl_vertical_restore(sceneSource, original);
+				obs_source_release(sceneSource);
 			}
 		}
 		obs_source_release(original);
 	}
 
+	/* "+": uma fonte só no vertical (nova ou que já existe). */
+	void addSource(const QPoint &where)
+	{
+		obs_source_t *sceneSource = editingScene();
+		if (!sceneSource) {
+			return;
+		}
+		QMenu menu(this);
+		QAction *fresh = menu.addAction(moduleText("Vertical.Sources.New"));
+		QAction *existing = menu.addAction(moduleText("Vertical.Sources.Existing"));
+		QAction *chosen = menu.exec(where);
+		obs_source_t *source = nullptr;
+		if (chosen == fresh) {
+			source = createSourceDialog(this, QString());
+			if (source) {
+				obs_frontend_open_source_properties(source);
+			}
+		} else if (chosen == existing) {
+			bool ok = false;
+			QString name = QInputDialog::getItem(this, moduleText("Vertical.Sources.Existing"),
+							     moduleText("Vertical.Sources.Choose"), allSourceNames(), 0,
+							     false, &ok);
+			if (ok && !name.isEmpty()) {
+				QByteArray bytes = name.toUtf8();
+				source = obs_get_source_by_name(bytes.constData());
+			}
+		}
+		if (source) {
+			obs_sceneitem_t *item = pl_vertical_add_extra_source(sceneSource, source);
+			if (item) {
+				setSelection(sceneSource, obs_sceneitem_get_id(item));
+			}
+		}
+		obs_source_release(source);
+		obs_source_release(sceneSource);
+	}
+
+	/* "−": tira a fonte só do vertical (se vier da cena horizontal, ela fica em cinza para voltar). */
+	void removeSource()
+	{
+		obs_sceneitem_t *item = itemAt(list->currentRow());
+		if (item) {
+			setSelection(nullptr, 0);
+			obs_sceneitem_remove(item);
+			obs_sceneitem_release(item);
+			pl_vertical_touch();
+		}
+	}
+
 	/* Botão direito: trocar, propriedades e filtros. */
 	void showMenu(const QPoint &where)
 	{
-		obs_sceneitem_t *item = itemAt(list->currentRow());
-		if (!item) {
-			return;
-		}
-		OBSSourceAutoRelease shown = obs_source_get_ref(obs_sceneitem_get_source(item));
+		int row = list->currentRow();
+		obs_sceneitem_t *item = itemAt(row);
+		obs_source_t *original = originalAt(row);
+		OBSSourceAutoRelease shown = item ? obs_source_get_ref(obs_sceneitem_get_source(item)) : nullptr;
 		obs_sceneitem_release(item);
 
 		QMenu menu(this);
-		connect(menu.addAction(moduleText("Vertical.Swap.Button")), &QAction::triggered, this,
-			[this]() { swap(); });
-		menu.addSeparator();
-		obs_source_t *raw = shown.Get();
-		connect(menu.addAction(moduleText("Vertical.Sources.Properties")), &QAction::triggered, this,
-			[raw]() { obs_frontend_open_source_properties(raw); });
-		connect(menu.addAction(moduleText("Vertical.Sources.Filters")), &QAction::triggered, this,
-			[raw]() { obs_frontend_open_source_filters(raw); });
+		QAction *swapAction = menu.addAction(moduleText("Vertical.Swap.Button"));
+		swapAction->setEnabled(original != nullptr);
+		connect(swapAction, &QAction::triggered, this, [this]() { swap(); });
+		obs_source_release(original);
+		if (shown) {
+			menu.addSeparator();
+			obs_source_t *raw = shown.Get();
+			connect(menu.addAction(moduleText("Vertical.Sources.Properties")), &QAction::triggered, this,
+				[raw]() { obs_frontend_open_source_properties(raw); });
+			connect(menu.addAction(moduleText("Vertical.Sources.Filters")), &QAction::triggered, this,
+				[raw]() { obs_frontend_open_source_filters(raw); });
+			connect(menu.addAction(moduleText("Vertical.Sources.Remove")), &QAction::triggered, this,
+				[this]() { removeSource(); });
+		}
 		menu.exec(where);
 	}
 
 	QLabel *title = nullptr;
 	QListWidget *list = nullptr;
-	std::vector<int64_t> ids;
+	std::vector<Row> rows;
 	bool rebuilding = false;
 };
 
@@ -1094,8 +1356,10 @@ public:
 	void refresh()
 	{
 		obs_source_t *current = pl_vertical_current();
-		QString name = current ? QString::fromUtf8(obs_source_get_name(current)).toHtmlEscaped()
+		QString name = current ? QString::fromUtf8(obs_source_get_name(current))
 				       : moduleText("Vertical.Nothing");
+		name.remove(QStringLiteral(" (vertical)"));
+		name = name.toHtmlEscaped();
 		obs_source_release(current);
 		status->setText(moduleText("Vertical.Short.OnAir").arg(name));
 	}
@@ -1260,6 +1524,9 @@ void frontendEvent(enum obs_frontend_event event, void *)
 			timer->stop();
 		}
 		removeFloating();
+		obs_enter_graphics();
+		releaseLabels();
+		obs_leave_graphics();
 	}
 }
 

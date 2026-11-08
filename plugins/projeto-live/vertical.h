@@ -41,6 +41,19 @@ obs_source_t *pl_vertical_active_scene(obs_canvas_t *canvas);
 
 /* A fonte original (da cena horizontal) que um item vertical representa (nova referência). */
 obs_source_t *pl_vertical_item_original(obs_sceneitem_t *item);
+/* O item só existe no vertical (foi posto com "+")? */
+bool pl_vertical_item_is_extra(obs_sceneitem_t *item);
+
+/*
+ * Fontes da cena horizontal que não estão na versão vertical `scene` (tiradas com "−" ou com
+ * "Nada" no Trocar fonte). `hidden`: está como "Nada" (vale em todas as cenas).
+ */
+typedef void (*pl_vertical_missing_cb)(void *param, obs_source_t *source, bool hidden);
+void pl_vertical_enum_missing(obs_source_t *scene, pl_vertical_missing_cb callback, void *param);
+/* Põe de volta na versão vertical `scene` uma fonte da cena horizontal (tira o "Nada", se houver). */
+void pl_vertical_restore(obs_source_t *scene, obs_source_t *source);
+/* Fonte só no vertical (ex.: uma moldura em volta do vídeo), na versão vertical `scene`. */
+obs_sceneitem_t *pl_vertical_add_extra_source(obs_source_t *scene, obs_source_t *source);
 
 /*
  * Trocar fonte no vertical (vale em todas as cenas). SAME: no vertical vai a própria fonte (o
