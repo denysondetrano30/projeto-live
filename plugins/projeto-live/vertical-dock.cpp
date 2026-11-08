@@ -69,6 +69,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -428,51 +430,209 @@ void drawSelection(obs_canvas_t *canvas, float pixelsPerUnit)
 	drawSpacing(3, true, box.right, midY, width, midY, pixelsPerUnit);
 }
 
-/* Põe a fonte no meio da tela vertical, sem mudar o tamanho. */
-void centerItem(obs_sceneitem_t *item)
+/* Põe a fonte no meio da tela vertical (na horizontal, na vertical ou nos dois), sem mudar o tamanho. */
+void centerItem(obs_sceneitem_t *item, bool across, bool down)
 {
 	normalizeItem(item);
 	Box box = visibleBox(item);
 	vec2 pos;
 	obs_sceneitem_get_pos(item, &pos);
-	pos.x += PL_VERTICAL_WIDTH / 2.0f - (box.left + box.right) / 2.0f;
-	pos.y += PL_VERTICAL_HEIGHT / 2.0f - (box.top + box.bottom) / 2.0f;
+	if (across) {
+		pos.x += PL_VERTICAL_WIDTH / 2.0f - (box.left + box.right) / 2.0f;
+	}
+	if (down) {
+		pos.y += PL_VERTICAL_HEIGHT / 2.0f - (box.top + box.bottom) / 2.0f;
+	}
 	obs_sceneitem_set_pos(item, &pos);
-	pl_vertical_touch();
 }
 
-/* Enquadramentos do botão direito: Centralizar, Preencher a tela, Tela inteira, Largura toda. */
-void addFitActions(QMenu &menu, obs_sceneitem_t *item)
+/* Fonte cujos filtros foram copiados no menu ("Copiar filtros"). */
+obs_weak_source_t *copiedFilters = nullptr;
+
+using ItemAction = std::function<void(obs_sceneitem_t *)>;
+using ItemRunner = std::function<void(const ItemAction &)>;
+
+/*
+ * O item pode sumir enquanto o menu está aberto (a cena trocou, alguém apagou a fonte). Cada opção
+ * procura o item de novo pela cena e pelo número dele antes de mexer.
+ */
+ItemRunner itemRunner(obs_sceneitem_t *item)
+{
+	std::shared_ptr<obs_weak_source_t> scene(
+		obs_source_get_weak_source(obs_scene_get_source(obs_sceneitem_get_scene(item))),
+		obs_weak_source_release);
+	int64_t id = obs_sceneitem_get_id(item);
+	return [scene, id](const ItemAction &action) {
+		obs_source_t *source = obs_weak_source_get_source(scene.get());
+		obs_sceneitem_t *found = source ? obs_scene_find_sceneitem_by_id(obs_scene_from_source(source), id)
+						: nullptr;
+		if (found) {
+			action(found);
+			pl_vertical_touch();
+		}
+		obs_source_release(source);
+	};
+}
+
+QAction *addItemAction(QMenu *menu, const char *key, const ItemRunner &run, ItemAction action)
+{
+	QAction *entry = menu->addAction(moduleText(key));
+	QObject::connect(entry, &QAction::triggered, menu, [run, action]() { run(action); });
+	return entry;
+}
+
+/* Opção marcável (o valor atual da fonte aparece marcado). */
+void addChoice(QMenu *menu, const char *key, bool current, const ItemRunner &run, ItemAction action)
+{
+	QAction *entry = addItemAction(menu, key, run, std::move(action));
+	entry->setCheckable(true);
+	entry->setChecked(current);
+}
+
+/*
+ * As opções do botão direito do OBS que fazem sentido no vertical, mais os enquadramentos do
+ * Projeto Live. "Trocar fonte" e "Remover" ficam com o painel Fontes verticais.
+ */
+void addItemMenu(QMenu &menu, QWidget *parent, obs_sceneitem_t *item)
 {
 	if (!item) {
 		return;
 	}
-	/* O item pode sumir enquanto o menu está aberto: guarda a cena e o número dele. */
-	obs_weak_source_t *sceneRef = obs_source_get_weak_source(obs_scene_get_source(obs_sceneitem_get_scene(item)));
-	int64_t id = obs_sceneitem_get_id(item);
-	auto withItem = [sceneRef, id](auto action) {
-		obs_source_t *scene = obs_weak_source_get_source(sceneRef);
-		obs_sceneitem_t *found = scene ? obs_scene_find_sceneitem_by_id(obs_scene_from_source(scene), id)
-					       : nullptr;
-		if (found) {
-			action(found);
+	ItemRunner run = itemRunner(item);
+	obs_source_t *source = obs_sceneitem_get_source(item);
+	QString name = QString::fromUtf8(obs_source_get_name(source));
+
+	addItemAction(&menu, "Vertical.Menu.Project", run, [](obs_sceneitem_t *found) {
+		obs_frontend_open_projector("Source", -1, "", obs_source_get_name(obs_sceneitem_get_source(found)));
+	});
+	addItemAction(&menu, "Vertical.Menu.Screenshot", run, [](obs_sceneitem_t *found) {
+		obs_frontend_take_source_screenshot(obs_sceneitem_get_source(found));
+	});
+	menu.addSeparator();
+
+	QMenu *scaleMenu = menu.addMenu(moduleText("Vertical.Menu.ScaleFilter"));
+	const struct {
+		const char *key;
+		enum obs_scale_type type;
+	} filters[] = {{"Vertical.Menu.Scale.Disable", OBS_SCALE_DISABLE},
+		       {"Vertical.Menu.Scale.Point", OBS_SCALE_POINT},
+		       {"Vertical.Menu.Scale.Bilinear", OBS_SCALE_BILINEAR},
+		       {"Vertical.Menu.Scale.Bicubic", OBS_SCALE_BICUBIC},
+		       {"Vertical.Menu.Scale.Lanczos", OBS_SCALE_LANCZOS},
+		       {"Vertical.Menu.Scale.Area", OBS_SCALE_AREA}};
+	for (const auto &filter : filters) {
+		enum obs_scale_type type = filter.type;
+		addChoice(scaleMenu, filter.key, obs_sceneitem_get_scale_filter(item) == type, run,
+			  [type](obs_sceneitem_t *found) { obs_sceneitem_set_scale_filter(found, type); });
+	}
+
+	QMenu *blendMenu = menu.addMenu(moduleText("Vertical.Menu.BlendMode"));
+	const struct {
+		const char *key;
+		enum obs_blending_type type;
+	} blends[] = {{"Vertical.Menu.Blend.Normal", OBS_BLEND_NORMAL},
+		      {"Vertical.Menu.Blend.Additive", OBS_BLEND_ADDITIVE},
+		      {"Vertical.Menu.Blend.Subtract", OBS_BLEND_SUBTRACT},
+		      {"Vertical.Menu.Blend.Screen", OBS_BLEND_SCREEN},
+		      {"Vertical.Menu.Blend.Multiply", OBS_BLEND_MULTIPLY},
+		      {"Vertical.Menu.Blend.Lighten", OBS_BLEND_LIGHTEN},
+		      {"Vertical.Menu.Blend.Darken", OBS_BLEND_DARKEN}};
+	for (const auto &blend : blends) {
+		enum obs_blending_type type = blend.type;
+		addChoice(blendMenu, blend.key, obs_sceneitem_get_blending_mode(item) == type, run,
+			  [type](obs_sceneitem_t *found) { obs_sceneitem_set_blending_mode(found, type); });
+	}
+
+	QMenu *methodMenu = menu.addMenu(moduleText("Vertical.Menu.BlendMethod"));
+	enum obs_blending_method method = obs_sceneitem_get_blending_method(item);
+	addChoice(methodMenu, "Vertical.Menu.Method.Default", method == OBS_BLEND_METHOD_DEFAULT, run,
+		  [](obs_sceneitem_t *found) { obs_sceneitem_set_blending_method(found, OBS_BLEND_METHOD_DEFAULT); });
+	addChoice(methodMenu, "Vertical.Menu.Method.SrgbOff", method == OBS_BLEND_METHOD_SRGB_OFF, run,
+		  [](obs_sceneitem_t *found) { obs_sceneitem_set_blending_method(found, OBS_BLEND_METHOD_SRGB_OFF); });
+	menu.addSeparator();
+
+	QMenu *orderMenu = menu.addMenu(moduleText("Vertical.Menu.Order"));
+	const struct {
+		const char *key;
+		enum obs_order_movement movement;
+	} orders[] = {{"Vertical.Menu.Order.Up", OBS_ORDER_MOVE_UP},
+		      {"Vertical.Menu.Order.Down", OBS_ORDER_MOVE_DOWN},
+		      {"Vertical.Menu.Order.Top", OBS_ORDER_MOVE_TOP},
+		      {"Vertical.Menu.Order.Bottom", OBS_ORDER_MOVE_BOTTOM}};
+	for (const auto &order : orders) {
+		enum obs_order_movement movement = order.movement;
+		addItemAction(orderMenu, order.key, run,
+			      [movement](obs_sceneitem_t *found) { obs_sceneitem_set_order(found, movement); });
+	}
+
+	QMenu *transformMenu = menu.addMenu(moduleText("Vertical.Menu.Transform"));
+	addItemAction(transformMenu, "Vertical.Fit.Center", run,
+		      [](obs_sceneitem_t *found) { centerItem(found, true, true); });
+	addItemAction(transformMenu, "Vertical.Fit.CenterAcross", run,
+		      [](obs_sceneitem_t *found) { centerItem(found, true, false); });
+	addItemAction(transformMenu, "Vertical.Fit.CenterDown", run,
+		      [](obs_sceneitem_t *found) { centerItem(found, false, true); });
+	transformMenu->addSeparator();
+	addItemAction(transformMenu, "Vertical.Fit.Fill", run,
+		      [](obs_sceneitem_t *found) { pl_vertical_fit_item(found, PL_FIT_FILL); });
+	addItemAction(transformMenu, "Vertical.Fit.Whole", run,
+		      [](obs_sceneitem_t *found) { pl_vertical_fit_item(found, PL_FIT_WHOLE); });
+	addItemAction(transformMenu, "Vertical.Fit.Width", run,
+		      [](obs_sceneitem_t *found) { pl_vertical_fit_item(found, PL_FIT_WIDTH); });
+	transformMenu->addSeparator();
+	addItemAction(transformMenu, "Vertical.Fit.Reset", run, [](obs_sceneitem_t *found) {
+		obs_sceneitem_crop crop = {0, 0, 0, 0};
+		obs_sceneitem_set_crop(found, &crop);
+		obs_sceneitem_set_rot(found, 0.0f);
+		pl_vertical_fit_item(found, PL_FIT_WHOLE);
+	});
+	menu.addSeparator();
+
+	addItemAction(&menu, "Vertical.Menu.CopyFilters", run, [](obs_sceneitem_t *found) {
+		obs_weak_source_release(copiedFilters);
+		copiedFilters = obs_source_get_weak_source(obs_sceneitem_get_source(found));
+	});
+	QAction *paste = addItemAction(&menu, "Vertical.Menu.PasteFilters", run, [](obs_sceneitem_t *found) {
+		obs_source_t *from = obs_weak_source_get_source(copiedFilters);
+		obs_source_t *to = obs_sceneitem_get_source(found);
+		if (from && from != to) {
+			obs_source_copy_filters(to, from);
 		}
-		obs_source_release(scene);
-	};
-	QObject::connect(menu.addAction(moduleText("Vertical.Fit.Center")), &QAction::triggered,
-			 [withItem]() { withItem([](obs_sceneitem_t *found) { centerItem(found); }); });
-	QObject::connect(menu.addAction(moduleText("Vertical.Fit.Fill")), &QAction::triggered, [withItem]() {
-		withItem([](obs_sceneitem_t *found) { pl_vertical_fit_item(found, PL_FIT_FILL); });
+		obs_source_release(from);
 	});
-	QObject::connect(menu.addAction(moduleText("Vertical.Fit.Whole")), &QAction::triggered, [withItem]() {
-		withItem([](obs_sceneitem_t *found) { pl_vertical_fit_item(found, PL_FIT_WHOLE); });
+	paste->setEnabled(copiedFilters != nullptr);
+	menu.addSeparator();
+
+	addItemAction(&menu, "Vertical.Menu.Rename", run, [parent, name](obs_sceneitem_t *found) {
+		bool ok = false;
+		QString wanted = QInputDialog::getText(parent, moduleText("Vertical.Menu.Rename"),
+						       moduleText("Vertical.Menu.RenameLabel"), QLineEdit::Normal, name,
+						       &ok)
+					 .trimmed();
+		if (!ok || wanted.isEmpty() || wanted == name) {
+			return;
+		}
+		QByteArray bytes = wanted.toUtf8();
+		obs_source_t *taken = obs_get_source_by_name(bytes.constData());
+		if (taken) {
+			obs_source_release(taken);
+			QMessageBox::warning(parent, moduleText("Vertical.Menu.Rename"),
+					     moduleText("Vertical.Menu.NameTaken"));
+			return;
+		}
+		obs_source_set_name(obs_sceneitem_get_source(found), bytes.constData());
 	});
-	QObject::connect(menu.addAction(moduleText("Vertical.Fit.Width")), &QAction::triggered, [withItem]() {
-		withItem([](obs_sceneitem_t *found) { pl_vertical_fit_item(found, PL_FIT_WIDTH); });
+	menu.addSeparator();
+	addItemAction(&menu, "Vertical.Sources.Filters", run, [](obs_sceneitem_t *found) {
+		obs_frontend_open_source_filters(obs_sceneitem_get_source(found));
 	});
-	/* A referência fraca vale enquanto o menu existir. */
-	QObject::connect(&menu, &QObject::destroyed, [sceneRef]() { obs_weak_source_release(sceneRef); });
+	addItemAction(&menu, "Vertical.Sources.Properties", run, [](obs_sceneitem_t *found) {
+		obs_frontend_open_source_properties(obs_sceneitem_get_source(found));
+	});
 }
+
+/* Menu do botão direito no vídeo vertical; mora junto do painel Fontes verticais (mais abaixo). */
+void showItemMenu(QWidget *parent, obs_sceneitem_t *item, const QPoint &where);
 
 /* ------------------------------------------------------------------------- */
 /* Janela de vídeo da tela vertical                                           */
@@ -660,7 +820,7 @@ protected:
 private:
 	enum class Mode { None, Move, Handle };
 
-	/* Botão direito numa fonte do vertical: escolhe ela e mostra os enquadramentos. */
+	/* Botão direito numa fonte do vertical: escolhe ela e abre o mesmo menu da lista. */
 	void showMenu(QMouseEvent *event)
 	{
 		float x, y;
@@ -671,17 +831,8 @@ private:
 		if (item) {
 			setSelection(current, obs_sceneitem_get_id(item));
 			pl_vertical_touch();
-			QMenu menu(this);
-			addFitActions(menu, item);
-			menu.addSeparator();
-			obs_source_t *raw = obs_sceneitem_get_source(item);
-			OBSSourceAutoRelease keep = obs_source_get_ref(raw);
-			connect(menu.addAction(moduleText("Vertical.Sources.Properties")), &QAction::triggered, this,
-				[raw]() { obs_frontend_open_source_properties(raw); });
-			connect(menu.addAction(moduleText("Vertical.Sources.Filters")), &QAction::triggered, this,
-				[raw]() { obs_frontend_open_source_filters(raw); });
+			showItemMenu(this, item, QCursor::pos());
 			obs_sceneitem_release(item);
-			menu.exec(QCursor::pos());
 		}
 		obs_source_release(current);
 	}
@@ -1394,37 +1545,44 @@ private:
 		}
 	}
 
-	/* Botão direito: trocar, propriedades e filtros. */
+public:
+	/* Escolhe na lista a linha do item com este número (false se não estiver na lista). */
+	bool selectId(int64_t id)
+	{
+		for (int row = 0; row < (int)rows.size(); row++) {
+			if (!rows[row].missing && rows[row].id == id) {
+				list->setCurrentRow(row);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/* Botão direito: o menu do OBS para a fonte, mais trocar, adicionar e remover só no vertical. */
 	void showMenu(const QPoint &where)
 	{
 		int row = list->currentRow();
 		obs_sceneitem_t *item = itemAt(row);
 		obs_source_t *original = originalAt(row);
-		OBSSourceAutoRelease shown = item ? obs_source_get_ref(obs_sceneitem_get_source(item)) : nullptr;
-		obs_sceneitem_release(item);
 
 		QMenu menu(this);
+		connect(menu.addAction(moduleText("Vertical.Sources.Add")), &QAction::triggered, this,
+			[this, where]() { addSource(where); });
 		QAction *swapAction = menu.addAction(moduleText("Vertical.Swap.Button"));
 		swapAction->setEnabled(original != nullptr);
 		connect(swapAction, &QAction::triggered, this, [this]() { swap(); });
 		obs_source_release(original);
-		if (shown) {
+		if (item) {
+			QAction *removeAction = menu.addAction(moduleText("Vertical.Sources.Remove"));
+			connect(removeAction, &QAction::triggered, this, [this]() { removeSource(); });
 			menu.addSeparator();
-			obs_sceneitem_t *fitItem = itemAt(row);
-			addFitActions(menu, fitItem);
-			obs_sceneitem_release(fitItem);
-			menu.addSeparator();
-			obs_source_t *raw = shown.Get();
-			connect(menu.addAction(moduleText("Vertical.Sources.Properties")), &QAction::triggered, this,
-				[raw]() { obs_frontend_open_source_properties(raw); });
-			connect(menu.addAction(moduleText("Vertical.Sources.Filters")), &QAction::triggered, this,
-				[raw]() { obs_frontend_open_source_filters(raw); });
-			connect(menu.addAction(moduleText("Vertical.Sources.Remove")), &QAction::triggered, this,
-				[this]() { removeSource(); });
+			addItemMenu(menu, this, item);
 		}
+		obs_sceneitem_release(item);
 		menu.exec(where);
 	}
 
+private:
 	QLabel *title = nullptr;
 	QListWidget *list = nullptr;
 	std::vector<Row> rows;
@@ -1604,6 +1762,18 @@ void placeEmbedded()
 /* Quem atualiza os painéis                                                   */
 
 SourcesDock *sourcesDock = nullptr;
+
+void showItemMenu(QWidget *parent, obs_sceneitem_t *item, const QPoint &where)
+{
+	if (sourcesDock && sourcesDock->selectId(obs_sceneitem_get_id(item))) {
+		sourcesDock->showMenu(where);
+		return;
+	}
+	/* Painel Fontes verticais ainda não montado: só o menu da fonte. */
+	QMenu menu(parent);
+	addItemMenu(menu, parent, item);
+	menu.exec(where);
+}
 QTimer *timer = nullptr;
 uint64_t seenVersion = (uint64_t)-1;
 
