@@ -17,6 +17,8 @@ target_sources(
     intercom-stream.h
     intercom.c
     intercom.h
+    mdns-announce.c
+    mdns-announce.h
     multistream.c
     multistream.h
     net-info.c
@@ -25,6 +27,9 @@ target_sources(
     phone-source.h
     pl-link.h
     pl-socket.h
+    projection-link.c
+    projection-link.h
+    projection-ui.cpp
     projeto-live.c
     qrcodegen.c
     qrcodegen.h

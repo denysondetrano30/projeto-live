@@ -12,6 +12,7 @@
 #include "director-dock.h"
 #include "intercom.h"
 #include "multistream.h"
+#include "projection-link.h"
 #include "stream-dock.h"
 #include "vertical-dock.h"
 #include "vertical-record.h"
@@ -37,11 +38,14 @@ bool obs_module_load(void)
 	pl_vertical_dock_load();
 	pl_multistream_load();
 	pl_multistream_ui_load();
+	pl_projection_ui_load();
+	pl_projection_start();
 	return true;
 }
 
 void obs_module_unload(void)
 {
+	pl_projection_stop();
 	pl_multistream_unload();
 	pl_vertical_record_unload();
 	pl_vertical_unload();
