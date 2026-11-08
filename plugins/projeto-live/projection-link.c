@@ -30,7 +30,7 @@
 #define LAST_PORT 9029
 #define MAX_PEERS 4
 #define MAX_CLIENTS 32
-#define ID_MAX 64
+#define ID_MAX 128
 #define KEY_CHARS 64
 #define NONCE_CHARS 32
 #define WAIT_MS 100
@@ -495,6 +495,7 @@ static bool handle_line(void *param, const char *line)
 	const char *rest = line + 6;
 	const char *space = strchr(rest, ' ');
 	if (!space || (size_t)(space - rest) >= sizeof(id)) {
+		blog(LOG_WARNING, "[projeto-live] projeção: pedido de conexão inválido");
 		return false;
 	}
 	memcpy(id, rest, (size_t)(space - rest));
@@ -503,6 +504,7 @@ static bool handle_line(void *param, const char *line)
 	space = strchr(rest, ' ');
 	size_t proof_len = space ? (size_t)(space - rest) : strlen(rest);
 	if (proof_len >= sizeof(proof)) {
+		blog(LOG_WARNING, "[projeto-live] projeção: pedido de conexão inválido");
 		return false;
 	}
 	memcpy(proof, rest, proof_len);
@@ -533,6 +535,7 @@ static bool handle_line(void *param, const char *line)
 		send_line(peer, "BUSY");
 		return false;
 	}
+	blog(LOG_INFO, "[projeto-live] projeção pedindo permissão: %s", peer->name);
 	peer->state = PEER_WAITING;
 	peer->since_ns = os_gettime_ns();
 	peer->ticket = ++next_ticket;
