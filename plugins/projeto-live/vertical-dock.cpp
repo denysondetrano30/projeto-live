@@ -31,6 +31,8 @@
 #endif
 
 #include <QAction>
+#include <QAbstractItemModel>
+#include <QAbstractItemView>
 #include <QBoxLayout>
 #include <QCloseEvent>
 #include <QCheckBox>
@@ -1040,7 +1042,15 @@ public:
 
 		list = new QListWidget(this);
 		list->setContextMenuPolicy(Qt::CustomContextMenu);
+		/* Como na lista de Fontes do OBS: arrastar para cima ou para baixo muda o que fica por cima. */
+		list->setDragDropMode(QAbstractItemView::InternalMove);
+		list->setDefaultDropAction(Qt::MoveAction);
 		layout->addWidget(list, 1);
+		connect(list->model(), &QAbstractItemModel::rowsMoved, this, [this]() {
+			if (!rebuilding) {
+				applyOrder();
+			}
+		});
 		connect(list, &QListWidget::currentRowChanged, this, [this](int row) {
 			if (rebuilding || row < 0 || row >= (int)rows.size() || rows[row].missing) {
 				return;
@@ -1118,6 +1128,7 @@ public:
 				if (!obs_sceneitem_visible(item)) {
 					row->setForeground(QColor(128, 128, 128));
 				}
+				row->setData(Qt::UserRole, QVariant((qlonglong)obs_sceneitem_get_id(item)));
 				list->addItem(row);
 				Row entry;
 				entry.id = obs_sceneitem_get_id(item);
@@ -1136,6 +1147,8 @@ public:
 					QFont font = row->font();
 					font.setItalic(true);
 					row->setFont(font);
+					/* Linha cinza não entra na ordem (a fonte não está no vertical). */
+					row->setFlags(row->flags() & ~Qt::ItemIsDragEnabled);
 					self->list->addItem(row);
 					Row entry;
 					entry.missing = obs_source_get_weak_source(source);
@@ -1179,6 +1192,30 @@ private:
 			obs_weak_source_release(row.missing);
 		}
 		rows.clear();
+	}
+
+	/* Depois de arrastar: a ordem da lista (de cima para baixo) vira a ordem da cena. */
+	void applyOrder()
+	{
+		obs_source_t *sceneSource = editingScene();
+		obs_scene_t *scene = obs_scene_from_source(sceneSource);
+		if (scene) {
+			/* O OBS guarda de baixo para cima: a última linha da lista é a primeira da cena. */
+			std::vector<obs_sceneitem_t *> order;
+			for (int i = list->count() - 1; i >= 0; i--) {
+				QVariant id = list->item(i)->data(Qt::UserRole);
+				obs_sceneitem_t *item =
+					id.isValid() ? obs_scene_find_sceneitem_by_id(scene, id.toLongLong()) : nullptr;
+				if (item) {
+					order.push_back(item);
+				}
+			}
+			if (!order.empty()) {
+				obs_scene_reorder_items(scene, order.data(), order.size());
+			}
+		}
+		obs_source_release(sceneSource);
+		pl_vertical_touch();
 	}
 
 	/* Item da cena no ar na linha `row` (nova referência; nullptr numa linha cinza). */
