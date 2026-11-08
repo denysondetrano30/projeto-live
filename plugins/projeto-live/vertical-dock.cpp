@@ -428,6 +428,52 @@ void drawSelection(obs_canvas_t *canvas, float pixelsPerUnit)
 	drawSpacing(3, true, box.right, midY, width, midY, pixelsPerUnit);
 }
 
+/* Põe a fonte no meio da tela vertical, sem mudar o tamanho. */
+void centerItem(obs_sceneitem_t *item)
+{
+	normalizeItem(item);
+	Box box = visibleBox(item);
+	vec2 pos;
+	obs_sceneitem_get_pos(item, &pos);
+	pos.x += PL_VERTICAL_WIDTH / 2.0f - (box.left + box.right) / 2.0f;
+	pos.y += PL_VERTICAL_HEIGHT / 2.0f - (box.top + box.bottom) / 2.0f;
+	obs_sceneitem_set_pos(item, &pos);
+	pl_vertical_touch();
+}
+
+/* Enquadramentos do botão direito: Centralizar, Preencher a tela, Tela inteira, Largura toda. */
+void addFitActions(QMenu &menu, obs_sceneitem_t *item)
+{
+	if (!item) {
+		return;
+	}
+	/* O item pode sumir enquanto o menu está aberto: guarda a cena e o número dele. */
+	obs_weak_source_t *sceneRef = obs_source_get_weak_source(obs_scene_get_source(obs_sceneitem_get_scene(item)));
+	int64_t id = obs_sceneitem_get_id(item);
+	auto withItem = [sceneRef, id](auto action) {
+		obs_source_t *scene = obs_weak_source_get_source(sceneRef);
+		obs_sceneitem_t *found = scene ? obs_scene_find_sceneitem_by_id(obs_scene_from_source(scene), id)
+					       : nullptr;
+		if (found) {
+			action(found);
+		}
+		obs_source_release(scene);
+	};
+	QObject::connect(menu.addAction(moduleText("Vertical.Fit.Center")), &QAction::triggered,
+			 [withItem]() { withItem([](obs_sceneitem_t *found) { centerItem(found); }); });
+	QObject::connect(menu.addAction(moduleText("Vertical.Fit.Fill")), &QAction::triggered, [withItem]() {
+		withItem([](obs_sceneitem_t *found) { pl_vertical_fit_item(found, PL_FIT_FILL); });
+	});
+	QObject::connect(menu.addAction(moduleText("Vertical.Fit.Whole")), &QAction::triggered, [withItem]() {
+		withItem([](obs_sceneitem_t *found) { pl_vertical_fit_item(found, PL_FIT_WHOLE); });
+	});
+	QObject::connect(menu.addAction(moduleText("Vertical.Fit.Width")), &QAction::triggered, [withItem]() {
+		withItem([](obs_sceneitem_t *found) { pl_vertical_fit_item(found, PL_FIT_WIDTH); });
+	});
+	/* A referência fraca vale enquanto o menu existir. */
+	QObject::connect(&menu, &QObject::destroyed, [sceneRef]() { obs_weak_source_release(sceneRef); });
+}
+
 /* ------------------------------------------------------------------------- */
 /* Janela de vídeo da tela vertical                                           */
 
@@ -495,6 +541,10 @@ public:
 protected:
 	void mousePressEvent(QMouseEvent *event) override
 	{
+		if (event->button() == Qt::RightButton) {
+			showMenu(event);
+			return;
+		}
 		if (event->button() != Qt::LeftButton) {
 			return;
 		}
@@ -609,6 +659,32 @@ protected:
 
 private:
 	enum class Mode { None, Move, Handle };
+
+	/* Botão direito numa fonte do vertical: escolhe ela e mostra os enquadramentos. */
+	void showMenu(QMouseEvent *event)
+	{
+		float x, y;
+		toCanvas(event->position(), x, y);
+		obs_source_t *current = pl_vertical_current();
+		obs_scene_t *scene = obs_scene_from_source(current);
+		obs_sceneitem_t *item = scene ? itemAt(scene, x, y) : nullptr;
+		if (item) {
+			setSelection(current, obs_sceneitem_get_id(item));
+			pl_vertical_touch();
+			QMenu menu(this);
+			addFitActions(menu, item);
+			menu.addSeparator();
+			obs_source_t *raw = obs_sceneitem_get_source(item);
+			OBSSourceAutoRelease keep = obs_source_get_ref(raw);
+			connect(menu.addAction(moduleText("Vertical.Sources.Properties")), &QAction::triggered, this,
+				[raw]() { obs_frontend_open_source_properties(raw); });
+			connect(menu.addAction(moduleText("Vertical.Sources.Filters")), &QAction::triggered, this,
+				[raw]() { obs_frontend_open_source_filters(raw); });
+			obs_sceneitem_release(item);
+			menu.exec(QCursor::pos());
+		}
+		obs_source_release(current);
+	}
 
 	/* Quanto da tela vertical cabe em cada pixel da janela, e onde ela começa. */
 	void viewMap(float &scale, float &offsetX, float &offsetY) const
@@ -1067,10 +1143,8 @@ public:
 		auto *buttons = new QHBoxLayout();
 		auto *add = new QPushButton(QStringLiteral("+"), this);
 		add->setToolTip(moduleText("Vertical.Sources.Add"));
-		add->setFixedWidth(36);
 		auto *remove = new QPushButton(QString::fromUtf8("−"), this);
 		remove->setToolTip(moduleText("Vertical.Sources.Remove"));
-		remove->setFixedWidth(36);
 		auto *swapButton = new QPushButton(moduleText("Vertical.Swap.Button"), this);
 		connect(add, &QPushButton::clicked, this,
 			[this, add]() { addSource(add->mapToGlobal(QPoint(0, add->height()))); });
@@ -1335,6 +1409,10 @@ private:
 		connect(swapAction, &QAction::triggered, this, [this]() { swap(); });
 		obs_source_release(original);
 		if (shown) {
+			menu.addSeparator();
+			obs_sceneitem_t *fitItem = itemAt(row);
+			addFitActions(menu, fitItem);
+			obs_sceneitem_release(fitItem);
 			menu.addSeparator();
 			obs_source_t *raw = shown.Get();
 			connect(menu.addAction(moduleText("Vertical.Sources.Properties")), &QAction::triggered, this,

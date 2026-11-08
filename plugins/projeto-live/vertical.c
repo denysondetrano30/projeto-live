@@ -234,7 +234,12 @@ static void item_box(obs_sceneitem_t *item, obs_sceneitem_t *group, float *min_x
 static void auto_frame(obs_sceneitem_t *vertical_item, obs_sceneitem_t *horizontal_item, obs_sceneitem_t *group)
 {
 	obs_source_t *source = obs_sceneitem_get_source(vertical_item);
-	if (!horizontal_item) {
+	/*
+	 * Fonte recém-criada ainda sem tamanho (imagem ou celular carregando): não dá para saber onde
+	 * ela fica na horizontal. Entra no meio da tela, inteira; o quadro se ajusta sozinho quando ela
+	 * carregar.
+	 */
+	if (!horizontal_item || !obs_source_get_width(source) || !obs_source_get_height(source)) {
 		pl_vertical_fit_item(vertical_item, is_camera(source) ? PL_FIT_FILL : PL_FIT_WHOLE);
 		return;
 	}
