@@ -21,6 +21,7 @@
 #include <util/threading.h>
 
 #include "control-server.h"
+#include "pl-clock.h"
 #include "intercom.h"
 #include "sha256.h"
 
@@ -31,6 +32,7 @@
 #define HELLO_TIMEOUT_NS (5 * SECOND_NS)
 #define SILENCE_TIMEOUT_NS (6 * SECOND_NS)
 #define PING_INTERVAL_NS (2 * SECOND_NS)
+#define TIME_INTERVAL_NS (1 * SECOND_NS)
 #define BIND_RETRY_NS (3 * SECOND_NS)
 
 struct peer {
@@ -44,6 +46,7 @@ struct peer {
 	uint32_t sent_voice; /* número do último "VOICE" mandado (veja intercom.h) */
 	bool voice_pending;  /* ainda não mandou nenhum "VOICE" */
 	char camera[PL_CAMERA_NAME_MAX];
+	uint64_t last_time_ns; /* último "TIME" (sincronia, veja pl-clock.h) */
 };
 
 struct pl_control {
@@ -52,6 +55,7 @@ struct pl_control {
 	char key[KEY_MAX];
 	const volatile bool *on_air;
 	struct pl_voice_peer *voice;
+	struct pl_clock *clock;
 	pthread_t thread;
 	bool thread_created;
 	volatile bool stop;
@@ -75,8 +79,9 @@ static void peer_reset(struct peer *peer)
 
 static void peer_close(struct peer *peer)
 {
-	if (peer->sock != PL_INVALID_SOCKET)
+	if (peer->sock != PL_INVALID_SOCKET) {
 		pl_close_socket(peer->sock);
+	}
 	peer_reset(peer);
 }
 
@@ -100,8 +105,9 @@ static void publish_client(struct pl_control *control, const struct peer *client
 
 static void drop_client(struct pl_control *control, struct peer *client, const char *why)
 {
-	if (client->sock == PL_INVALID_SOCKET)
+	if (client->sock == PL_INVALID_SOCKET) {
 		return;
+	}
 	blog(LOG_INFO, "[projeto-live] '%s': %s %s", control->name, client->camera, why);
 	peer_close(client);
 	publish_client(control, NULL);
@@ -131,8 +137,9 @@ static void make_nonce(struct pl_control *control, char *out)
 static bool same_text(const char *a, const char *b, size_t size)
 {
 	unsigned char diff = 0;
-	for (size_t i = 0; i < size; i++)
+	for (size_t i = 0; i < size; i++) {
 		diff |= (unsigned char)(a[i] ^ b[i]);
+	}
 	return diff == 0;
 }
 
@@ -148,8 +155,9 @@ static bool handle_line(void *param, const char *line)
 	struct peer *peer = ctx->peer;
 
 	if (!peer->authed) {
-		if (strncmp(line, "HELLO ", 6) != 0)
+		if (strncmp(line, "HELLO ", 6) != 0) {
 			return false;
+		}
 
 		const char *proof = line + 6;
 		const char *name = strchr(proof, ' ');
@@ -174,12 +182,18 @@ static bool handle_line(void *param, const char *line)
 		return true;
 	}
 
+	/* Resposta da sincronia de relógio. */
+	if (pl_clock_handle_line(control->clock, line)) {
+		return true;
+	}
+
 	/* O operador tocou em "Entendi" no aviso do diretor. */
 	if (strncmp(line, "ACK ", 4) == 0) {
 		uint32_t id = (uint32_t)strtoul(line + 4, NULL, 10);
 		pthread_mutex_lock(&control->mutex);
-		if (id > control->status.last_ack)
+		if (id > control->status.last_ack) {
 			control->status.last_ack = id;
+		}
 		pthread_mutex_unlock(&control->mutex);
 	}
 
@@ -197,8 +211,9 @@ static bool read_peer(struct pl_control *control, struct peer *peer, uint64_t no
 static void accept_peer(struct pl_control *control, pl_socket_t listener, struct peer *pending, uint64_t now)
 {
 	pl_socket_t sock = accept(listener, NULL, NULL);
-	if (sock == PL_INVALID_SOCKET)
+	if (sock == PL_INVALID_SOCKET) {
 		return;
+	}
 
 	/* Só um celular esperando por vez: o mais novo vale. */
 	peer_close(pending);
@@ -210,15 +225,17 @@ static void accept_peer(struct pl_control *control, pl_socket_t listener, struct
 
 	char challenge[NONCE_CHARS + 8];
 	snprintf(challenge, sizeof(challenge), "PL1 %s", pending->nonce);
-	if (!send_line(pending, challenge, now))
+	if (!send_line(pending, challenge, now)) {
 		peer_close(pending);
+	}
 }
 
 static pl_socket_t open_listener(int port)
 {
 	pl_socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (sock == PL_INVALID_SOCKET)
+	if (sock == PL_INVALID_SOCKET) {
 		return PL_INVALID_SOCKET;
+	}
 
 #ifndef _WIN32
 	/* Permite reabrir a porta logo depois de fechar (no Windows isso teria outro efeito). */
@@ -261,11 +278,13 @@ static bool flush_outbox(struct pl_control *control, struct peer *client, uint64
 
 static void watch(fd_set *set, pl_socket_t sock, int *max_fd, bool *any)
 {
-	if (sock == PL_INVALID_SOCKET)
+	if (sock == PL_INVALID_SOCKET) {
 		return;
+	}
 	FD_SET(sock, set);
-	if ((int)sock > *max_fd)
+	if ((int)sock > *max_fd) {
 		*max_fd = (int)sock;
+	}
 	*any = true;
 }
 
@@ -286,11 +305,12 @@ static void *control_thread(void *data)
 		if (listener == PL_INVALID_SOCKET && now >= next_bind_ns) {
 			listener = open_listener(control->port);
 			if (listener == PL_INVALID_SOCKET) {
-				if (!bind_failed)
+				if (!bind_failed) {
 					blog(LOG_WARNING,
 					     "[projeto-live] '%s': a porta %d (TCP) está ocupada; o aviso de "
 					     "\"no ar\" pelo Wi-Fi fica esperando ela liberar",
 					     control->name, control->port);
+				}
 				bind_failed = true;
 				next_bind_ns = now + BIND_RETRY_NS;
 			} else if (bind_failed) {
@@ -320,45 +340,55 @@ static void *control_thread(void *data)
 		}
 		now = os_gettime_ns();
 
-		if (ready > 0 && listener != PL_INVALID_SOCKET && FD_ISSET(listener, &readable))
+		if (ready > 0 && listener != PL_INVALID_SOCKET && FD_ISSET(listener, &readable)) {
 			accept_peer(control, listener, &pending, now);
+		}
 
 		if (ready > 0 && pending.sock != PL_INVALID_SOCKET && FD_ISSET(pending.sock, &readable)) {
-			if (!read_peer(control, &pending, now))
+			if (!read_peer(control, &pending, now)) {
 				peer_close(&pending);
+			}
 		}
 
 		if (ready > 0 && client.sock != PL_INVALID_SOCKET && FD_ISSET(client.sock, &readable)) {
-			if (!read_peer(control, &client, now))
+			if (!read_peer(control, &client, now)) {
 				drop_client(control, &client, "desconectou do canal de controle");
+			}
 		}
 
 		/* Provou a senha: vira a câmera desta fonte (substitui a anterior, se houver). */
 		if (pending.sock != PL_INVALID_SOCKET && pending.authed) {
-			if (client.sock != PL_INVALID_SOCKET)
+			if (client.sock != PL_INVALID_SOCKET) {
 				drop_client(control, &client, "foi substituído por outro celular");
+			}
 			client = pending;
 			peer_reset(&pending);
 			client.last_recv_ns = now;
+			/* Pode ser outro aparelho: o relógio é medido de novo. */
+			pl_clock_reset(control->clock);
 			blog(LOG_INFO, "[projeto-live] '%s': %s conectou no canal de controle", control->name,
 			     client.camera);
 			char audio[64];
 			bool ok = send_line(&client, "OK", now);
 			/* Intercom pelo Wi-Fi: a porta UDP e a ficha deste celular. */
-			if (ok && pl_voice_peer_audio_line(control->voice, audio, sizeof(audio)))
+			if (ok && pl_voice_peer_audio_line(control->voice, audio, sizeof(audio))) {
 				ok = send_line(&client, audio, now);
+			}
 			client.voice_pending = true;
-			if (ok)
+			if (ok) {
 				publish_client(control, &client);
-			else
+			} else {
 				peer_close(&client);
+			}
 		}
 
-		if (pending.sock != PL_INVALID_SOCKET && now - pending.last_recv_ns > HELLO_TIMEOUT_NS)
+		if (pending.sock != PL_INVALID_SOCKET && now - pending.last_recv_ns > HELLO_TIMEOUT_NS) {
 			peer_close(&pending);
+		}
 
-		if (client.sock != PL_INVALID_SOCKET && now - client.last_recv_ns > SILENCE_TIMEOUT_NS)
+		if (client.sock != PL_INVALID_SOCKET && now - client.last_recv_ns > SILENCE_TIMEOUT_NS) {
 			drop_client(control, &client, "parou de responder no canal de controle");
+		}
 
 		if (client.sock != PL_INVALID_SOCKET) {
 			int tally = control->on_air && os_atomic_load_bool(control->on_air) ? 1 : 0;
@@ -368,6 +398,12 @@ static void *control_thread(void *data)
 				client.sent_tally = tally;
 			} else if (ok && now - client.last_send_ns >= PING_INTERVAL_NS) {
 				ok = send_line(&client, "PING", now);
+			}
+			if (ok && control->clock && now - client.last_time_ns >= TIME_INTERVAL_NS) {
+				char line[48];
+				pl_clock_request(line, sizeof(line));
+				ok = send_line(&client, line, now);
+				client.last_time_ns = now;
 			}
 			if (ok && control->voice) {
 				char text[PL_VOICE_TEXT_MAX], line[PL_VOICE_TEXT_MAX + 8];
@@ -379,26 +415,29 @@ static void *control_thread(void *data)
 					client.voice_pending = false;
 				}
 			}
-			if (!ok)
+			if (!ok) {
 				drop_client(control, &client, "desconectou do canal de controle");
+			}
 		}
 	}
 
 	peer_close(&pending);
 	peer_close(&client);
 	publish_client(control, NULL);
-	if (listener != PL_INVALID_SOCKET)
+	if (listener != PL_INVALID_SOCKET) {
 		pl_close_socket(listener);
+	}
 	return NULL;
 }
 
 /* ------------------------------------------------------------------------- */
 
 struct pl_control *pl_control_create(const char *source_name, int port, const char *key, const volatile bool *on_air,
-				     struct pl_voice_peer *voice)
+				     struct pl_voice_peer *voice, struct pl_clock *clock)
 {
-	if (port <= 0 || port > 65535 || !key || !*key || strlen(key) >= KEY_MAX)
+	if (port <= 0 || port > 65535 || !key || !*key || strlen(key) >= KEY_MAX) {
 		return NULL;
+	}
 
 	pl_socket_startup();
 
@@ -408,6 +447,7 @@ struct pl_control *pl_control_create(const char *source_name, int port, const ch
 	snprintf(control->key, sizeof(control->key), "%s", key);
 	control->on_air = on_air;
 	control->voice = voice;
+	control->clock = clock;
 	pthread_mutex_init(&control->mutex, NULL);
 
 	if (pthread_create(&control->thread, NULL, control_thread, control) != 0) {
@@ -428,8 +468,9 @@ bool pl_control_matches(const struct pl_control *control, int port, const char *
 
 bool pl_control_send(struct pl_control *control, const char *line)
 {
-	if (!control || !line || !*line)
+	if (!control || !line || !*line) {
 		return false;
+	}
 
 	pthread_mutex_lock(&control->mutex);
 	bool connected = control->status.connected;
@@ -444,8 +485,9 @@ bool pl_control_send(struct pl_control *control, const char *line)
 void pl_control_get_status(struct pl_control *control, struct pl_link_status *status)
 {
 	memset(status, 0, sizeof(*status));
-	if (!control)
+	if (!control) {
 		return;
+	}
 	pthread_mutex_lock(&control->mutex);
 	*status = control->status;
 	pthread_mutex_unlock(&control->mutex);
@@ -453,11 +495,13 @@ void pl_control_get_status(struct pl_control *control, struct pl_link_status *st
 
 void pl_control_destroy(struct pl_control *control)
 {
-	if (!control)
+	if (!control) {
 		return;
+	}
 	control->stop = true;
-	if (control->thread_created)
+	if (control->thread_created) {
 		pthread_join(control->thread, NULL);
+	}
 	dstr_free(&control->outbox);
 	pthread_mutex_destroy(&control->mutex);
 	bfree(control->name);

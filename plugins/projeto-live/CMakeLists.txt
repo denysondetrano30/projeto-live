@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.28...3.30)
 
 find_package(Qt6 REQUIRED Widgets)
+find_package(FFmpeg REQUIRED avcodec avformat avutil)
 
 add_library(projeto-live MODULE)
 add_library(OBS::projeto-live ALIAS projeto-live)
@@ -27,8 +28,14 @@ target_sources(
     net-info.h
     phone-source.c
     phone-source.h
+    phone-video.c
+    phone-video.h
+    pl-clock.c
+    pl-clock.h
     pl-link.h
     pl-socket.h
+    pl-sync.c
+    pl-sync.h
     projection-link.c
     projection-link.h
     projection-ui.cpp
@@ -55,6 +62,9 @@ target_link_libraries(
     OBS::frontend-api
     OBS::libobs
     Qt::Widgets
+    FFmpeg::avcodec
+    FFmpeg::avformat
+    FFmpeg::avutil
     $<$<PLATFORM_ID:Windows>:OBS::w32-pthreads>
     $<$<PLATFORM_ID:Windows>:ws2_32>
     $<$<PLATFORM_ID:Windows>:iphlpapi>

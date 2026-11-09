@@ -10,6 +10,8 @@
  *   OBS     -> celular: "CMD <número> <texto>" (aviso do diretor, como "CMD 3 Abre")
  *   celular -> OBS:     "ACK <número>" quando o operador toca em "Entendi"
  *   OBS     -> celular: "AUDIO <porta UDP> <ficha>" e "VOICE <quem fala>" (intercom, veja intercom.h)
+ *   OBS     -> celular: "TIME <hora do PC>"; celular -> OBS: "TIME <hora do PC> <hora do celular>"
+ *                       (sincronia das câmeras, a cada segundo; veja pl-clock.h)
  *   os dois lados:      "PING" a cada 2 segundos; 6 segundos sem nada = conexão caiu
  *
  * Assim a senha nunca passa pela rede. Uma câmera por fonte: um celular novo que prove a senha
@@ -34,12 +36,13 @@ extern "C" {
 
 struct pl_control;
 struct pl_voice_peer;
+struct pl_clock;
 
-/* Abre o canal na porta TCP `port`. `on_air` e `voice` (o participante desta fonte no intercom)
- * são usados pela thread do canal e precisam durar mais que ele. Se a porta estiver ocupada,
+/* Abre o canal na porta TCP `port`. `on_air`, `voice` (o participante desta fonte no intercom) e
+ * `clock` (sincronia, pode ser NULL) são usados pela thread do canal e precisam durar mais que ele. Se a porta estiver ocupada,
  * continua tentando a cada 3 segundos. */
 struct pl_control *pl_control_create(const char *source_name, int port, const char *key, const volatile bool *on_air,
-				     struct pl_voice_peer *voice);
+				     struct pl_voice_peer *voice, struct pl_clock *clock);
 
 /* true se o canal já está aberto com esta porta e esta senha. */
 bool pl_control_matches(const struct pl_control *control, int port, const char *key);

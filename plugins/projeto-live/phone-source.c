@@ -5,8 +5,9 @@
  * celular estiver mandando imagem, a fonte mostra um QR code com o endereço deste computador,
  * a porta e a senha. O app Projeto Live lê o QR code e passa a ligar sempre para esta fonte.
  *
- * Por dentro, a imagem chega por uma Fonte de mídia do OBS (ffmpeg_source) escutando em SRT,
- * com senha, sem buffer e com decodificação por hardware.
+ * Por dentro, a imagem chega pelo receptor do Projeto Live (phone-video.c), escutando em SRT com
+ * senha: cada quadro aparece um atraso fixo depois de filmado (sincronia das câmeras, pl-sync.h),
+ * com o relógio medido pelo canal de controle (pl-clock.h).
  *
  * Plano B: com um endereço digitado, a fonte é quem liga para o celular (o app sem pareamento
  * fica esperando na porta 9000).
@@ -39,6 +40,9 @@
 #include "control-server.h"
 #include "intercom.h"
 #include "net-info.h"
+#include "phone-video.h"
+#include "pl-clock.h"
+#include "pl-sync.h"
 #include "phone-source.h"
 #include "qrcodegen.h"
 #include "usb-relay.h"
@@ -54,6 +58,8 @@
 #define S_NEW_KEY "new_qr_code"
 #define S_CONNECTION "connection"
 #define S_USB_HELP "usb_help"
+#define S_DELAY "sync_delay_ms"
+#define S_LATENCY "sync_latency"
 #define MODE_WIFI "wifi"
 #define MODE_USB "usb"
 
@@ -74,7 +80,9 @@
 
 struct phone_source {
 	obs_source_t *source;
-	obs_source_t *media;
+	obs_source_t *media; /* imagem (fonte interna do receptor) */
+	struct pl_phone_video *video;
+	struct pl_clock *clock;
 
 	int port;
 	char key[KEY_LEN + 1];
@@ -114,8 +122,9 @@ static uint64_t random_state;
 
 static uint64_t next_random(void)
 {
-	if (!random_state)
+	if (!random_state) {
 		random_state = os_gettime_ns() ^ (uint64_t)(uintptr_t)&random_state ^ 0x9E3779B97F4A7C15ULL;
+	}
 	random_state ^= random_state << 13;
 	random_state ^= random_state >> 7;
 	random_state ^= random_state << 17;
@@ -126,8 +135,9 @@ static void make_key(char *key)
 {
 	/* Sem letras que se confundem (0/O, 1/l/I). */
 	static const char chars[] = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
-	for (size_t i = 0; i < KEY_LEN; i++)
+	for (size_t i = 0; i < KEY_LEN; i++) {
 		key[i] = chars[next_random() % (sizeof(chars) - 1)];
+	}
 	key[KEY_LEN] = 0;
 }
 
@@ -140,12 +150,14 @@ struct port_check {
 static bool port_check_proc(void *param, obs_source_t *source)
 {
 	struct port_check *check = param;
-	if (source == check->self || strcmp(obs_source_get_id(source), PHONE_SOURCE_ID) != 0)
+	if (source == check->self || strcmp(obs_source_get_id(source), PHONE_SOURCE_ID) != 0) {
 		return true;
+	}
 
 	obs_data_t *settings = obs_source_get_settings(source);
-	if ((int)obs_data_get_int(settings, S_PORT) == check->port)
+	if ((int)obs_data_get_int(settings, S_PORT) == check->port) {
 		check->used = true;
+	}
 	obs_data_release(settings);
 	return !check->used;
 }
@@ -156,8 +168,9 @@ static int pick_port(obs_source_t *self)
 	for (int tries = 0; tries < 50; tries++) {
 		struct port_check check = {self, PORT_MIN + (int)(next_random() % PORT_RANGE), false};
 		obs_enum_sources(port_check_proc, &check);
-		if (!check.used)
+		if (!check.used) {
 			return check.port;
+		}
 	}
 	return PORT_MIN;
 }
@@ -193,17 +206,19 @@ static void rebuild_qr(struct phone_source *ps)
 
 	struct dstr hosts = {0};
 	for (size_t i = 0; i < count; i++) {
-		if (i)
+		if (i) {
 			dstr_cat(&hosts, ",");
+		}
 		dstr_cat(&hosts, addresses[i]);
 	}
 
-	if (count)
+	if (count) {
 		snprintf(ps->addresses_text, sizeof(ps->addresses_text), "%s %s · %s %d",
 			 obs_module_text("ThisComputer"), addresses[0], obs_module_text("Port"), ps->port);
-	else
+	} else {
 		snprintf(ps->addresses_text, sizeof(ps->addresses_text), "%s %s", obs_module_text("ThisComputer"),
 			 obs_module_text("NoNetwork"));
+	}
 
 	char name[256];
 	url_encode(obs_source_get_name(ps->source), name, sizeof(name));
@@ -216,8 +231,9 @@ static void rebuild_qr(struct phone_source *ps)
 	pthread_mutex_lock(&ps->qr_mutex);
 	bool changed = strcmp(payload, ps->qr_payload) != 0;
 	pthread_mutex_unlock(&ps->qr_mutex);
-	if (!changed)
+	if (!changed) {
 		return;
+	}
 
 	uint8_t qr[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAX_VERSION)];
 	uint8_t temp[qrcodegen_BUFFER_LEN_FOR_VERSION(QR_MAX_VERSION)];
@@ -263,26 +279,32 @@ static void rebuild_qr(struct phone_source *ps)
 static bool manual_address_complete(const char *text)
 {
 	const char *p = text;
-	if (strncmp(p, "srt://", 6) == 0)
+	if (strncmp(p, "srt://", 6) == 0) {
 		p += 6;
+	}
 
 	unsigned int a, b, c, d;
 	int used = 0;
-	if (sscanf(p, "%3u.%3u.%3u.%3u%n", &a, &b, &c, &d, &used) != 4)
+	if (sscanf(p, "%3u.%3u.%3u.%3u%n", &a, &b, &c, &d, &used) != 4) {
 		return false;
-	if (a > 255 || b > 255 || c > 255 || d > 255)
+	}
+	if (a > 255 || b > 255 || c > 255 || d > 255) {
 		return false;
+	}
 
 	p += used;
-	if (*p == 0)
+	if (*p == 0) {
 		return true;
-	if (*p != ':')
+	}
+	if (*p != ':') {
 		return false;
+	}
 
 	unsigned int port;
 	used = 0;
-	if (sscanf(p + 1, "%5u%n", &port, &used) != 1 || port == 0 || port > 65535)
+	if (sscanf(p + 1, "%5u%n", &port, &used) != 1 || port == 0 || port > 65535) {
 		return false;
+	}
 	return p[1 + used] == 0;
 }
 
@@ -297,22 +319,25 @@ static void build_url(struct phone_source *ps, char *url, size_t size)
 	url[0] = 0;
 
 	if (ps->usb_mode) {
-		/* Cabo USB: a Fonte de mídia lê do relé local, que busca o vídeo no iPhone pelo cabo. */
-		if (ps->usb)
+		/* Cabo USB: o receptor lê do relé local, que busca o vídeo no iPhone pelo cabo. */
+		if (ps->usb) {
 			snprintf(url, size, "tcp://127.0.0.1:%d", pl_usb_relay_local_port(ps->usb));
+		}
 		return;
 	}
 
 	if (has_manual_address(ps)) {
 		const char *manual = ps->manual_address;
-		if (!manual_address_complete(manual))
+		if (!manual_address_complete(manual)) {
 			return;
-		if (strncmp(manual, "srt://", 6) == 0)
+		}
+		if (strncmp(manual, "srt://", 6) == 0) {
 			snprintf(url, size, "%s", manual);
-		else if (strchr(manual, ':'))
+		} else if (strchr(manual, ':')) {
 			snprintf(url, size, "srt://%s", manual);
-		else
+		} else {
 			snprintf(url, size, "srt://%s:%d", manual, PHONE_LISTEN_PORT);
+		}
 		return;
 	}
 
@@ -323,33 +348,22 @@ static void build_url(struct phone_source *ps, char *url, size_t size)
 
 static void apply_url(struct phone_source *ps, const char *url)
 {
-	if (!ps->media || strcmp(url, ps->current_url) == 0)
+	if (!ps->video || strcmp(url, ps->current_url) == 0) {
 		return;
+	}
 
 	snprintf(ps->current_url, sizeof(ps->current_url), "%s", url);
+	pl_phone_video_set_url(ps->video, url);
 
-	obs_data_t *settings = obs_data_create();
-	obs_data_set_bool(settings, "is_local_file", false);
-	obs_data_set_string(settings, "input", url);
-	obs_data_set_string(settings, "input_format", "mpegts");
-	obs_data_set_int(settings, "buffering_mb", 0);
-	obs_data_set_bool(settings, "hw_decode", true);
-	obs_data_set_int(settings, "reconnect_delay_sec", 1);
-	obs_data_set_bool(settings, "restart_on_activate", false);
-	obs_data_set_bool(settings, "close_when_inactive", false);
-	obs_data_set_bool(settings, "clear_on_media_end", true);
-	obs_data_set_bool(settings, "log_changes", false);
-	obs_source_update(ps->media, settings);
-	obs_data_release(settings);
-
-	if (ps->usb_mode)
+	if (ps->usb_mode) {
 		blog(LOG_INFO, "[projeto-live] '%s' esperando o iPhone pelo cabo USB", obs_source_get_name(ps->source));
-	else if (has_manual_address(ps))
+	} else if (has_manual_address(ps)) {
 		blog(LOG_INFO, "[projeto-live] '%s' ligando para o celular em %s", obs_source_get_name(ps->source),
 		     url);
-	else
+	} else {
 		blog(LOG_INFO, "[projeto-live] '%s' esperando o celular pareado na porta %d",
 		     obs_source_get_name(ps->source), ps->port);
+	}
 }
 
 /* Roda na thread da interface, a cada segundo (pedido pelo video_tick). */
@@ -358,17 +372,20 @@ static void refresh(struct phone_source *ps)
 	/* O intercom mostra a câmera pelo nome da fonte (que a pessoa pode trocar). */
 	pl_voice_peer_set_name(ps->voice, obs_source_get_name(ps->source));
 
-	if (os_gettime_ns() - ps->addresses_checked_ns >= ADDRESS_CHECK_NS)
+	if (os_gettime_ns() - ps->addresses_checked_ns >= ADDRESS_CHECK_NS) {
 		rebuild_qr(ps);
+	}
 
 	/* Espera a pessoa parar de digitar o endereço antes de conectar. */
-	if (os_gettime_ns() - ps->manual_changed_ns < TYPING_PAUSE_NS)
+	if (os_gettime_ns() - ps->manual_changed_ns < TYPING_PAUSE_NS) {
 		return;
+	}
 
 	char url[URL_MAX];
 	build_url(ps, url, sizeof(url));
-	if (*url)
+	if (*url) {
 		apply_url(ps, url);
+	}
 }
 
 static void refresh_task(void *param)
@@ -376,8 +393,9 @@ static void refresh_task(void *param)
 	obs_weak_source_t *weak = param;
 	obs_source_t *source = obs_weak_source_get_source(weak);
 	obs_weak_source_release(weak);
-	if (!source)
+	if (!source) {
 		return;
+	}
 
 	struct phone_source *ps = obs_obj_get_data(source);
 	if (ps) {
@@ -412,44 +430,53 @@ bool pl_phone_is_source(obs_source_t *source)
 static void clean_command(const char *text, char *out, size_t size)
 {
 	size_t len = 0;
-	for (const unsigned char *p = (const unsigned char *)text; *p && len + 1 < size; p++)
+	for (const unsigned char *p = (const unsigned char *)text; *p && len + 1 < size; p++) {
 		out[len++] = *p < 0x20 || *p == 0x7F ? ' ' : (char)*p;
+	}
 	if (text[len] != 0) {
 		/* Cortou: se a última letra ficou pela metade, tira ela (bytes 10xxxxxx continuam uma letra). */
 		size_t lead = len;
-		while (lead > 0 && ((unsigned char)out[lead - 1] & 0xC0) == 0x80)
+		while (lead > 0 && ((unsigned char)out[lead - 1] & 0xC0) == 0x80) {
 			lead--;
+		}
 		if (lead > 0) {
 			unsigned char c = (unsigned char)out[lead - 1];
 			size_t need = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
-			if (len - (lead - 1) < need)
+			if (len - (lead - 1) < need) {
 				len = lead - 1;
+			}
 		}
 	}
-	while (len && out[len - 1] == ' ')
+	while (len && out[len - 1] == ' ') {
 		len--;
+	}
 	out[len] = 0;
 	size_t start = 0;
-	while (out[start] == ' ')
+	while (out[start] == ' ') {
 		start++;
-	if (start)
+	}
+	if (start) {
 		memmove(out, out + start, len - start + 1);
+	}
 }
 
 bool pl_phone_get_status(obs_source_t *source, struct pl_phone_status *status)
 {
 	memset(status, 0, sizeof(*status));
-	if (!pl_phone_is_source(source))
+	if (!pl_phone_is_source(source)) {
 		return false;
+	}
 	struct phone_source *ps = obs_obj_get_data(source);
-	if (!ps)
+	if (!ps) {
 		return false;
+	}
 
 	struct pl_link_status link;
-	if (ps->usb_mode)
+	if (ps->usb_mode) {
 		pl_usb_relay_get_status(ps->usb, &link);
-	else
+	} else {
 		pl_control_get_status(ps->control, &link);
+	}
 
 	status->connected = link.connected;
 	status->on_air = os_atomic_load_bool(&ps->on_air);
@@ -465,25 +492,30 @@ bool pl_phone_get_status(obs_source_t *source, struct pl_phone_status *status)
 
 void pl_phone_set_private_talk(obs_source_t *source, bool on)
 {
-	if (!pl_phone_is_source(source))
+	if (!pl_phone_is_source(source)) {
 		return;
+	}
 	struct phone_source *ps = obs_obj_get_data(source);
-	if (ps)
+	if (ps) {
 		pl_voice_peer_set_private(ps->voice, on);
+	}
 }
 
 uint32_t pl_phone_send_command(obs_source_t *source, const char *text)
 {
-	if (!pl_phone_is_source(source) || !text)
+	if (!pl_phone_is_source(source) || !text) {
 		return 0;
+	}
 	struct phone_source *ps = obs_obj_get_data(source);
-	if (!ps)
+	if (!ps) {
 		return 0;
+	}
 
 	char clean[PL_COMMAND_MAX + 1];
 	clean_command(text, clean, sizeof(clean));
-	if (!*clean)
+	if (!*clean) {
 		return 0;
+	}
 
 	uint32_t id = ps->last_sent + 1;
 	char line[PL_COMMAND_MAX + 32];
@@ -523,12 +555,14 @@ static void hotkey_pressed(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, b
 {
 	struct phone_source *ps = data;
 	UNUSED_PARAMETER(hotkey);
-	if (!pressed)
+	if (!pressed) {
 		return;
+	}
 
 	for (size_t i = 0; i < COMMAND_COUNT; i++) {
-		if (ps->hotkeys[i] != id)
+		if (ps->hotkeys[i] != id) {
 			continue;
+		}
 		struct hotkey_task *task = bzalloc(sizeof(*task));
 		task->weak = obs_source_get_weak_source(ps->source);
 		task->command = i;
@@ -571,9 +605,29 @@ static const char *phone_get_name(void *unused)
 	return obs_module_text("PhoneSource");
 }
 
+/* Atraso das câmeras: vale para todas as fontes "Celular" (guardado em sincronia.json). */
+static bool sync_delay_proc(void *param, obs_source_t *source)
+{
+	int ms = *(int *)param;
+	if (pl_phone_is_source(source)) {
+		obs_data_t *settings = obs_source_get_settings(source);
+		obs_data_set_int(settings, S_DELAY, ms);
+		obs_data_release(settings);
+	}
+	return true;
+}
+
 static void phone_update(void *data, obs_data_t *settings)
 {
 	struct phone_source *ps = data;
+
+	int delay = (int)obs_data_get_int(settings, S_DELAY);
+	if (ps->clock && delay != pl_sync_delay_ms()) {
+		/* Mudado aqui (fonte já criada): vale para todas. Na criação, vem o valor de todas. */
+		pl_sync_set_delay_ms(delay);
+		delay = pl_sync_delay_ms();
+		obs_enum_sources(sync_delay_proc, &delay);
+	}
 
 	int port = (int)obs_data_get_int(settings, S_PORT);
 	if (port <= 0 || port > 65535) {
@@ -595,11 +649,12 @@ static void phone_update(void *data, obs_data_t *settings)
 	ps->usb_mode = usb_mode;
 	struct pl_usb_relay *old_relay = NULL;
 	if (usb_mode && !ps->usb) {
-		ps->usb = pl_usb_relay_create(obs_source_get_name(ps->source), &ps->on_air, ps->voice);
-		if (!ps->usb)
+		ps->usb = pl_usb_relay_create(obs_source_get_name(ps->source), &ps->on_air, ps->voice, ps->clock);
+		if (!ps->usb) {
 			blog(LOG_WARNING, "[projeto-live] Não consegui preparar o cabo USB");
+		}
 	} else if (!usb_mode && ps->usb) {
-		/* Fecha o relé só depois de a Fonte de mídia mudar de endereço (logo abaixo). */
+		/* Fecha o relé só depois de o receptor mudar de endereço (logo abaixo). */
 		old_relay = ps->usb;
 		ps->usb = NULL;
 	}
@@ -610,8 +665,8 @@ static void phone_update(void *data, obs_data_t *settings)
 		ps->control = NULL;
 	} else if (!pl_control_matches(ps->control, ps->port, ps->key)) {
 		pl_control_destroy(ps->control);
-		ps->control =
-			pl_control_create(obs_source_get_name(ps->source), ps->port, ps->key, &ps->on_air, ps->voice);
+		ps->control = pl_control_create(obs_source_get_name(ps->source), ps->port, ps->key, &ps->on_air,
+						ps->voice, ps->clock);
 	}
 
 	const char *new_manual = obs_data_get_string(settings, S_MANUAL);
@@ -630,8 +685,9 @@ static void phone_update(void *data, obs_data_t *settings)
 
 	char url[URL_MAX];
 	build_url(ps, url, sizeof(url));
-	if (*url)
+	if (*url) {
 		apply_url(ps, url);
+	}
 	pl_usb_relay_destroy(old_relay);
 }
 
@@ -641,20 +697,21 @@ static void *phone_create(obs_data_t *settings, obs_source_t *source)
 	ps->source = source;
 	pthread_mutex_init(&ps->qr_mutex, NULL);
 
-	obs_data_t *media_settings = obs_data_create();
-	obs_data_set_bool(media_settings, "is_local_file", false);
-	obs_data_set_string(media_settings, "input", "");
-	obs_data_set_bool(media_settings, "log_changes", false);
-	ps->media = obs_source_create_private("ffmpeg_source", "Projeto Live: imagem do celular", media_settings);
-	obs_data_release(media_settings);
+	/* O atraso das câmeras é um só para todas: a fonte nova pega o valor atual. */
+	obs_data_set_int(settings, S_DELAY, pl_sync_delay_ms());
 
-	if (ps->media)
+	ps->clock = pl_clock_create();
+	ps->video = pl_phone_video_create(obs_source_get_name(source), ps->clock);
+	ps->media = pl_phone_video_source(ps->video);
+	if (ps->media) {
 		obs_source_add_active_child(source, ps->media);
-	else
-		blog(LOG_WARNING, "[projeto-live] Não consegui criar a Fonte de mídia interna");
+	} else {
+		blog(LOG_WARNING, "[projeto-live] Não consegui criar o receptor da imagem");
+	}
 
-	for (size_t i = 0; i < COMMAND_COUNT; i++)
+	for (size_t i = 0; i < COMMAND_COUNT; i++) {
 		ps->hotkeys[i] = OBS_INVALID_HOTKEY_ID;
+	}
 	ps->private_talk_hotkey = OBS_INVALID_HOTKEY_ID;
 	ps->voice = pl_voice_peer_create(obs_source_get_name(source));
 	phone_update(ps, settings);
@@ -667,18 +724,22 @@ static void phone_destroy(void *data)
 	struct phone_source *ps = data;
 
 	/* Antes de liberar a fonte, para um atalho apertado agora não achar a memória já solta. */
-	for (size_t i = 0; i < COMMAND_COUNT; i++)
-		if (ps->hotkeys[i] != OBS_INVALID_HOTKEY_ID)
+	for (size_t i = 0; i < COMMAND_COUNT; i++) {
+		if (ps->hotkeys[i] != OBS_INVALID_HOTKEY_ID) {
 			obs_hotkey_unregister(ps->hotkeys[i]);
-	if (ps->private_talk_hotkey != OBS_INVALID_HOTKEY_ID)
+		}
+	}
+	if (ps->private_talk_hotkey != OBS_INVALID_HOTKEY_ID) {
 		obs_hotkey_unregister(ps->private_talk_hotkey);
+	}
 
 	if (ps->media) {
 		obs_source_remove_active_child(ps->source, ps->media);
-		obs_source_release(ps->media);
 	}
+	pl_phone_video_destroy(ps->video);
 	pl_usb_relay_destroy(ps->usb);
 	pl_control_destroy(ps->control);
+	pl_clock_destroy(ps->clock);      /* depois do receptor, do relé e do canal, que usam o relógio */
 	pl_voice_peer_destroy(ps->voice); /* depois do relé e do canal, que usam o participante */
 	if (ps->qr_texture) {
 		obs_enter_graphics();
@@ -697,6 +758,7 @@ static void phone_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, S_KEY, "");
 	obs_data_set_default_string(settings, S_MANUAL, "");
 	obs_data_set_default_string(settings, S_CONNECTION, MODE_WIFI);
+	obs_data_set_default_int(settings, S_DELAY, PL_SYNC_DEFAULT_MS);
 }
 
 /* Mostra só os campos do modo escolhido (Wi-Fi ou cabo USB). */
@@ -707,12 +769,14 @@ static bool connection_modified(obs_properties_t *props, obs_property_t *propert
 	const char *wifi_only[] = {S_HOW, S_ADDRESSES, S_NEW_KEY, S_MANUAL};
 	for (size_t i = 0; i < sizeof(wifi_only) / sizeof(wifi_only[0]); i++) {
 		obs_property_t *p = obs_properties_get(props, wifi_only[i]);
-		if (p)
+		if (p) {
 			obs_property_set_visible(p, !usb);
+		}
 	}
 	obs_property_t *usb_help = obs_properties_get(props, S_USB_HELP);
-	if (usb_help)
+	if (usb_help) {
 		obs_property_set_visible(usb_help, usb);
+	}
 	return true;
 }
 
@@ -721,8 +785,9 @@ static bool new_key_clicked(obs_properties_t *props, obs_property_t *property, v
 	struct phone_source *ps = data;
 	UNUSED_PARAMETER(props);
 	UNUSED_PARAMETER(property);
-	if (!ps)
+	if (!ps) {
 		return false;
+	}
 
 	char key[KEY_LEN + 1];
 	make_key(key);
@@ -748,8 +813,9 @@ static obs_properties_t *phone_properties(void *data)
 
 	obs_properties_add_text(props, S_USB_HELP, obs_module_text("UsbHelp"), OBS_TEXT_INFO);
 	obs_properties_add_text(props, S_HOW, obs_module_text("HowToPair"), OBS_TEXT_INFO);
-	if (ps)
+	if (ps) {
 		obs_properties_add_text(props, S_ADDRESSES, ps->addresses_text, OBS_TEXT_INFO);
+	}
 
 	obs_property_t *button =
 		obs_properties_add_button2(props, S_NEW_KEY, obs_module_text("NewQrCode"), new_key_clicked, ps);
@@ -758,6 +824,23 @@ static obs_properties_t *phone_properties(void *data)
 	obs_property_t *manual =
 		obs_properties_add_text(props, S_MANUAL, obs_module_text("ManualAddress"), OBS_TEXT_DEFAULT);
 	obs_property_set_long_description(manual, obs_module_text("ManualAddress.ToolTip"));
+
+	/* Sincronia: atraso fixo de todas as câmeras e o atraso medido desta. */
+	obs_property_t *delay = obs_properties_add_int_slider(props, S_DELAY, obs_module_text("Sync.Delay"),
+							      PL_SYNC_MIN_MS, PL_SYNC_MAX_MS, 10);
+	obs_property_int_set_suffix(delay, " ms");
+	obs_property_set_long_description(delay, obs_module_text("Sync.Delay.ToolTip"));
+	if (ps) {
+		char text[256];
+		int latency = pl_phone_video_latency_ms(ps->video);
+		if (latency >= 0) {
+			snprintf(text, sizeof(text), "%s %d ms %s", obs_module_text("Sync.Latency"), latency,
+				 obs_module_text("Sync.Latency.Note"));
+		} else {
+			snprintf(text, sizeof(text), "%s", obs_module_text("Sync.NoLatency"));
+		}
+		obs_properties_add_text(props, S_LATENCY, text, OBS_TEXT_INFO);
+	}
 
 	return props;
 }
@@ -782,13 +865,15 @@ static void phone_tick(void *data, float seconds)
 	struct phone_source *ps = data;
 
 	ps->refresh_timer += seconds;
-	if (ps->refresh_timer < REFRESH_INTERVAL_SEC)
+	if (ps->refresh_timer < REFRESH_INTERVAL_SEC) {
 		return;
+	}
 	ps->refresh_timer = 0.0f;
 
 	/* As mudanças de conexão e de QR code são feitas na thread da interface, nunca aqui. */
-	if (os_atomic_exchange_bool(&ps->refresh_pending, true))
+	if (os_atomic_exchange_bool(&ps->refresh_pending, true)) {
 		return;
+	}
 
 	obs_weak_source_t *weak = obs_source_get_weak_source(ps->source);
 	obs_queue_task(OBS_TASK_UI, refresh_task, weak, false);
@@ -832,21 +917,24 @@ static void draw_background(void)
 static void draw_waiting_screen(struct phone_source *ps)
 {
 	draw_background();
-	if (has_manual_address(ps) || ps->usb_mode)
+	if (has_manual_address(ps) || ps->usb_mode) {
 		return;
+	}
 
 	pthread_mutex_lock(&ps->qr_mutex);
 	if (ps->qr_dirty) {
-		if (ps->qr_texture)
+		if (ps->qr_texture) {
 			gs_texture_destroy(ps->qr_texture);
+		}
 		const uint8_t *pixels = ps->qr_pixels;
 		ps->qr_texture = pixels ? gs_texture_create(ps->qr_px, ps->qr_px, GS_RGBA, 1, &pixels, 0) : NULL;
 		ps->qr_dirty = false;
 	}
 	pthread_mutex_unlock(&ps->qr_mutex);
 
-	if (!ps->qr_texture)
+	if (!ps->qr_texture) {
 		return;
+	}
 
 	const float side = CANVAS_H * 0.8f;
 	gs_matrix_push();
@@ -855,8 +943,9 @@ static void draw_waiting_screen(struct phone_source *ps)
 	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 	gs_eparam_t *image = gs_effect_get_param_by_name(effect, "image");
 	gs_effect_set_texture(image, ps->qr_texture);
-	while (gs_effect_loop(effect, "Draw"))
+	while (gs_effect_loop(effect, "Draw")) {
 		gs_draw_sprite(ps->qr_texture, 0, (uint32_t)side, (uint32_t)side);
+	}
 
 	gs_matrix_pop();
 }
@@ -866,17 +955,19 @@ static void phone_render(void *data, gs_effect_t *effect)
 	struct phone_source *ps = data;
 	UNUSED_PARAMETER(effect);
 
-	if (is_receiving(ps))
+	if (is_receiving(ps)) {
 		obs_source_video_render(ps->media);
-	else
+	} else {
 		draw_waiting_screen(ps);
+	}
 }
 
 static void phone_enum_sources(void *data, obs_source_enum_proc_t enum_callback, void *param)
 {
 	struct phone_source *ps = data;
-	if (ps->media)
+	if (ps->media) {
 		enum_callback(ps->source, ps->media, param);
+	}
 }
 
 struct obs_source_info projeto_live_phone_source = {

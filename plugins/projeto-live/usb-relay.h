@@ -36,12 +36,13 @@ extern "C" {
 
 struct pl_usb_relay;
 struct pl_voice_peer;
+struct pl_clock;
 
-/* Cria o relé e começa a esperar a Fonte de mídia. `on_air` e `voice` (o participante desta
- * fonte no intercom) são usados pela thread do relé e precisam durar mais que ele. Devolve NULL
- * se não conseguir. */
+/* Cria o relé e começa a esperar o receptor da imagem. `on_air`, `voice` (o participante desta
+ * fonte no intercom) e `clock` (sincronia, pode ser NULL) são usados pela thread do relé e precisam
+ * durar mais que ele. Devolve NULL se não conseguir. */
 struct pl_usb_relay *pl_usb_relay_create(const char *source_name, const volatile bool *on_air,
-					 struct pl_voice_peer *voice);
+					 struct pl_voice_peer *voice, struct pl_clock *clock);
 
 /* Porta local (em 127.0.0.1) onde a Fonte de mídia deve conectar. */
 int pl_usb_relay_local_port(const struct pl_usb_relay *relay);

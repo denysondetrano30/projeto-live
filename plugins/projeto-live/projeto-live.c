@@ -12,6 +12,8 @@
 #include "director-dock.h"
 #include "intercom.h"
 #include "multistream.h"
+#include "phone-video.h"
+#include "pl-sync.h"
 #include "projection-link.h"
 #include "stream-dock.h"
 #include "vertical-dock.h"
@@ -33,6 +35,8 @@ MODULE_EXPORT const char *obs_module_description(void)
 bool obs_module_load(void)
 {
 	pl_intercom_start();
+	pl_sync_load();
+	pl_phone_video_register();
 	obs_register_source(&projeto_live_phone_source);
 	obs_register_source(&pl_caption_source);
 	obs_register_source(&pl_mirror_source);
@@ -50,6 +54,7 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
 	pl_projection_stop();
+	pl_sync_unload();
 	pl_multistream_unload();
 	pl_vertical_record_unload();
 	pl_vertical_unload();
