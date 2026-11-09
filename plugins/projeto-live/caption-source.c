@@ -2,8 +2,9 @@
  * Projeto Live: fonte "Legenda (projeção)".
  *
  * Mostra o texto do slide que está no telão do app de projeção (veja projection-link.h). A fonte é
- * uma caixa de tamanho fixo (largura x altura, nas propriedades); o texto fica dentro dela, no
- * alinhamento escolhido. Por padrão é só o texto, sem contorno e sem fundo.
+ * uma caixa (largura x altura, nas propriedades, ou arrastando na cena) e o texto cresce ou
+ * diminui para preencher a caixa, mantendo a proporção, no alinhamento escolhido. O tamanho da
+ * fonte só define a nitidez. Por padrão é só o texto, sem contorno e sem fundo.
  *
  * O texto é desenhado por uma fonte de texto do próprio OBS guardada aqui dentro (GDI+ no Windows,
  * FreeType no Mac e no Linux).
@@ -104,12 +105,10 @@ static void update_text(struct caption *caption)
 #ifdef _WIN32
 	obs_data_set_int(settings, "color", caption->color & 0xFFFFFF);
 	obs_data_set_int(settings, "opacity", 100);
+	/* Tamanho natural do texto (as quebras de linha são as do slide); a caixa é feita no desenho. */
 	obs_data_set_string(settings, "align", caption->align);
-	obs_data_set_string(settings, "valign", caption->valign);
-	obs_data_set_bool(settings, "extents", true);
-	obs_data_set_int(settings, "extents_cx", caption->width);
-	obs_data_set_int(settings, "extents_cy", caption->height);
-	obs_data_set_bool(settings, "extents_wrap", true);
+	obs_data_set_string(settings, "valign", "top");
+	obs_data_set_bool(settings, "extents", false);
 	obs_data_set_bool(settings, "outline", caption->outline);
 	obs_data_set_int(settings, "outline_size", 4);
 	obs_data_set_int(settings, "outline_color", caption->outline_color & 0xFFFFFF);
@@ -118,8 +117,7 @@ static void update_text(struct caption *caption)
 	obs_data_set_int(settings, "color1", caption->color);
 	obs_data_set_int(settings, "color2", caption->color);
 	obs_data_set_bool(settings, "outline", caption->outline);
-	obs_data_set_bool(settings, "word_wrap", true);
-	obs_data_set_int(settings, "custom_width", caption->width);
+	obs_data_set_bool(settings, "word_wrap", false);
 	obs_data_set_bool(settings, "drop_shadow", false);
 #endif
 	obs_source_update(caption->text, settings);
@@ -191,7 +189,8 @@ static void caption_defaults(obs_data_t *settings)
 #else
 	obs_data_set_default_string(font, "face", "Sans Serif");
 #endif
-	obs_data_set_default_int(font, "size", 64);
+	/* Grande para o texto ficar nítido quando preenche a caixa. */
+	obs_data_set_default_int(font, "size", 128);
 	obs_data_set_default_obj(settings, "font", font);
 	obs_data_release(font);
 }
@@ -286,11 +285,17 @@ static void caption_render(void *data, gs_effect_t *effect)
 		return;
 	}
 
-	/* No Windows a caixa de texto já tem o tamanho da legenda; no Mac/Linux encaixamos aqui. */
+	/* O texto preenche a caixa sem distorcer. */
+	float scale_x = (float)caption->width / (float)text_width;
+	float scale_y = (float)caption->height / (float)text_height;
+	float scale = scale_x < scale_y ? scale_x : scale_y;
+	float drawn_width = (float)text_width * scale;
+	float drawn_height = (float)text_height * scale;
+
 	float x = 0.0f;
 	float y = 0.0f;
-	float free_x = (float)caption->width - (float)text_width;
-	float free_y = (float)caption->height - (float)text_height;
+	float free_x = (float)caption->width - drawn_width;
+	float free_y = (float)caption->height - drawn_height;
 	if (strcmp(caption->align, "center") == 0) {
 		x = free_x / 2.0f;
 	} else if (strcmp(caption->align, "right") == 0) {
@@ -304,6 +309,7 @@ static void caption_render(void *data, gs_effect_t *effect)
 
 	gs_matrix_push();
 	gs_matrix_translate3f(x, y, 0.0f);
+	gs_matrix_scale3f(scale, scale, 1.0f);
 	obs_source_video_render(caption->text);
 	gs_matrix_pop();
 }
