@@ -80,13 +80,14 @@ static void create_receiver(void)
 	obs_data_set_bool(settings, "is_local_file", false);
 	obs_data_set_string(settings, "input", input);
 	obs_data_set_string(settings, "input_format", "flv");
-	obs_data_set_int(settings, "buffering_mb", 1);
+	/* Sem buffer (o OBS lê o que chegar, sem guardar segundos de vídeo) e começo rápido. */
+	obs_data_set_int(settings, "buffering_mb", 0);
 	obs_data_set_int(settings, "reconnect_delay_sec", 1);
 	obs_data_set_bool(settings, "restart_on_activate", false);
 	obs_data_set_bool(settings, "close_when_inactive", false);
 	obs_data_set_bool(settings, "clear_on_media_end", true);
 	obs_data_set_bool(settings, "hw_decode", true);
-	obs_data_set_string(settings, "ffmpeg_options", "fflags=nobuffer");
+	obs_data_set_string(settings, "ffmpeg_options", "probesize=65536 analyzeduration=1000000");
 	receiver = obs_source_create_private("ffmpeg_source", "Projeto Live: telão (recebe)", settings);
 	obs_data_release(settings);
 	if (receiver) {
