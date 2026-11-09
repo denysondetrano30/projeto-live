@@ -87,6 +87,8 @@ static unsigned int answer_ticket;
 static int answer_value; /* 1 = sim, -1 = não, 0 = sem resposta */
 static bool forget_requested;
 
+static int mirror_port;
+static uint64_t mirror_version;
 static char caption_text[CAPTION_MAX];
 static uint64_t caption_version;
 
@@ -478,6 +480,32 @@ static void set_caption(const char *text)
 	pthread_mutex_unlock(&mutex);
 }
 
+void pl_projection_set_mirror(int port)
+{
+	if (!thread_created) {
+		return;
+	}
+	pthread_mutex_lock(&mutex);
+	if (mirror_port != port) {
+		mirror_port = port;
+		mirror_version++;
+	}
+	pthread_mutex_unlock(&mutex);
+}
+
+static int current_mirror(uint64_t *version)
+{
+	pthread_mutex_lock(&mutex);
+	int port = mirror_port;
+	if (version) {
+		*version = mirror_version;
+	}
+	pthread_mutex_unlock(&mutex);
+	return port;
+}
+
+static bool send_mirror(struct peer *peer);
+
 uint64_t pl_projection_caption(char *text, size_t size)
 {
 	if (!thread_created) {
@@ -552,12 +580,31 @@ static bool welcome(struct peer *peer, const char *key)
 	char password[256];
 	if (!websocket_info(&port, password, sizeof(password))) {
 		obs_queue_task(OBS_TASK_UI, restart_task, NULL, false);
-		return send_line(peer, "WS off");
+		if (!send_line(peer, "WS off")) {
+			return false;
+		}
+	} else {
+		char cipher[520];
+		encrypt_password(key, peer->nonce, password, cipher);
+		char line[600];
+		snprintf(line, sizeof(line), "WS %d %s", port, cipher[0] ? cipher : "-");
+		if (!send_line(peer, line)) {
+			return false;
+		}
 	}
-	char cipher[520];
-	encrypt_password(key, peer->nonce, password, cipher);
-	char line[600];
-	snprintf(line, sizeof(line), "WS %d %s", port, cipher[0] ? cipher : "-");
+	return send_mirror(peer);
+}
+
+/* "MIRROR <porta>" ou "MIRROR off": se a projeção deve mandar o telão (fonte "Telão (projeção)"). */
+static bool send_mirror(struct peer *peer)
+{
+	int port = current_mirror(NULL);
+	char line[32];
+	if (port > 0) {
+		snprintf(line, sizeof(line), "MIRROR %d", port);
+	} else {
+		snprintf(line, sizeof(line), "MIRROR off");
+	}
 	return send_line(peer, line);
 }
 
@@ -798,6 +845,7 @@ static void *link_thread(void *data)
 	}
 	pl_socket_t listener = PL_INVALID_SOCKET;
 	int port = 0;
+	uint64_t mirror_sent = 0;
 	uint64_t next_bind_ns = 0;
 	bool warned = false;
 
@@ -865,12 +913,20 @@ static void *link_thread(void *data)
 		if (ready > 0 && listener != PL_INVALID_SOCKET && FD_ISSET(listener, &readable)) {
 			accept_peer(listener, peers);
 		}
+		uint64_t mirror_now = 0;
+		current_mirror(&mirror_now);
+		bool mirror_changed = mirror_now != mirror_sent;
+		mirror_sent = mirror_now;
+
 		for (int i = 0; i < MAX_PEERS; i++) {
 			struct peer *peer = &peers[i];
 			if (peer->sock == PL_INVALID_SOCKET) {
 				continue;
 			}
 			bool ok = true;
+			if (mirror_changed && peer->state == PEER_READY) {
+				ok = send_mirror(peer);
+			}
 			if (ready > 0 && FD_ISSET(peer->sock, &readable)) {
 				ok = read_peer(peer, peers);
 			}

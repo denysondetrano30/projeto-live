@@ -20,6 +20,7 @@ target_sources(
     intercom.h
     mdns-announce.c
     mdns-announce.h
+    mirror-source.c
     multistream.c
     multistream.h
     net-info.c

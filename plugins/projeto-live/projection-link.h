@@ -14,6 +14,8 @@
  *   conectado:           "OK <nome deste OBS>", depois "WS <porta> <senha cifrada>" com os dados do
  *                        obs-websocket (é por ele que a projeção troca cena e liga a live), ou
  *                        "WS off" se o servidor do obs-websocket estiver desligado.
+ *   OBS -> projeção:     "MIRROR <porta>" / "MIRROR off": mande (ou pare de mandar) o telão em FLV
+ *                        para tcp://<este OBS>:<porta> (fonte "Telão (projeção)")
  *   projeção -> OBS:     "TEXT <texto em base64>" (texto do slide no telão, para a fonte "Legenda
  *                        (projeção)"; "TEXT -" = telão sem texto)
  *   os dois lados:       "PING" a cada 2 segundos; 6 segundos sem nada = conexão caiu
@@ -47,6 +49,9 @@ int pl_projection_status(char *names, size_t size);
 
 /* Texto do telão agora (para a legenda). Devolve um número que muda a cada texto novo. */
 uint64_t pl_projection_caption(char *text, size_t size);
+
+/* Porta onde a fonte "Telão (projeção)" escuta o telão (0 = nenhuma fonte, não mandar). */
+void pl_projection_set_mirror(int port);
 
 /* Resposta da pergunta "Permitir?" (chamada pela interface). */
 void pl_projection_answer(unsigned int ticket, bool allow);
