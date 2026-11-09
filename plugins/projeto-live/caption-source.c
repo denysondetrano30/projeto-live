@@ -100,7 +100,18 @@ static void update_text(struct caption *caption)
 	obs_data_t *settings = obs_data_create();
 	obs_data_set_string(settings, "text", text);
 	if (caption->font) {
-		obs_data_set_obj(settings, "font", caption->font);
+		/*
+		 * Copia os valores um a um: na abertura do OBS a fonte salva pode vir só com os valores
+		 * padrão por baixo, e a fonte de texto de dentro não enxerga esses (texto pequeno e
+		 * esticado até alguém abrir as propriedades).
+		 */
+		obs_data_t *font = obs_data_create();
+		obs_data_set_string(font, "face", obs_data_get_string(caption->font, "face"));
+		obs_data_set_string(font, "style", obs_data_get_string(caption->font, "style"));
+		obs_data_set_int(font, "size", obs_data_get_int(caption->font, "size"));
+		obs_data_set_int(font, "flags", obs_data_get_int(caption->font, "flags"));
+		obs_data_set_obj(settings, "font", font);
+		obs_data_release(font);
 	}
 #ifdef _WIN32
 	obs_data_set_int(settings, "color", caption->color & 0xFFFFFF);
@@ -185,12 +196,12 @@ static void caption_defaults(obs_data_t *settings)
 
 	obs_data_t *font = obs_data_create();
 #ifdef _WIN32
-	obs_data_set_default_string(font, "face", "Arial");
+	obs_data_set_string(font, "face", "Arial");
 #else
-	obs_data_set_default_string(font, "face", "Sans Serif");
+	obs_data_set_string(font, "face", "Sans Serif");
 #endif
 	/* Grande para o texto ficar nítido quando preenche a caixa. */
-	obs_data_set_default_int(font, "size", 128);
+	obs_data_set_int(font, "size", 128);
 	obs_data_set_default_obj(settings, "font", font);
 	obs_data_release(font);
 }
