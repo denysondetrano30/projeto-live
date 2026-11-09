@@ -59,11 +59,14 @@
 #define S_CONNECTION "connection"
 #define S_USB_HELP "usb_help"
 #define S_DELAY "sync_delay_ms"
+#define S_DELAY_AUTO "sync_delay_auto"
 #define S_LATENCY "sync_latency"
 #define MODE_WIFI "wifi"
 #define MODE_USB "usb"
 
 #define PHONE_LISTEN_PORT 9000
+/* Folga do SRT para reenviar pacotes perdidos: 60 ms basta numa rede local (o padrão é 120). */
+#define SRT_LATENCY_US 60000
 #define PORT_MIN 20000
 #define PORT_RANGE 10000
 #define KEY_LEN 16
@@ -342,8 +345,8 @@ static void build_url(struct phone_source *ps, char *url, size_t size)
 	}
 
 	/* Pareado: esta fonte escuta na sua porta e só aceita quem tiver a senha do QR code. */
-	snprintf(url, size, "srt://0.0.0.0:%d?mode=listener&passphrase=%s&pbkeylen=16&timeout=5000000", ps->port,
-		 ps->key);
+	snprintf(url, size, "srt://0.0.0.0:%d?mode=listener&passphrase=%s&pbkeylen=16&latency=%d&timeout=5000000",
+		 ps->port, ps->key, SRT_LATENCY_US);
 }
 
 static void apply_url(struct phone_source *ps, const char *url)
@@ -608,10 +611,11 @@ static const char *phone_get_name(void *unused)
 /* Atraso das câmeras: vale para todas as fontes "Celular" (guardado em sincronia.json). */
 static bool sync_delay_proc(void *param, obs_source_t *source)
 {
-	int ms = *(int *)param;
+	(void)param;
 	if (pl_phone_is_source(source)) {
 		obs_data_t *settings = obs_source_get_settings(source);
-		obs_data_set_int(settings, S_DELAY, ms);
+		obs_data_set_int(settings, S_DELAY, pl_sync_delay_ms());
+		obs_data_set_bool(settings, S_DELAY_AUTO, pl_sync_auto());
 		obs_data_release(settings);
 	}
 	return true;
@@ -622,11 +626,12 @@ static void phone_update(void *data, obs_data_t *settings)
 	struct phone_source *ps = data;
 
 	int delay = (int)obs_data_get_int(settings, S_DELAY);
-	if (ps->clock && delay != pl_sync_delay_ms()) {
+	bool delay_auto = obs_data_get_bool(settings, S_DELAY_AUTO);
+	if (ps->clock && (delay != pl_sync_delay_ms() || delay_auto != pl_sync_auto())) {
 		/* Mudado aqui (fonte já criada): vale para todas. Na criação, vem o valor de todas. */
+		pl_sync_set_auto(delay_auto);
 		pl_sync_set_delay_ms(delay);
-		delay = pl_sync_delay_ms();
-		obs_enum_sources(sync_delay_proc, &delay);
+		obs_enum_sources(sync_delay_proc, NULL);
 	}
 
 	int port = (int)obs_data_get_int(settings, S_PORT);
@@ -699,6 +704,7 @@ static void *phone_create(obs_data_t *settings, obs_source_t *source)
 
 	/* O atraso das câmeras é um só para todas: a fonte nova pega o valor atual. */
 	obs_data_set_int(settings, S_DELAY, pl_sync_delay_ms());
+	obs_data_set_bool(settings, S_DELAY_AUTO, pl_sync_auto());
 
 	ps->clock = pl_clock_create();
 	ps->video = pl_phone_video_create(obs_source_get_name(source), ps->clock);
@@ -759,6 +765,18 @@ static void phone_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, S_MANUAL, "");
 	obs_data_set_default_string(settings, S_CONNECTION, MODE_WIFI);
 	obs_data_set_default_int(settings, S_DELAY, PL_SYNC_DEFAULT_MS);
+	obs_data_set_default_bool(settings, S_DELAY_AUTO, true);
+}
+
+/* Atraso na mão só aparece com o automático desligado. */
+static bool delay_auto_modified(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+	obs_property_t *delay = obs_properties_get(props, S_DELAY);
+	if (delay) {
+		obs_property_set_visible(delay, !obs_data_get_bool(settings, S_DELAY_AUTO));
+	}
+	return true;
 }
 
 /* Mostra só os campos do modo escolhido (Wi-Fi ou cabo USB). */
@@ -825,7 +843,10 @@ static obs_properties_t *phone_properties(void *data)
 		obs_properties_add_text(props, S_MANUAL, obs_module_text("ManualAddress"), OBS_TEXT_DEFAULT);
 	obs_property_set_long_description(manual, obs_module_text("ManualAddress.ToolTip"));
 
-	/* Sincronia: atraso fixo de todas as câmeras e o atraso medido desta. */
+	/* Sincronia: atraso de todas as câmeras (automático = o menor possível) e o medido desta. */
+	obs_property_t *delay_auto = obs_properties_add_bool(props, S_DELAY_AUTO, obs_module_text("Sync.Auto"));
+	obs_property_set_long_description(delay_auto, obs_module_text("Sync.Auto.ToolTip"));
+	obs_property_set_modified_callback(delay_auto, delay_auto_modified);
 	obs_property_t *delay = obs_properties_add_int_slider(props, S_DELAY, obs_module_text("Sync.Delay"),
 							      PL_SYNC_MIN_MS, PL_SYNC_MAX_MS, 10);
 	obs_property_int_set_suffix(delay, " ms");
@@ -834,8 +855,8 @@ static obs_properties_t *phone_properties(void *data)
 		char text[256];
 		int latency = pl_phone_video_latency_ms(ps->video);
 		if (latency >= 0) {
-			snprintf(text, sizeof(text), "%s %d ms %s", obs_module_text("Sync.Latency"), latency,
-				 obs_module_text("Sync.Latency.Note"));
+			snprintf(text, sizeof(text), "%s %d ms · %s %d ms", obs_module_text("Sync.Latency"), latency,
+				 obs_module_text("Sync.InUse"), pl_sync_current_ms());
 		} else {
 			snprintf(text, sizeof(text), "%s", obs_module_text("Sync.NoLatency"));
 		}

@@ -26,6 +26,15 @@
 #define AUTO_OFF "pl_auto_sync_off"  /* a pessoa mudou na mão: não mexer mais */
 
 static volatile long delay_ms = PL_SYNC_DEFAULT_MS;
+static volatile bool auto_on = true;
+static volatile long auto_ms = PL_SYNC_DEFAULT_MS;
+static int lower_checks;
+
+/* Folga acima da câmera mais lenta (variação do Wi-Fi). */
+#define AUTO_MARGIN_MS 60
+/* Para baixar o automático, a medida precisa ficar abaixo por umas checagens seguidas. */
+#define AUTO_LOWER_STEP_MS 30
+#define AUTO_LOWER_CHECKS 5
 static float check_timer;
 static bool loaded;
 
@@ -66,6 +75,7 @@ static void save(void)
 {
 	obs_data_t *data = obs_data_create();
 	obs_data_set_int(data, "delay_ms", pl_sync_delay_ms());
+	obs_data_set_bool(data, "auto", pl_sync_auto());
 	char *dir = obs_module_config_path("");
 	if (dir) {
 		os_mkdirs(dir);
@@ -77,6 +87,51 @@ static void save(void)
 		bfree(path);
 	}
 	obs_data_release(data);
+}
+
+bool pl_sync_auto(void)
+{
+	return os_atomic_load_bool(&auto_on);
+}
+
+int pl_sync_current_ms(void)
+{
+	return pl_sync_auto() ? (int)os_atomic_load_long(&auto_ms) : pl_sync_delay_ms();
+}
+
+/* Atraso automático: a câmera mais lenta + folga. Sobe na hora; desce devagar. */
+static void update_auto(void)
+{
+	int worst = pl_phone_video_max_latency_ms();
+	if (worst < 0) {
+		return;
+	}
+	int wanted = clamp_ms(((worst + AUTO_MARGIN_MS + 9) / 10) * 10);
+	int current = (int)os_atomic_load_long(&auto_ms);
+	bool change = false;
+	if (wanted > current) {
+		change = true;
+	} else if (wanted < current - AUTO_LOWER_STEP_MS) {
+		change = ++lower_checks >= AUTO_LOWER_CHECKS;
+	} else {
+		lower_checks = 0;
+	}
+	if (change) {
+		os_atomic_set_long(&auto_ms, wanted);
+		lower_checks = 0;
+		blog(LOG_INFO, "[projeto-live] atraso automático das câmeras: %d ms (câmera mais lenta: %d ms)", wanted,
+		     worst);
+	}
+}
+
+void pl_sync_set_auto(bool on)
+{
+	if (on == pl_sync_auto()) {
+		return;
+	}
+	os_atomic_set_bool(&auto_on, on);
+	save();
+	blog(LOG_INFO, "[projeto-live] atraso das câmeras: %s", on ? "automático" : "fixo");
 }
 
 void pl_sync_set_delay_ms(int ms)
@@ -128,7 +183,10 @@ static void tick(void *param, float seconds)
 	}
 	check_timer = 0.0f;
 
-	int64_t target = pl_phone_video_synced_count() > 0 ? (int64_t)pl_sync_delay_ms() * MS_NS : 0;
+	if (pl_sync_auto()) {
+		update_auto();
+	}
+	int64_t target = pl_phone_video_synced_count() > 0 ? (int64_t)pl_sync_current_ms() * MS_NS : 0;
 	obs_enum_sources(apply_to_source, &target);
 }
 
@@ -142,6 +200,8 @@ void pl_sync_load(void)
 		if (ms > 0) {
 			os_atomic_set_long(&delay_ms, clamp_ms((int)ms));
 		}
+		obs_data_set_default_bool(data, "auto", true);
+		os_atomic_set_bool(&auto_on, obs_data_get_bool(data, "auto"));
 		obs_data_release(data);
 	}
 	obs_add_tick_callback(tick, NULL);

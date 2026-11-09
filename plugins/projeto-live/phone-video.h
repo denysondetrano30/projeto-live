@@ -47,6 +47,9 @@ void pl_phone_video_set_url(struct pl_phone_video *video, const char *url);
 /* Atraso medido desta câmera (do quadro filmado até sair do decodificador), em ms; -1 = sem medida. */
 int pl_phone_video_latency_ms(struct pl_phone_video *video);
 
+/* Atraso medido da câmera mais lenta agora, em ms; -1 = nenhuma medida. */
+int pl_phone_video_max_latency_ms(void);
+
 /* Quantas câmeras estão agora mostrando a imagem com o relógio em comum (atraso fixo). */
 int pl_phone_video_synced_count(void);
 

@@ -1,8 +1,10 @@
 /*
  * Projeto Live: atraso fixo das câmeras e atraso automático do som (sincronia, etapa 7a).
  *
- * Todas as câmeras de celular aparecem com o mesmo atraso fixo depois de filmadas (padrão 400 ms,
- * ajustável nas propriedades de qualquer fonte "Celular"; vale para todas). Enquanto houver câmera
+ * Todas as câmeras de celular aparecem com o mesmo atraso depois de filmadas. Por padrão o atraso é
+ * automático, o menor possível: a câmera mais lenta medida agora + uma folga (sobe na hora se uma
+ * câmera ficar mais lenta; desce devagar, para o som não ficar pulando). Também dá para fixar na mão
+ * (propriedades de qualquer fonte "Celular"; vale para todas). Enquanto houver câmera
  * sincronizada, o som das entradas de áudio do PC (mesa de som, placa, microfone) recebe o mesmo
  * atraso em "Sincronização" (Propriedades avançadas de áudio), para a voz ficar junto da boca.
  *
@@ -19,6 +21,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -26,15 +29,22 @@ extern "C" {
 #endif
 
 #define PL_SYNC_DEFAULT_MS 400
-#define PL_SYNC_MIN_MS 100
+#define PL_SYNC_MIN_MS 60
 #define PL_SYNC_MAX_MS 2000
 
 void pl_sync_load(void);
 void pl_sync_unload(void);
 
-/* Atraso fixo das câmeras, em ms. */
+/* Atraso escolhido na mão, em ms (vale quando o automático está desligado). */
 int pl_sync_delay_ms(void);
 void pl_sync_set_delay_ms(int ms);
+
+/* Automático (o menor atraso possível)? */
+bool pl_sync_auto(void);
+void pl_sync_set_auto(bool on);
+
+/* Atraso em uso agora (automático ou o da mão), em ms. */
+int pl_sync_current_ms(void);
 
 #ifdef __cplusplus
 }

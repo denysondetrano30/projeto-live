@@ -72,6 +72,12 @@ struct pl_phone_video {
 
 static volatile long synced_count;
 
+/* Todos os receptores, para achar a câmera mais lenta (atraso automático). */
+#define MAX_RECEIVERS 32
+static pthread_mutex_t receivers_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct pl_phone_video *receivers[MAX_RECEIVERS];
+static int receiver_count;
+
 /* ------------------------------------------------------------------------- */
 /* Fonte interna (só recebe os quadros)                                      */
 
@@ -231,7 +237,7 @@ static int64_t pts_to_ns(uint64_t pts90)
 static int64_t show_time(struct pl_phone_video *video, struct timing *timing, int64_t pts90_raw)
 {
 	int64_t now = (int64_t)os_gettime_ns();
-	int64_t delay = (int64_t)pl_sync_delay_ms() * MS_NS;
+	int64_t delay = (int64_t)pl_sync_current_ms() * MS_NS;
 	uint64_t pts90 = (uint64_t)pts90_raw & (PTS_WRAP - 1);
 
 	int64_t offset;
@@ -468,6 +474,12 @@ struct pl_phone_video *pl_phone_video_create(const char *name, struct pl_clock *
 	if (!video->threads_created) {
 		blog(LOG_WARNING, "[projeto-live] '%s': não deu para abrir o receptor da imagem", name);
 	}
+
+	pthread_mutex_lock(&receivers_mutex);
+	if (receiver_count < MAX_RECEIVERS) {
+		receivers[receiver_count++] = video;
+	}
+	pthread_mutex_unlock(&receivers_mutex);
 	return video;
 }
 
@@ -476,6 +488,14 @@ void pl_phone_video_destroy(struct pl_phone_video *video)
 	if (!video) {
 		return;
 	}
+	pthread_mutex_lock(&receivers_mutex);
+	for (int i = 0; i < receiver_count; i++) {
+		if (receivers[i] == video) {
+			receivers[i] = receivers[--receiver_count];
+			break;
+		}
+	}
+	pthread_mutex_unlock(&receivers_mutex);
 	video->stop = true;
 	if (video->threads_created) {
 		pthread_join(video->read_thread, NULL);
@@ -515,4 +535,18 @@ void pl_phone_video_set_url(struct pl_phone_video *video, const char *url)
 int pl_phone_video_latency_ms(struct pl_phone_video *video)
 {
 	return video ? (int)os_atomic_load_long(&video->latency_ms) : -1;
+}
+
+int pl_phone_video_max_latency_ms(void)
+{
+	int worst = -1;
+	pthread_mutex_lock(&receivers_mutex);
+	for (int i = 0; i < receiver_count; i++) {
+		int latency = (int)os_atomic_load_long(&receivers[i]->latency_ms);
+		if (latency > worst) {
+			worst = latency;
+		}
+	}
+	pthread_mutex_unlock(&receivers_mutex);
+	return worst;
 }
