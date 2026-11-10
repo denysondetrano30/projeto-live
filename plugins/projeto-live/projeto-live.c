@@ -12,6 +12,7 @@
 #include "director-dock.h"
 #include "intercom.h"
 #include "multistream.h"
+#include "audio-wizard.h"
 #include "phone-video.h"
 #include "pl-sync.h"
 #include "projection-link.h"
@@ -47,6 +48,7 @@ bool obs_module_load(void)
 	pl_multistream_load();
 	pl_multistream_ui_load();
 	pl_projection_ui_load();
+	pl_audio_wizard_load();
 	pl_projection_start();
 	return true;
 }
