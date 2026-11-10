@@ -33,13 +33,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            run_id="${{ github.event.workflow_run.id }}"
-            sha="${{ github.event.workflow_run.head_sha }}"
-          else
-            # A mais nova que passou no master.
-            read -r run_id sha < <(gh api "repos/${{ github.repository }}/actions/workflows/push.yaml/runs?branch=master&status=success&per_page=1" \
-              --jq '.workflow_runs[0] | "\(.id) \(.head_sha)"')
+          # A compilação mais nova do master que passou E tem o pacote do Windows (envios que só
+          # mudam o instalador não compilam o OBS de novo).
+          run_id=""
+          sha=""
+          for candidate in $(gh api "repos/${{ github.repository }}/actions/workflows/push.yaml/runs?branch=master&status=success&per_page=20" --jq '.workflow_runs[] | "\(.id):\(.head_sha)"'); do
+            id="${candidate%%:*}"
+            found=$(gh api "repos/${{ github.repository }}/actions/runs/$id/artifacts?per_page=100" --jq '[.artifacts[] | select(.name | startswith("obs-studio-windows-x64-")) | select(.expired | not)] | length')
+            if [ "$found" != "0" ]; then
+              run_id="$id"
+              sha="${candidate#*:}"
+              break
+            fi
+          done
+          if [ -z "$run_id" ]; then
+            echo "Nenhuma compilação do OBS com pacote do Windows encontrada"
+            exit 1
           fi
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "short=${sha::9}" >> "$GITHUB_OUTPUT"
