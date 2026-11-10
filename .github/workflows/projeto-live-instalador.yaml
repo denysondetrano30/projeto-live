@@ -1,0 +1,106 @@
+# Projeto Live: monta o instalador do Windows (OBS do Projeto Live + app de projeção).
+#
+# Roda depois de cada compilação do OBS que passou ("Push" no master) e também na mão (aba Actions >
+# "Projeto Live: instalador" > Run workflow). Pega o OBS do pacote da compilação e compila o app de
+# projeção a partir do repositório projeto-live-projecao (público). O instalador sai como artifact
+# "ProjetoLive-Instalador-<commit>".
+name: "Projeto Live: instalador"
+on:
+  workflow_run:
+    workflows: [Push]
+    types: [completed]
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  installer:
+    name: Instalador do Windows
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: windows-2022
+    steps:
+      - name: Código do instalador
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: installer
+
+      - name: Qual compilação do OBS usar
+        id: obs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            run_id="${{ github.event.workflow_run.id }}"
+            sha="${{ github.event.workflow_run.head_sha }}"
+          else
+            # A mais nova que passou no master.
+            read -r run_id sha < <(gh api "repos/${{ github.repository }}/actions/workflows/push.yaml/runs?branch=master&status=success&per_page=1" \
+              --jq '.workflow_runs[0] | "\(.id) \(.head_sha)"')
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "short=${sha::9}" >> "$GITHUB_OUTPUT"
+          echo "OBS: compilação $run_id (commit ${sha::9})"
+
+      - name: Baixa o OBS
+        uses: actions/download-artifact@v4
+        with:
+          pattern: obs-studio-windows-x64-*
+          run-id: ${{ steps.obs.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: download/obs
+
+      - name: Descompacta o OBS
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Recurse download/obs -Filter "obs-studio-*-windows-x64.zip" |
+            Where-Object { $_.Name -notmatch "PDBs" } | Select-Object -First 1
+          if (-not $zip) { throw "Pacote do OBS não encontrado" }
+          Expand-Archive $zip.FullName -DestinationPath installer/stage/obs -Force
+          if (-not (Test-Path installer/stage/obs/bin/64bit/obs64.exe)) { throw "obs64.exe não está no pacote" }
+
+      - name: Código do app de projeção
+        uses: actions/checkout@v5
+        with:
+          repository: denysondetrano30/projeto-live-projecao
+          path: projecao-src
+
+      - name: Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Compila o app de projeção (pasta pronta, sem instalador próprio)
+        working-directory: projecao-src
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+          npx electron-builder --config config/building/electron-builder.local.yaml --win dir --x64 --publish never
+          test -f dist/win-unpacked/FreeShow.exe
+          mkdir -p ../installer/stage/projecao
+          cp -r dist/win-unpacked/. ../installer/stage/projecao/
+
+      - name: Monta o instalador
+        shell: pwsh
+        run: |
+          $makensis = Get-Command makensis -ErrorAction SilentlyContinue
+          if (-not $makensis) {
+            choco install nsis -y --no-progress
+            $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          } else {
+            $makensis = $makensis.Source
+          }
+          & $makensis /V2 "/DVERSION=${{ steps.obs.outputs.short }}" installer/projeto-live.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis falhou" }
+
+      - name: Guarda o instalador
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProjetoLive-Instalador-${{ steps.obs.outputs.short }}
+          path: installer/ProjetoLive-Instalador-*.exe
+          if-no-files-found: error
+          compression-level: 0
