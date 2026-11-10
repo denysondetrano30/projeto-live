@@ -1,7 +1,8 @@
 /*
  * Projeto Live: receptor da imagem do celular, com atraso fixo (sincronia das câmeras).
  *
- * Lê o vídeo MPEG-TS do celular (SRT pelo Wi-Fi, ou TCP do relé do cabo USB) com o FFmpeg,
+ * Lê o vídeo MPEG-TS do celular (e o som AAC, do app 0.10 em diante, entregue na fonte "Celular"
+ * com a mesma hora da imagem) (SRT pelo Wi-Fi, ou TCP do relé do cabo USB) com o FFmpeg,
  * decodifica o H.264 e entrega cada quadro numa fonte interna do OBS (assíncrona, sem buffer),
  * na hora certa:
  *
@@ -34,8 +35,9 @@ struct pl_phone_video;
 /* Registra a fonte interna (chamar uma vez, no carregamento do plugin). */
 void pl_phone_video_register(void);
 
-/* `clock` precisa durar mais que o receptor. */
-struct pl_phone_video *pl_phone_video_create(const char *name, struct pl_clock *clock);
+/* `clock` e `audio_target` (a fonte que recebe o som do celular; NULL = sem som) precisam durar
+ * mais que o receptor. */
+struct pl_phone_video *pl_phone_video_create(const char *name, struct pl_clock *clock, obs_source_t *audio_target);
 void pl_phone_video_destroy(struct pl_phone_video *video);
 
 /* Fonte interna com a imagem (para desenhar e para contar como filha ativa). */

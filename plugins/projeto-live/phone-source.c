@@ -707,7 +707,7 @@ static void *phone_create(obs_data_t *settings, obs_source_t *source)
 	obs_data_set_bool(settings, S_DELAY_AUTO, pl_sync_auto());
 
 	ps->clock = pl_clock_create();
-	ps->video = pl_phone_video_create(obs_source_get_name(source), ps->clock);
+	ps->video = pl_phone_video_create(obs_source_get_name(source), ps->clock, source);
 	ps->media = pl_phone_video_source(ps->video);
 	if (ps->media) {
 		obs_source_add_active_child(source, ps->media);
@@ -994,7 +994,7 @@ static void phone_enum_sources(void *data, obs_source_enum_proc_t enum_callback,
 struct obs_source_info projeto_live_phone_source = {
 	.id = PHONE_SOURCE_ID,
 	.type = OBS_SOURCE_TYPE_INPUT,
-	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_DO_NOT_DUPLICATE,
+	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_DO_NOT_DUPLICATE,
 	.get_name = phone_get_name,
 	.create = phone_create,
 	.destroy = phone_destroy,

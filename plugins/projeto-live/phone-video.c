@@ -49,6 +49,7 @@ struct queued_frame {
 struct pl_phone_video {
 	char *name;
 	obs_source_t *output;
+	obs_source_t *audio_target; /* a fonte "Celular" (o som aparece no mixer com o nome dela) */
 	struct pl_clock *clock;
 
 	pthread_t read_thread;
@@ -322,6 +323,53 @@ static struct obs_source_frame *convert_frame(const AVFrame *in)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Som do celular                                                            */
+
+/* Entrega o som na hora certa (a mesma conta da imagem): o OBS toca no momento do `show_ns`. */
+static void output_audio(struct pl_phone_video *video, const AVFrame *frame, int64_t show_ns)
+{
+	int channels = frame->ch_layout.nb_channels;
+	struct obs_source_audio audio = {0};
+	bool planar = true;
+	switch (frame->format) {
+	case AV_SAMPLE_FMT_FLTP:
+		audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
+		break;
+	case AV_SAMPLE_FMT_FLT:
+		audio.format = AUDIO_FORMAT_FLOAT;
+		planar = false;
+		break;
+	case AV_SAMPLE_FMT_S16P:
+		audio.format = AUDIO_FORMAT_16BIT_PLANAR;
+		break;
+	case AV_SAMPLE_FMT_S16:
+		audio.format = AUDIO_FORMAT_16BIT;
+		planar = false;
+		break;
+	default:
+		return;
+	}
+	if (channels == 1) {
+		audio.speakers = SPEAKERS_MONO;
+	} else if (channels == 2) {
+		audio.speakers = SPEAKERS_STEREO;
+	} else {
+		return;
+	}
+	if (planar) {
+		for (int i = 0; i < channels; i++) {
+			audio.data[i] = frame->data[i];
+		}
+	} else {
+		audio.data[0] = frame->data[0];
+	}
+	audio.frames = (uint32_t)frame->nb_samples;
+	audio.samples_per_sec = (uint32_t)frame->sample_rate;
+	audio.timestamp = (uint64_t)(show_ns > 0 ? show_ns : (int64_t)os_gettime_ns());
+	obs_source_output_audio(video->audio_target, &audio);
+}
+
+/* ------------------------------------------------------------------------- */
 /* Thread de leitura                                                         */
 
 static int interrupt_cb(void *data)
@@ -361,6 +409,9 @@ static bool receive(struct pl_phone_video *video, const char *url)
 
 	bool received = false;
 	AVCodecContext *decoder = NULL;
+	AVCodecContext *audio_decoder = NULL;
+	int audio_index = -1;
+	AVRational audio_base = {1, 90000};
 	AVPacket *packet = av_packet_alloc();
 	AVFrame *frame = av_frame_alloc();
 	struct timing timing = {0};
@@ -387,7 +438,23 @@ static bool receive(struct pl_phone_video *video, const char *url)
 		goto done;
 	}
 
-	blog(LOG_INFO, "[projeto-live] '%s': recebendo a imagem do celular", video->name);
+	/* Som (app 0.10 em diante): AAC junto com a imagem. Sem som, segue só com a imagem. */
+	audio_index = video->audio_target ? av_find_best_stream(format, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0) : -1;
+	if (audio_index >= 0) {
+		const AVCodecParameters *audio_params = format->streams[audio_index]->codecpar;
+		const AVCodec *audio_codec = avcodec_find_decoder(audio_params->codec_id);
+		audio_decoder = audio_codec ? avcodec_alloc_context3(audio_codec) : NULL;
+		if (!audio_decoder || avcodec_parameters_to_context(audio_decoder, audio_params) < 0 ||
+		    avcodec_open2(audio_decoder, audio_codec, NULL) < 0) {
+			avcodec_free_context(&audio_decoder);
+			audio_index = -1;
+		} else {
+			audio_base = format->streams[audio_index]->time_base;
+		}
+	}
+
+	blog(LOG_INFO, "[projeto-live] '%s': recebendo a imagem do celular%s", video->name,
+	     audio_index >= 0 ? " (com som)" : "");
 	AVRational time_base = format->streams[stream_index]->time_base;
 
 	while (!video->stop && !video->restart && av_read_frame(format, packet) >= 0) {
@@ -404,6 +471,16 @@ static bool receive(struct pl_phone_video *video, const char *url)
 				}
 				av_frame_unref(frame);
 			}
+		} else if (packet->stream_index == audio_index && audio_decoder &&
+			   avcodec_send_packet(audio_decoder, packet) >= 0) {
+			while (avcodec_receive_frame(audio_decoder, frame) >= 0) {
+				int64_t pts = frame->best_effort_timestamp;
+				if (pts != AV_NOPTS_VALUE) {
+					int64_t pts90 = av_rescale_q(pts, audio_base, (AVRational){1, 90000});
+					output_audio(video, frame, show_time(video, &timing, pts90));
+				}
+				av_frame_unref(frame);
+			}
 		}
 		av_packet_unref(packet);
 	}
@@ -412,6 +489,7 @@ done:
 	av_frame_free(&frame);
 	av_packet_free(&packet);
 	avcodec_free_context(&decoder);
+	avcodec_free_context(&audio_decoder);
 	avformat_close_input(&format);
 	return received;
 }
@@ -446,10 +524,11 @@ static void *read_thread(void *data)
 
 /* ------------------------------------------------------------------------- */
 
-struct pl_phone_video *pl_phone_video_create(const char *name, struct pl_clock *clock)
+struct pl_phone_video *pl_phone_video_create(const char *name, struct pl_clock *clock, obs_source_t *audio_target)
 {
 	struct pl_phone_video *video = bzalloc(sizeof(*video));
 	video->name = bstrdup(name);
+	video->audio_target = audio_target;
 	video->clock = clock;
 	video->latency_ms = -1;
 	video->output = obs_source_create_private(VIDEO_SOURCE_ID, "Projeto Live: imagem do celular", NULL);
