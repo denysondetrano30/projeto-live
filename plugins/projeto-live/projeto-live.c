@@ -63,6 +63,7 @@ void obs_module_unload(void)
 {
 	pl_projection_stop();
 	pl_stats_dock_unload();
+	pl_audio_dock_unload();
 	pl_sync_unload();
 	pl_multistream_unload();
 	pl_vertical_record_unload();

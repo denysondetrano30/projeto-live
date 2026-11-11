@@ -60,6 +60,8 @@ namespace {
 
 const int CARD_WIDTH = 204;
 
+class AudioDock;
+
 QWidget *dock = nullptr;
 
 /* ------------------------------------------------------------------------- */
@@ -302,7 +304,6 @@ public:
 		area->setWidget(holder);
 		outer->addWidget(area, 1);
 
-		fillDevices();
 		connect(devices, &QComboBox::currentIndexChanged, this, [this](int index) { chooseDevice(index); });
 		connect(all, &QPushButton::clicked, this, [this](bool on) {
 			for (auto &card : cards) {
@@ -312,11 +313,22 @@ public:
 			}
 		});
 
+		/* Só começa quando o OBS terminar de abrir: no meio do carregamento dos módulos as
+		 * cenas ainda nem existem, e perguntar as coisas do OBS nessa hora derruba o
+		 * programa. */
 		timer = new QTimer(this);
 		timer->setInterval(200);
 		connect(timer, &QTimer::timeout, this, [this]() { tick(); });
-		timer->start();
-		rebuild();
+	}
+
+	/* O OBS acabou de abrir. */
+	void start()
+	{
+		if (!timer->isActive()) {
+			fillDevices();
+			rebuild();
+			timer->start();
+		}
 	}
 
 private:
@@ -518,6 +530,14 @@ private:
 	int ticks = 0;
 };
 
+void frontendEvent(enum obs_frontend_event event, void *param)
+{
+	(void)param;
+	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING && dock) {
+		static_cast<AudioDock *>(dock)->start();
+	}
+}
+
 } // namespace
 
 void pl_audio_dock_load(void)
@@ -534,4 +554,10 @@ void pl_audio_dock_load(void)
 	}
 	dock = created;
 	QObject::connect(created, &QObject::destroyed, []() { dock = nullptr; });
+	obs_frontend_add_event_callback(frontendEvent, nullptr);
+}
+
+void pl_audio_dock_unload(void)
+{
+	obs_frontend_remove_event_callback(frontendEvent, nullptr);
 }

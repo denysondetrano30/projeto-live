@@ -15,6 +15,7 @@ extern "C" {
 
 /* Coloca o painel no menu "Painéis" do OBS. Chamado no carregamento do módulo. */
 void pl_audio_dock_load(void);
+void pl_audio_dock_unload(void);
 
 #ifdef __cplusplus
 }

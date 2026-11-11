@@ -118,11 +118,21 @@ public:
 		setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 		setMaximumHeight(34);
 
+		/* O relógio só começa quando o OBS terminar de abrir (veja start()). Durante o
+		 * carregamento dos módulos, perguntas como obs_frontend_get_streaming_output() ainda
+		 * não têm o que responder e derrubam o programa. */
 		timer = new QTimer(this);
 		timer->setInterval(1000);
 		connect(timer, &QTimer::timeout, this, [this]() { refresh(); });
-		timer->start();
-		refresh();
+	}
+
+	/* O OBS acabou de abrir: agora dá para perguntar as coisas dele. */
+	void start()
+	{
+		if (!timer->isActive()) {
+			timer->start();
+			refresh();
+		}
 	}
 
 	~StatsDock() override
@@ -286,7 +296,12 @@ StatsDock *dock = nullptr;
 void frontendEvent(enum obs_frontend_event event, void *param)
 {
 	(void)param;
-	if (event == OBS_FRONTEND_EVENT_RECORDING_STARTING && dock) {
+	if (!dock) {
+		return;
+	}
+	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
+		dock->start();
+	} else if (event == OBS_FRONTEND_EVENT_RECORDING_STARTING) {
 		dock->recordingStarted();
 	}
 }
