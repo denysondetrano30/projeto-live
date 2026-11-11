@@ -33,6 +33,7 @@
 
 #include <util/platform.h>
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -53,6 +54,7 @@
 #include <vector>
 
 #include "phone-source.h"
+#include "scene-audio.h"
 
 namespace {
 
@@ -144,6 +146,21 @@ public:
 		tag->setStyleSheet("color: #8d8d98;");
 		outer->addWidget(tag);
 
+		/* Só nos sons globais: este som toca na cena que está no ar? */
+		scenePlay = new QCheckBox(QString::fromUtf8(obs_module_text("Audio.InScene")), this);
+		scenePlay->setToolTip(QString::fromUtf8(obs_module_text("Audio.InScene.Tip")));
+		scenePlay->setVisible(false);
+		outer->addWidget(scenePlay);
+		connect(scenePlay, &QCheckBox::clicked, this, [this](bool on) {
+			obs_source_t *scene = obs_frontend_get_current_scene();
+			obs_source_t *target = obs_weak_source_get_source(source);
+			if (scene && target) {
+				pl_scene_audio_set_silenced(scene, obs_source_get_name(target), !on);
+			}
+			obs_source_release(target);
+			obs_source_release(scene);
+		});
+
 		auto *bottom = new QHBoxLayout();
 		bottom->setContentsMargins(0, 0, 0, 0);
 		bottom->setSpacing(5);
@@ -180,7 +197,9 @@ public:
 		obs_volmeter_add_callback(volmeter, levelCallback, this);
 		name->setText(QString::fromUtf8(obs_source_get_name(target)));
 		name->setToolTip(name->text());
+		isGlobal = global;
 		tag->setText(QString::fromUtf8(obs_module_text(global ? "Audio.Global" : "Audio.Scene")));
+		scenePlay->setVisible(global);
 	}
 
 	void detach()
@@ -241,6 +260,17 @@ public:
 		obs_source_release(target);
 
 		meter->setPeak(peakDb.load());
+
+		if (isGlobal) {
+			obs_source_t *scene = obs_frontend_get_current_scene();
+			obs_source_t *held = obs_weak_source_get_source(source);
+			if (scene && held) {
+				QSignalBlocker block(scenePlay);
+				scenePlay->setChecked(!pl_scene_audio_is_silenced(scene, obs_source_get_name(held)));
+			}
+			obs_source_release(held);
+			obs_source_release(scene);
+		}
 	}
 
 private:
@@ -258,6 +288,8 @@ private:
 	obs_weak_source_t *source = nullptr;
 	obs_volmeter_t *volmeter = nullptr;
 	std::atomic<float> peakDb{-60.0f};
+	bool isGlobal = false;
+	QCheckBox *scenePlay = nullptr;
 	QLabel *name = nullptr;
 	QLabel *volume = nullptr;
 	QLabel *tag = nullptr;
@@ -287,6 +319,11 @@ public:
 		all = new QPushButton(QString::fromUtf8(obs_module_text("Audio.All")), this);
 		all->setCheckable(true);
 		top->addWidget(all);
+		together = new QPushButton(QString::fromUtf8(obs_module_text("Audio.Together")), this);
+		together->setToolTip(QString::fromUtf8(obs_module_text("Audio.Together.Tip")));
+		together->setVisible(false);
+		top->addWidget(together);
+		connect(together, &QPushButton::clicked, this, []() { pl_scene_audio_bring_back(); });
 		warning = new QLabel(this);
 		warning->setStyleSheet("color: #e8a33d;");
 		top->addWidget(warning, 2);
@@ -517,10 +554,15 @@ private:
 				entry->refresh();
 			}
 		}
+		/* O botão só aparece quando a cena no ar está calando algum som. */
+		together->setVisible(pl_scene_audio_has_silenced());
+		together->setText(QString::fromUtf8(
+			obs_module_text(pl_scene_audio_brought_back() ? "Audio.Together.Undo" : "Audio.Together")));
 	}
 
 	QComboBox *devices = nullptr;
 	QPushButton *all = nullptr;
+	QPushButton *together = nullptr;
 	QLabel *warning = nullptr;
 	QScrollArea *area = nullptr;
 	QWidget *holder = nullptr;

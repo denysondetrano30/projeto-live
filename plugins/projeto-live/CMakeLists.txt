@@ -52,6 +52,8 @@ target_sources(
     sha256.h
     layout.cpp
     layout.h
+    scene-audio.cpp
+    scene-audio.h
     stats-dock.cpp
     stats-dock.h
     stream-dock.cpp
