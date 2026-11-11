@@ -14,6 +14,8 @@ target_sources(
     caption-source.c
     control-server.c
     control-server.h
+    camera-dock.cpp
+    camera-dock.h
     director-dock.cpp
     director-dock.h
     intercom-audio.c

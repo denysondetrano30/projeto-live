@@ -49,6 +49,10 @@ void pl_phone_video_set_url(struct pl_phone_video *video, const char *url);
 /* Atraso medido desta câmera (do quadro filmado até sair do decodificador), em ms; -1 = sem medida. */
 int pl_phone_video_latency_ms(struct pl_phone_video *video);
 
+/* Há quanto tempo o último quadro desta câmera apareceu, em ms; -1 = nenhum quadro ainda (parada
+ * ou nunca ligada). Acima de uns 2000 ms, a imagem no ar está congelada. */
+int pl_phone_video_stalled_ms(struct pl_phone_video *video);
+
 /* Atraso medido da câmera mais lenta agora, em ms; -1 = nenhuma medida. */
 int pl_phone_video_max_latency_ms(void);
 

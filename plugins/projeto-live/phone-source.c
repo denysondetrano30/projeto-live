@@ -490,6 +490,9 @@ bool pl_phone_get_status(obs_source_t *source, struct pl_phone_status *status)
 	snprintf(status->last_text, sizeof(status->last_text), "%s", ps->last_text);
 	status->intercom = pl_voice_peer_is_connected(ps->voice);
 	status->talking = pl_voice_peer_is_talking(ps->voice);
+	status->latency_ms = pl_phone_video_latency_ms(ps->video);
+	status->stalled_ms = pl_phone_video_stalled_ms(ps->video);
+	status->has_image = status->stalled_ms >= 0 && status->stalled_ms < PL_PHONE_STALL_MS;
 	return true;
 }
 

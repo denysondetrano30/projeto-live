@@ -69,6 +69,10 @@ struct pl_phone_video {
 
 	volatile long latency_ms;
 	volatile bool synced;
+
+	/* Hora (relógio do PC) do último quadro que apareceu; 0 = nenhum ainda. Serve para a
+	 * miniatura avisar que a câmera travou. */
+	volatile uint64_t last_frame_ns;
 };
 
 static volatile long synced_count;
@@ -182,6 +186,7 @@ static void *show_thread(void *data)
 	while (!video->stop) {
 		if (video->clear_pending) {
 			video->clear_pending = false;
+			video->last_frame_ns = 0;
 			pthread_mutex_unlock(&video->queue_mutex);
 			obs_source_output_video(video->output, NULL);
 			pthread_mutex_lock(&video->queue_mutex);
@@ -208,6 +213,7 @@ static void *show_thread(void *data)
 		/* Atrasado: se já tem outro quadro também na hora, pula este (alcança o tempo certo). */
 		bool skip = video->queue_count && video->queue[0].show_ns <= now;
 		pthread_mutex_unlock(&video->queue_mutex);
+		video->last_frame_ns = os_gettime_ns();
 		if (!skip) {
 			frame->timestamp = os_gettime_ns();
 			obs_source_output_video(video->output, frame);
@@ -614,6 +620,22 @@ void pl_phone_video_set_url(struct pl_phone_video *video, const char *url)
 int pl_phone_video_latency_ms(struct pl_phone_video *video)
 {
 	return video ? (int)os_atomic_load_long(&video->latency_ms) : -1;
+}
+
+int pl_phone_video_stalled_ms(struct pl_phone_video *video)
+{
+	if (!video) {
+		return -1;
+	}
+	uint64_t last = video->last_frame_ns;
+	if (!last) {
+		return -1;
+	}
+	uint64_t now = os_gettime_ns();
+	if (now <= last) {
+		return 0;
+	}
+	return (int)((now - last) / 1000000ULL);
 }
 
 int pl_phone_video_max_latency_ms(void)

@@ -36,7 +36,15 @@ struct pl_phone_status {
 	char last_text[PL_COMMAND_MAX + 1];
 	bool intercom; /* o celular está no intercom */
 	bool talking;  /* o operador está falando no intercom agora */
+
+	/* Para as miniaturas do painel "Câmeras": */
+	int latency_ms;    /* atraso medido desta câmera; -1 = sem medida */
+	int stalled_ms;    /* há quanto tempo não aparece quadro novo; -1 = nenhum quadro ainda */
+	bool has_image;    /* está chegando imagem (nem travada nem parada) */
 };
+
+/* Acima disto a imagem no ar está congelada (a miniatura fica amarela). */
+#define PL_PHONE_STALL_MS 2000
 
 bool pl_phone_is_source(obs_source_t *source);
 

@@ -9,6 +9,7 @@
 
 #include <obs-module.h>
 
+#include "camera-dock.h"
 #include "director-dock.h"
 #include "intercom.h"
 #include "multistream.h"
@@ -42,6 +43,7 @@ bool obs_module_load(void)
 	obs_register_source(&pl_caption_source);
 	obs_register_source(&pl_mirror_source);
 	pl_director_dock_load();
+	pl_camera_dock_load();
 	pl_vertical_load();
 	pl_vertical_record_load();
 	pl_vertical_dock_load();
