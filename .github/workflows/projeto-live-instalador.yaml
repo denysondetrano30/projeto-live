@@ -3,8 +3,12 @@
 # Roda depois de cada compilação do OBS que passou ("Push" no master) e também na mão (aba Actions >
 # "Projeto Live: instalador" > Run workflow). Pega o OBS do pacote da compilação e compila o app de
 # projeção a partir do repositório projeto-live-projecao (público). O instalador sai como artifact
-# "ProjetoLive-Instalador-<commit>" e também na página Releases > "teste", que baixa sem login:
-# https://github.com/denysondetrano30/projeto-live/releases/download/teste/ProjetoLive-Instalador.exe
+# "ProjetoLive-Instalador-<commit>" e também na página Releases, que baixa sem login:
+# https://github.com/denysondetrano30/projeto-live/releases/download/33.0.1-projetolive/ProjetoLive-Instalador.exe
+#
+# A etiqueta (tag) da Release TEM de ter a cara de uma versão (33.0.1-...), porque o CMake do OBS
+# descobre a versão com "git describe --tags": uma etiqueta como "teste" quebra a compilação
+# ("list index 1 out of range" em cmake/common/versionconfig.cmake).
 name: "Projeto Live: instalador"
 on:
   workflow_run:
@@ -122,13 +126,14 @@ jobs:
         run: |
           $repo = $env:GITHUB_REPOSITORY
           Copy-Item (Get-ChildItem installer/ProjetoLive-Instalador-*.exe | Select-Object -First 1).FullName installer/ProjetoLive-Instalador.exe
+          $tag = "33.0.1-projetolive"
           $notes = "Instalador de teste do Projeto Live (OBS + app de projecao). Compilacao ${{ steps.obs.outputs.short }}."
-          gh release view teste -R $repo *> $null
+          gh release view $tag -R $repo *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create teste -R $repo --prerelease --target master --title "Versao de teste" --notes $notes
+            gh release create $tag -R $repo --prerelease --target master --title "Projeto Live (teste)" --notes $notes
             if ($LASTEXITCODE -ne 0) { throw "nao deu para criar a release" }
           } else {
-            gh release edit teste -R $repo --notes $notes
+            gh release edit $tag -R $repo --notes $notes
           }
-          gh release upload teste installer/ProjetoLive-Instalador.exe -R $repo --clobber
+          gh release upload $tag installer/ProjetoLive-Instalador.exe -R $repo --clobber
           if ($LASTEXITCODE -ne 0) { throw "nao deu para enviar o instalador" }
