@@ -533,7 +533,9 @@ private:
 void frontendEvent(enum obs_frontend_event event, void *param)
 {
 	(void)param;
-	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING && dock) {
+	(void)event;
+	/* Qualquer aviso do OBS serve para saber que ele já abriu: start() só age na primeira vez. */
+	if (dock) {
 		static_cast<AudioDock *>(dock)->start();
 	}
 }

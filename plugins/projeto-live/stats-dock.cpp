@@ -299,9 +299,10 @@ void frontendEvent(enum obs_frontend_event event, void *param)
 	if (!dock) {
 		return;
 	}
-	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
-		dock->start();
-	} else if (event == OBS_FRONTEND_EVENT_RECORDING_STARTING) {
+	/* Qualquer aviso do OBS serve para saber que ele já abriu: start() só age na primeira vez.
+	 * Assim a faixa não fica parada para sempre se o aviso de "terminei de abrir" não vier. */
+	dock->start();
+	if (event == OBS_FRONTEND_EVENT_RECORDING_STARTING) {
 		dock->recordingStarted();
 	}
 }
