@@ -338,7 +338,8 @@ private:
 
 		const char *currentName = nullptr;
 		const char *currentId = nullptr;
-		if (obs_get_audio_monitoring_device(&currentName, &currentId) && currentId) {
+		obs_get_audio_monitoring_device(&currentName, &currentId);
+		if (currentId && *currentId) {
 			int index = devices->findData(QString::fromUtf8(currentId));
 			if (index >= 0) {
 				devices->setCurrentIndex(index);
