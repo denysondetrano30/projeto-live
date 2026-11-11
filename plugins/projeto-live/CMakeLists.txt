@@ -14,6 +14,8 @@ target_sources(
     caption-source.c
     control-server.c
     control-server.h
+    audio-dock.cpp
+    audio-dock.h
     camera-dock.cpp
     camera-dock.h
     director-dock.cpp
