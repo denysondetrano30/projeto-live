@@ -24,6 +24,7 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPushButton>
 #include <QScrollArea>
 #include <QString>
 #include <QTimer>
@@ -34,6 +35,7 @@
 #include <string>
 #include <vector>
 
+#include "layout.h"
 #include "multistream.h"
 #include "phone-video.h"
 #include "pl-sync.h"
@@ -101,7 +103,17 @@ public:
 		row->setSpacing(16);
 		row->addStretch(1);
 		area->setWidget(holder);
-		outer->addWidget(area);
+
+		/* A faixa rola para o lado quando falta espaço; os dois botões ficam parados na direita. */
+		auto *line = new QHBoxLayout();
+		line->setContentsMargins(0, 0, 8, 0);
+		line->setSpacing(6);
+		line->addWidget(area, 1);
+		line->addWidget(button(obs_module_text("Layout.Panels"), [](QWidget *from) {
+			pl_layout_show_panels_menu(from);
+		}));
+		line->addWidget(button(obs_module_text("Layout.Menu"), [](QWidget *from) { pl_layout_show_menu(from); }));
+		outer->addLayout(line);
 
 		setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 		setMaximumHeight(34);
@@ -124,6 +136,17 @@ public:
 	void recordingStarted() { recordedMs = 0; }
 
 private:
+	/* Botão pequeno e sem moldura, do tamanho da faixa. */
+	QPushButton *button(const char *text, void (*onClick)(QWidget *))
+	{
+		auto *created = new QPushButton(QString::fromUtf8(text), this);
+		created->setFlat(true);
+		created->setCursor(Qt::PointingHandCursor);
+		created->setMaximumHeight(26);
+		connect(created, &QPushButton::clicked, this, [created, onClick]() { onClick(created); });
+		return created;
+	}
+
 	Item *item(size_t index)
 	{
 		while (items.size() <= index) {

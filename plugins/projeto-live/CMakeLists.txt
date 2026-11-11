@@ -48,6 +48,8 @@ target_sources(
     qrcodegen.h
     sha256.c
     sha256.h
+    layout.cpp
+    layout.h
     stats-dock.cpp
     stats-dock.h
     stream-dock.cpp
