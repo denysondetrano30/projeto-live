@@ -38,11 +38,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # A compilação mais nova do master que passou E tem o pacote do Windows (envios que só
-          # mudam o instalador não compilam o OBS de novo).
+          # A compilação mais nova do master que tem o pacote do Windows pronto. Não exige que a
+          # compilação inteira tenha passado: o pacote do Windows é feito num trabalho só dele, e
+          # uma falha do Mac (ou um trabalho cancelado por um envio novo) não estraga o Windows.
+          # Envios que só mudam o instalador não compilam o OBS de novo, por isso a busca.
           run_id=""
           sha=""
-          for candidate in $(gh api "repos/${{ github.repository }}/actions/workflows/push.yaml/runs?branch=master&status=success&per_page=20" --jq '.workflow_runs[] | "\(.id):\(.head_sha)"'); do
+          for candidate in $(gh api "repos/${{ github.repository }}/actions/workflows/push.yaml/runs?branch=master&per_page=30" --jq '.workflow_runs[] | "\(.id):\(.head_sha)"'); do
             id="${candidate%%:*}"
             found=$(gh api "repos/${{ github.repository }}/actions/runs/$id/artifacts?per_page=100" --jq '[.artifacts[] | select(.name | startswith("obs-studio-windows-x64-")) | select(.expired | not)] | length')
             if [ "$found" != "0" ]; then
