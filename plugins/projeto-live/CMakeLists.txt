@@ -48,6 +48,8 @@ target_sources(
     qrcodegen.h
     sha256.c
     sha256.h
+    stats-dock.cpp
+    stats-dock.h
     stream-dock.cpp
     stream-dock.h
     usb-relay.c

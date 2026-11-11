@@ -17,6 +17,7 @@
 #include "phone-video.h"
 #include "pl-sync.h"
 #include "projection-link.h"
+#include "stats-dock.h"
 #include "stream-dock.h"
 #include "vertical-dock.h"
 #include "vertical-record.h"
@@ -44,6 +45,7 @@ bool obs_module_load(void)
 	obs_register_source(&pl_mirror_source);
 	pl_director_dock_load();
 	pl_camera_dock_load();
+	pl_stats_dock_load();
 	pl_vertical_load();
 	pl_vertical_record_load();
 	pl_vertical_dock_load();
@@ -58,6 +60,7 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
 	pl_projection_stop();
+	pl_stats_dock_unload();
 	pl_sync_unload();
 	pl_multistream_unload();
 	pl_vertical_record_unload();
