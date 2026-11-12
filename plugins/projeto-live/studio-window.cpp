@@ -452,11 +452,6 @@ public:
 	/* Chamado pelo relógio da janela: segue a entrada da prévia e refaz a lista se algo mudou. */
 	void refresh()
 	{
-		preview->view->syncSize();
-		program->view->syncSize();
-		sources->refresh();
-		updateFooter();
-
 		obs_source_t *scene = workingScene();
 		obs_source_t *mine = obs_weak_source_get_source(weak);
 		if (scene != mine) {
@@ -789,6 +784,11 @@ protected:
 private:
 	void refresh()
 	{
+		preview->view->syncSize();
+		program->view->syncSize();
+		sources->refresh();
+		updateFooter();
+
 		obs_source_t *previewSource = obs_frontend_get_current_preview_scene();
 		obs_source_t *programSource = obs_frontend_get_current_scene();
 
