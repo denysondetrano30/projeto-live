@@ -16,9 +16,9 @@
  * Um clique manda a entrada para a prévia e dois cliques cortam para o ar.
  *
  * Botão direito:
- * - no espaço vazio: "Nova entrada" (cria uma cena e abre o menu para pôr fontes nela);
- * - numa entrada: adicionar uma fonte que já existe, criar uma fonte nova (imagem, vídeo, legenda,
- *   telão), tirar fonte, renomear ou remover a entrada.
+ * - no espaço vazio: "Nova entrada" (cria uma cena e abre a janela "Adicionar fonte" do OBS);
+ * - numa entrada: "Adicionar fonte" (a janela original do OBS, com todos os tipos de fonte e as que
+ *   já existem), tirar fonte, renomear ou remover a entrada.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -44,8 +44,6 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QEvent>
-#include <QFileDialog>
-#include <QFileInfo>
 #include <QFont>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -64,6 +62,7 @@
 #include <QPaintEvent>
 #include <QPlatformSurfaceEvent>
 #include <QPoint>
+#include <QPointer>
 #include <QRect>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -88,10 +87,6 @@
 
 namespace {
 
-const char *const MIRROR_SOURCE_ID = "projeto_live_mirror";
-const char *const CAPTION_SOURCE_ID = "projeto_live_caption";
-const char *const IMAGE_SOURCE_ID = "image_source";
-const char *const VIDEO_SOURCE_ID = "ffmpeg_source";
 const char *const SIZE_FILE = "cameras.json";
 
 const float SILENCE_DB = -60.0f;
@@ -102,9 +97,6 @@ const int CARD_WIDTHS[3] = {170, 230, 310};
 enum class Tally { Off, Preview, Program };
 
 enum class Signal { None, Stalled, Live };
-
-/* Tipos de fonte nova que o botão direito sabe criar. */
-enum class NewKind { Image, Video, Caption, Mirror };
 
 /* Texto do módulo (pt-BR ou en-US, conforme o OBS). */
 QString msg(const char *key)
@@ -987,110 +979,37 @@ QStringList pickNames(const QString &title, const QString &caption, const QStrin
 	return chosen;
 }
 
-/* Nomes das fontes de imagem que já existem no OBS (as que podem entrar numa cena). */
-QStringList videoInputNames()
+/* Abre a janela "Adicionar fonte" original do OBS, já apontada para esta entrada.
+ * Essa janela põe a fonte na cena atual do OBS: com o modo estúdio ligado, é a cena da prévia, então
+ * a entrada vai para a prévia antes (nada muda no ar). Sem o modo estúdio, a cena atual é a do ar, e
+ * só dá para abrir sem cortar se a entrada já estiver no ar. */
+void openAddSource(obs_source_t *sceneSource)
 {
-	QStringList names;
-	obs_enum_sources(
-		[](void *param, obs_source_t *source) {
-			auto *list = static_cast<QStringList *>(param);
-			if (obs_source_get_type(source) == OBS_SOURCE_TYPE_INPUT &&
-			    (obs_source_get_output_flags(source) & OBS_SOURCE_VIDEO)) {
-				list->append(QString::fromUtf8(obs_source_get_name(source)));
-			}
-			return true;
-		},
-		&names);
-	names.sort(Qt::CaseInsensitive);
-	return names;
-}
-
-/* Nomes das fontes que já estão dentro da cena. */
-QStringList sceneNames(obs_source_t *sceneSource)
-{
-	QStringList names;
-	ItemList items = sceneItems(sceneSource);
-	for (obs_sceneitem_t *item : items) {
-		obs_source_t *src = obs_sceneitem_get_source(item);
-		if (src) {
-			names << QString::fromUtf8(obs_source_get_name(src));
-		}
-	}
-	releaseItems(items);
-	return names;
-}
-
-/* Reaproveita uma fonte que já existe no OBS: ela passa a estar nesta cena também. */
-void addExisting(obs_source_t *sceneSource)
-{
-	QStringList inScene = sceneNames(sceneSource);
-	QStringList available;
-	for (const QString &name : videoInputNames()) {
-		if (!inScene.contains(name)) {
-			available << name;
-		}
-	}
-	if (available.isEmpty()) {
-		QMessageBox::information(dock, msg("Entries.AddExisting"), msg("Entries.NoneToAdd"));
+	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	QAction *add = mainWindow ? mainWindow->findChild<QAction *>("actionAddSource") : nullptr;
+	if (!add) {
 		return;
 	}
 
-	QStringList chosen = pickNames(msg("Entries.AddExisting"), msg("Entries.PickAdd"), available);
-	obs_scene_t *scene = obs_scene_from_source(sceneSource);
-	for (const QString &name : chosen) {
-		obs_source_t *src = obs_get_source_by_name(name.toUtf8().constData());
-		if (src && scene) {
-			obs_scene_add(scene, src);
-		}
-		obs_source_release(src);
-	}
-}
-
-/* Cria uma fonte nova e a põe nesta cena. Imagem e vídeo pedem o arquivo. */
-void addNew(obs_source_t *sceneSource, NewKind kind)
-{
-	obs_scene_t *scene = obs_scene_from_source(sceneSource);
-	if (!scene) {
-		return;
-	}
-
-	const char *id = nullptr;
-	QString base;
-	obs_data_t *settings = obs_data_create();
-
-	if (kind == NewKind::Image || kind == NewKind::Video) {
-		bool image = kind == NewKind::Image;
-		QString file = QFileDialog::getOpenFileName(dock,
-							    msg(image ? "Entries.ImageFile" : "Entries.VideoFile"),
-							    QString(),
-							    msg(image ? "Entries.ImageFilter" : "Entries.VideoFilter"));
-		if (file.isEmpty()) {
-			obs_data_release(settings);
+	if (obs_frontend_preview_program_mode_active()) {
+		obs_frontend_set_current_preview_scene(sceneSource);
+	} else {
+		obs_source_t *program = obs_frontend_get_current_scene();
+		bool onAir = program == sceneSource;
+		obs_source_release(program);
+		if (!onAir) {
+			QMessageBox::information(dock, msg("Entries.AddSource"), msg("Entries.NeedStudio"));
 			return;
 		}
-		base = QFileInfo(file).completeBaseName();
-		if (image) {
-			id = IMAGE_SOURCE_ID;
-			obs_data_set_string(settings, "file", file.toUtf8().constData());
-		} else {
-			id = VIDEO_SOURCE_ID;
-			obs_data_set_bool(settings, "is_local_file", true);
-			obs_data_set_string(settings, "local_file", file.toUtf8().constData());
-		}
-	} else if (kind == NewKind::Caption) {
-		id = CAPTION_SOURCE_ID;
-		base = msg("Entries.Kind.Caption");
-	} else {
-		id = MIRROR_SOURCE_ID;
-		base = msg("Entries.Kind.Mirror");
 	}
 
-	obs_source_t *src = obs_source_create(id, freeName(base).toUtf8().constData(), settings, nullptr);
-	obs_data_release(settings);
-	if (src) {
-		obs_scene_add(scene, src);
-		obs_source_release(src);
-	}
+	/* Espera o OBS terminar de trocar a prévia antes de abrir a janela. */
+	QPointer<QAction> action(add);
+	QTimer::singleShot(0, add, [action]() {
+		if (action) {
+			action->trigger();
+		}
+	});
 }
 
 /* Tira fontes desta entrada (a fonte continua no OBS, só sai desta cena). */
@@ -1157,8 +1076,8 @@ void deleteEntry(obs_source_t *sceneSource)
 	obs_source_remove(sceneSource);
 }
 
-/* Cria uma cena nova (entrada). Depois abre o menu dela, para pôr as fontes. */
-void newEntry(const QPoint &where)
+/* Cria uma cena nova (entrada). Depois abre a janela "Adicionar fonte" do OBS para ela. */
+void newEntry()
 {
 	bool ok = false;
 	QString text = QInputDialog::getText(dock, msg("Entries.NewTitle"), msg("Entries.NewPrompt"), QLineEdit::Normal,
@@ -1178,9 +1097,7 @@ void newEntry(const QPoint &where)
 	}
 	obs_source_t *sceneSource = obs_scene_get_source(scene);
 	dock->rebuildNow();
-	if (Card *card = dock->cardFor(sceneSource)) {
-		showCardMenu(card, where);
-	}
+	openAddSource(sceneSource);
 	obs_scene_release(scene);
 }
 
@@ -1192,7 +1109,7 @@ void showEmptyMenu(const QPoint &where)
 	QMenu menu;
 	QAction *create = menu.addAction(msg("Entries.New"));
 	if (menu.exec(where) == create) {
-		newEntry(where);
+		newEntry();
 	}
 }
 
@@ -1205,30 +1122,15 @@ void showCardMenu(Card *card, const QPoint &where)
 	}
 
 	QMenu menu;
-	QAction *addExistingAction = menu.addAction(msg("Entries.AddExisting"));
-
-	QMenu *addNewMenu = menu.addMenu(msg("Entries.AddNew"));
-	QAction *newImage = addNewMenu->addAction(msg("Entries.Kind.Image"));
-	QAction *newVideo = addNewMenu->addAction(msg("Entries.Kind.Video"));
-	QAction *newCaption = addNewMenu->addAction(msg("Entries.Kind.Caption"));
-	QAction *newMirror = addNewMenu->addAction(msg("Entries.Kind.Mirror"));
-
+	QAction *addAction = menu.addAction(msg("Entries.AddSource"));
 	QAction *removeAction = menu.addAction(msg("Entries.Remove"));
 	menu.addSeparator();
 	QAction *renameAction = menu.addAction(msg("Entries.Rename"));
 	QAction *deleteAction = menu.addAction(msg("Entries.Delete"));
 
 	QAction *chosen = menu.exec(where);
-	if (chosen == addExistingAction) {
-		addExisting(scene);
-	} else if (chosen == newImage) {
-		addNew(scene, NewKind::Image);
-	} else if (chosen == newVideo) {
-		addNew(scene, NewKind::Video);
-	} else if (chosen == newCaption) {
-		addNew(scene, NewKind::Caption);
-	} else if (chosen == newMirror) {
-		addNew(scene, NewKind::Mirror);
+	if (chosen == addAction) {
+		openAddSource(scene);
 	} else if (chosen == removeAction) {
 		removeFromEntry(scene);
 	} else if (chosen == renameAction) {
