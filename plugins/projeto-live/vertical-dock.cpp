@@ -1596,7 +1596,8 @@ bool floating = false;
 
 class VerticalProgram : public QWidget {
 public:
-	VerticalProgram(QWidget *parent, bool isFloating) : QWidget(parent)
+	/* withDetach: a cópia da janela do Projeto Live não tem "Soltar" (ele mexe no da janela do OBS). */
+	VerticalProgram(QWidget *parent, bool isFloating, bool withDetach = true) : QWidget(parent)
 	{
 		auto *layout = new QVBoxLayout(this);
 		layout->setContentsMargins(4, isFloating ? 4 : 0, isFloating ? 4 : 0, isFloating ? 4 : 0);
@@ -1615,6 +1616,7 @@ public:
 		});
 		header->addWidget(status, 1);
 		header->addWidget(detach);
+		detach->setVisible(withDetach);
 		layout->addLayout(header);
 		layout->addWidget(new VerticalDisplay(this), 1);
 
@@ -1763,6 +1765,10 @@ void placeEmbedded()
 
 SourcesDock *sourcesDock = nullptr;
 
+/* Cópias que a janela do Projeto Live usa (os mesmos painéis, noutra janela). */
+std::vector<VerticalProgram *> extraPrograms;
+std::vector<SourcesDock *> extraSources;
+
 void showItemMenu(QWidget *parent, obs_sceneitem_t *item, const QPoint &where)
 {
 	if (sourcesDock && sourcesDock->selectId(obs_sceneitem_get_id(item))) {
@@ -1785,6 +1791,9 @@ void refreshDocks()
 	if (floatingWindow && floatingWindow->program) {
 		floatingWindow->program->refresh();
 	}
+	for (VerticalProgram *each : extraPrograms) {
+		each->refresh();
+	}
 	uint64_t now = pl_vertical_version();
 	if (now == seenVersion) {
 		return;
@@ -1792,6 +1801,9 @@ void refreshDocks()
 	seenVersion = now;
 	if (sourcesDock) {
 		sourcesDock->rebuild();
+	}
+	for (SourcesDock *each : extraSources) {
+		each->rebuild();
 	}
 }
 
@@ -1860,4 +1872,31 @@ void pl_vertical_dock_load(void)
 	QObject::connect(timer, &QTimer::timeout, []() { refreshDocks(); });
 	timer->start(300);
 	obs_frontend_add_event_callback(frontendEvent, nullptr);
+}
+
+QWidget *pl_vertical_program_create(QWidget *parent)
+{
+	auto *created = new VerticalProgram(parent, false, false);
+	extraPrograms.push_back(created);
+	QObject::connect(created, &QObject::destroyed, [created]() {
+		extraPrograms.erase(std::remove(extraPrograms.begin(), extraPrograms.end(), created),
+				    extraPrograms.end());
+	});
+	return created;
+}
+
+QWidget *pl_vertical_sources_create(QWidget *parent)
+{
+	auto *created = new SourcesDock(parent);
+	extraSources.push_back(created);
+	QObject::connect(created, &QObject::destroyed, [created]() {
+		extraSources.erase(std::remove(extraSources.begin(), extraSources.end(), created), extraSources.end());
+	});
+	created->rebuild();
+	return created;
+}
+
+bool pl_vertical_program_wanted(void)
+{
+	return pl_vertical_pref("embed");
 }

@@ -38,6 +38,9 @@
 #include <QCloseEvent>
 #include <QContextMenuEvent>
 #include <QListWidget>
+#include <QMainWindow>
+#include <QMenuBar>
+#include <QStackedWidget>
 #include <QListWidgetItem>
 #include <QMenu>
 #include <QMessageBox>
@@ -75,6 +78,7 @@
 #include "camera-dock.h"
 #include "director-dock.h"
 #include "stats-dock.h"
+#include "vertical-dock.h"
 
 namespace {
 
@@ -421,24 +425,48 @@ public:
 		bold.setBold(true);
 		title->setFont(bold);
 		head->addWidget(title, 1);
-		auto *add = new QPushButton("+", this);
-		add->setFixedSize(26, 22);
-		add->setToolTip(msg("Entries.AddSource"));
-		connect(add, &QPushButton::clicked, this, [this]() { addSource(); });
-		head->addWidget(add);
+		addButton = new QPushButton(msg("Studio.AddSource"), this);
+		addButton->setToolTip(msg("Entries.AddSource"));
+		connect(addButton, &QPushButton::clicked, this, [this]() { addSource(); });
+		head->addWidget(addButton);
 		layout->addLayout(head);
 
-		entryName = new QLabel(this);
-		entryName->setEnabled(false);
-		layout->addWidget(entryName);
+		/* Duas páginas: as fontes da entrada (horizontal) e as fontes verticais. */
+		auto *tabs = new QHBoxLayout();
+		tabs->setSpacing(4);
+		horizontalTab = new QPushButton(msg("Studio.Horizontal"), this);
+		verticalTab = new QPushButton(msg("Studio.Vertical"), this);
+		for (QPushButton *tab : {horizontalTab, verticalTab}) {
+			tab->setCheckable(true);
+			tab->setAutoExclusive(true);
+			tabs->addWidget(tab, 1);
+		}
+		horizontalTab->setChecked(true);
+		connect(horizontalTab, &QPushButton::clicked, this, [this]() { showPage(0); });
+		connect(verticalTab, &QPushButton::clicked, this, [this]() { showPage(1); });
+		layout->addLayout(tabs);
 
-		list = new QListWidget(this);
+		pages = new QStackedWidget(this);
+		layout->addWidget(pages, 1);
+
+		auto *horizontalPage = new QWidget(pages);
+		auto *pageLayout = new QVBoxLayout(horizontalPage);
+		pageLayout->setContentsMargins(0, 0, 0, 0);
+		pageLayout->setSpacing(4);
+		pages->addWidget(horizontalPage);
+		pages->addWidget(pl_vertical_sources_create(pages));
+
+		entryName = new QLabel(horizontalPage);
+		entryName->setEnabled(false);
+		pageLayout->addWidget(entryName);
+
+		list = new QListWidget(horizontalPage);
 		list->setDragDropMode(QAbstractItemView::InternalMove);
 		list->setDefaultDropAction(Qt::MoveAction);
 		list->setSelectionMode(QAbstractItemView::SingleSelection);
 		list->setContextMenuPolicy(Qt::CustomContextMenu);
 		list->setToolTip(msg("Studio.SourcesHint"));
-		layout->addWidget(list, 1);
+		pageLayout->addWidget(list, 1);
 
 		connect(list->model(), &QAbstractItemModel::rowsMoved, this, [this]() { applyOrder(); });
 		connect(list, &QListWidget::itemChanged, this, [this](QListWidgetItem *row) { applyVisible(row); });
@@ -503,6 +531,13 @@ public:
 	}
 
 private:
+	/* A página vertical tem o próprio "+"; o "+ Fonte" de cima é só da horizontal. */
+	void showPage(int index)
+	{
+		pages->setCurrentIndex(index);
+		addButton->setVisible(index == 0);
+	}
+
 	/* O item da cena que a linha representa (sem referência; usar na hora). */
 	obs_sceneitem_t *itemFor(QListWidgetItem *row) const
 	{
@@ -617,6 +652,10 @@ private:
 	}
 
 	obs_weak_source_t *weak = nullptr;
+	QPushButton *addButton = nullptr;
+	QPushButton *horizontalTab = nullptr;
+	QPushButton *verticalTab = nullptr;
+	QStackedWidget *pages = nullptr;
 	QLabel *entryName = nullptr;
 	QListWidget *list = nullptr;
 	QStringList shown;
@@ -637,6 +676,17 @@ public:
 		auto *outer = new QVBoxLayout(this);
 		outer->setContentsMargins(10, 6, 10, 8);
 		outer->setSpacing(8);
+
+		/* Os menus do OBS (Arquivo, Editar, Visualizar...): os mesmos, não uma cópia. */
+		auto *bar = new QMenuBar(this);
+		/* Dentro da janela também no Mac (lá o OBS já usa a barra de cima da tela). */
+		bar->setNativeMenuBar(false);
+		if (auto *main = qobject_cast<QMainWindow *>(obsWindow())) {
+			for (QAction *action : main->menuBar()->actions()) {
+				bar->addAction(action);
+			}
+		}
+		outer->setMenuBar(bar);
 
 		/* Faixa de cima: nome do produto, a faixa Situação e o botão de voltar ao OBS. */
 		auto *top = new QHBoxLayout();
@@ -667,7 +717,7 @@ public:
 		auto *leftHolder = new QWidget(this);
 		leftHolder->setLayout(left);
 		left->setContentsMargins(0, 0, 0, 0);
-		leftHolder->setFixedWidth(260);
+		leftHolder->setFixedWidth(330);
 		body->addWidget(leftHolder);
 
 		auto *right = new QVBoxLayout();
@@ -707,6 +757,13 @@ public:
 
 		program = new Monitor(this, msg("Studio.Program"), "#e5352b", drawProgram, this);
 		middle->addWidget(program, 1);
+
+		/* O vertical, em pé, ao lado do Programa (some quando está desligado em Painéis). */
+		verticalHolder = new QWidget(this);
+		auto *verticalLayout = new QVBoxLayout(verticalHolder);
+		verticalLayout->setContentsMargins(0, 0, 0, 0);
+		verticalLayout->addWidget(pl_vertical_program_create(verticalHolder));
+		middle->addWidget(verticalHolder);
 
 		right->addLayout(middle, 5);
 
@@ -788,6 +845,10 @@ private:
 		program->view->syncSize();
 		sources->refresh();
 		updateFooter();
+		bool vertical = pl_vertical_program_wanted();
+		if (verticalHolder->isHidden() == vertical) {
+			verticalHolder->setVisible(vertical);
+		}
 
 		obs_source_t *previewSource = obs_frontend_get_current_preview_scene();
 		obs_source_t *programSource = obs_frontend_get_current_scene();
@@ -903,6 +964,7 @@ private:
 	Monitor *program = nullptr;
 	QLabel *transitionInfo = nullptr;
 	SourcesPanel *sources = nullptr;
+	QWidget *verticalHolder = nullptr;
 	QPushButton *streamButton = nullptr;
 	QPushButton *recordButton = nullptr;
 	QTimer *timer = nullptr;
