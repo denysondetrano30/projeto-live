@@ -760,24 +760,52 @@ public:
 	}
 
 private:
-	/* Procura as nossas entradas e cria ou tira miniaturas. */
+	/* Câmeras na frente, depois o telão, depois as outras entradas. */
+	static int sourceRank(obs_source_t *source)
+	{
+		if (pl_phone_is_source(source)) {
+			return 0;
+		}
+		const char *id = obs_source_get_id(source);
+		return id && strcmp(id, MIRROR_SOURCE_ID) == 0 ? 1 : 2;
+	}
+
+	/* Procura as entradas e cria ou tira miniaturas. */
 	void rebuild()
 	{
 		struct Found {
 			std::vector<obs_source_t *> sources;
 		} found;
 
+		/* Tudo o que entra imagem no OBS é uma entrada: as câmeras, o telão, um vídeo, uma
+		 * imagem de aviso, uma captura de tela. Sem isso, a pessoa não consegue ver nem mandar
+		 * para a prévia o que está nas outras cenas. */
 		obs_enum_sources(
 			[](void *param, obs_source_t *source) {
-				const char *id = obs_source_get_id(source);
-				if (id && (pl_phone_is_source(source) || strcmp(id, MIRROR_SOURCE_ID) == 0)) {
-					/* Segura a fonte: os ponteiros do obs_enum_sources só valem
-					 * dentro desta função. */
-					static_cast<Found *>(param)->sources.push_back(obs_source_get_ref(source));
+				if (obs_source_get_type(source) != OBS_SOURCE_TYPE_INPUT) {
+					return true;
 				}
+				if ((obs_source_get_output_flags(source) & OBS_SOURCE_VIDEO) == 0) {
+					return true;
+				}
+				/* Segura a fonte: os ponteiros do obs_enum_sources só valem dentro
+				 * desta função. */
+				static_cast<Found *>(param)->sources.push_back(obs_source_get_ref(source));
 				return true;
 			},
 			&found);
+
+		/* Ordem: primeiro as câmeras, depois o telão, depois o resto pelo nome. */
+		std::sort(found.sources.begin(), found.sources.end(), [](obs_source_t *a, obs_source_t *b) {
+			int rankA = sourceRank(a);
+			int rankB = sourceRank(b);
+			if (rankA != rankB) {
+				return rankA < rankB;
+			}
+			const char *nameA = obs_source_get_name(a);
+			const char *nameB = obs_source_get_name(b);
+			return strcmp(nameA ? nameA : "", nameB ? nameB : "") < 0;
+		});
 
 		/* Tira as que não existem mais. */
 		for (int i = (int)cards.size() - 1; i >= 0; i--) {
@@ -813,6 +841,27 @@ private:
 			card->setSize(sizeBox->currentIndex());
 			flow->addWidget(card);
 			cards.push_back(card);
+		}
+
+		/* Põe as miniaturas na ordem acima. */
+		std::vector<Card *> ordered;
+		ordered.reserve(cards.size());
+		for (obs_source_t *source : found.sources) {
+			for (Card *card : cards) {
+				if (card->isSource(source)) {
+					ordered.push_back(card);
+					break;
+				}
+			}
+		}
+		if (ordered.size() == cards.size() && ordered != cards) {
+			for (Card *card : cards) {
+				flow->removeWidget(card);
+			}
+			for (Card *card : ordered) {
+				flow->addWidget(card);
+			}
+			cards = ordered;
 		}
 
 		for (obs_source_t *source : found.sources) {
