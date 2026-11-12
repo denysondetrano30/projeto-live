@@ -18,8 +18,8 @@
  * Botão direito:
  * - no espaço vazio: "Nova entrada" (cria uma cena e abre a janela "Adicionar fonte" do OBS);
  * - numa entrada: "Adicionar fonte" (a janela original do OBS, com todos os tipos de fonte e as que
- *   já existem), "Organizar fontes" (ordem das camadas, olho, tirar, propriedades e filtros, sem
- *   precisar do painel Fontes do OBS), renomear ou remover a entrada.
+ *   já existem), "Organizar fontes" (abre o painel Fontes do OBS já mostrando esta entrada),
+ *   renomear ou remover a entrada.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -37,12 +37,10 @@
 
 #include <util/platform.h>
 
-#include <QAbstractItemView>
 #include <QAction>
 #include <QColor>
 #include <QComboBox>
 #include <QContextMenuEvent>
-#include <QDialog>
 #include <QEvent>
 #include <QFont>
 #include <QFrame>
@@ -52,8 +50,6 @@
 #include <QLayout>
 #include <QLineEdit>
 #include <QList>
-#include <QListWidget>
-#include <QListWidgetItem>
 #include <QMargins>
 #include <QMenu>
 #include <QMessageBox>
@@ -62,16 +58,13 @@
 #include <QPaintEvent>
 #include <QPlatformSurfaceEvent>
 #include <QPoint>
-#include <QPushButton>
-#include <QAbstractItemModel>
+#include <QDockWidget>
 #include <QPointer>
 #include <QRect>
 #include <QResizeEvent>
 #include <QScrollArea>
-#include <QSignalBlocker>
 #include <QSize>
 #include <QString>
-#include <QStringList>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -984,240 +977,35 @@ void openAddSource(obs_source_t *sceneSource)
 	});
 }
 
-/* Janela "Fontes da entrada": a lista das fontes dentro de uma entrada, de cima (frente) para baixo
- * (fundo), como em qualquer programa de edição. Dá para arrastar ou usar Subir/Descer, ligar e
- * desligar o olho, tirar da entrada, abrir propriedades e filtros. Clicar numa fonte a seleciona na
- * prévia, para reposicionar com o mouse. Uma janela só, que troca de entrada. */
-class SourcesWindow : public QDialog {
-public:
-	explicit SourcesWindow(QWidget *parent) : QDialog(parent)
-	{
-		setAttribute(Qt::WA_DeleteOnClose, true);
-		resize(380, 440);
-
-		auto *layout = new QVBoxLayout(this);
-
-		auto *hintLabel = new QLabel(msg("Entries.OrganizeHint"), this);
-		hintLabel->setWordWrap(true);
-		hintLabel->setEnabled(false);
-		layout->addWidget(hintLabel);
-
-		list = new QListWidget(this);
-		list->setDragDropMode(QAbstractItemView::InternalMove);
-		list->setDefaultDropAction(Qt::MoveAction);
-		list->setSelectionMode(QAbstractItemView::SingleSelection);
-		layout->addWidget(list, 1);
-
-		connect(list->model(), &QAbstractItemModel::rowsMoved, this, [this]() { applyOrder(); });
-		connect(list, &QListWidget::itemChanged, this, [this](QListWidgetItem *row) { applyVisible(row); });
-		connect(list, &QListWidget::currentRowChanged, this, [this](int) { selectInPreview(); });
-		connect(list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) { openProperties(); });
-
-		auto *row1 = new QHBoxLayout();
-		row1->addWidget(button(msg("Entries.AddSource"), [this]() {
-			obs_source_t *scene = sceneSource();
-			if (scene) {
-				openAddSource(scene);
-				obs_source_release(scene);
-			}
-		}));
-		row1->addWidget(button(msg("Entries.Up"), [this]() { moveLayer(OBS_ORDER_MOVE_UP); }));
-		row1->addWidget(button(msg("Entries.Down"), [this]() { moveLayer(OBS_ORDER_MOVE_DOWN); }));
-		layout->addLayout(row1);
-
-		auto *row2 = new QHBoxLayout();
-		row2->addWidget(button(msg("Entries.Properties"), [this]() { openProperties(); }));
-		row2->addWidget(button(msg("Entries.Filters"), [this]() { openFilters(); }));
-		row2->addWidget(button(msg("Entries.Remove"), [this]() { removeCurrent(); }));
-		layout->addLayout(row2);
-
-		timer = new QTimer(this);
-		timer->setInterval(400);
-		connect(timer, &QTimer::timeout, this, [this]() { reload(false); });
-		timer->start();
-	}
-
-	~SourcesWindow() override { obs_weak_source_release(weak); }
-
-	void setEntry(obs_source_t *scene)
-	{
-		obs_weak_source_release(weak);
-		weak = obs_source_get_weak_source(scene);
-		setWindowTitle(msg("Entries.OrganizeTitle").arg(QString::fromUtf8(obs_source_get_name(scene))));
-		reload(true);
-	}
-
-private:
-	template<typename F> QPushButton *button(const QString &text, F callback)
-	{
-		auto *b = new QPushButton(text, this);
-		b->setAutoDefault(false);
-		connect(b, &QPushButton::clicked, this, callback);
-		return b;
-	}
-
-	obs_source_t *sceneSource() const { return obs_weak_source_get_source(weak); }
-
-	/* O item da cena que a linha representa (sem referência; usar na hora). */
-	obs_sceneitem_t *itemFor(QListWidgetItem *row) const
-	{
-		if (!row) {
-			return nullptr;
-		}
-		obs_source_t *src = sceneSource();
-		obs_scene_t *scene = obs_scene_from_source(src);
-		obs_sceneitem_t *item =
-			scene ? obs_scene_find_sceneitem_by_id(scene, row->data(Qt::UserRole).toLongLong()) : nullptr;
-		obs_source_release(src);
-		return item;
-	}
-
-	/* Refaz a lista só quando algo mudou na cena (fonte nova, ordem, olho, nome). */
-	void reload(bool force)
-	{
-		obs_source_t *src = sceneSource();
-		if (!src) {
-			close();
-			return;
-		}
-		ItemList items = sceneItems(src);
-		obs_source_release(src);
-
-		QStringList signature;
-		for (obs_sceneitem_t *item : items) {
-			obs_source_t *s = obs_sceneitem_get_source(item);
-			signature << QString("%1|%2|%3")
-					     .arg((qlonglong)obs_sceneitem_get_id(item))
-					     .arg(obs_sceneitem_visible(item) ? "1" : "0")
-					     .arg(QString::fromUtf8(s ? obs_source_get_name(s) : ""));
-		}
-		if (!force && signature == shown) {
-			releaseItems(items);
-			return;
-		}
-		shown = signature;
-
-		qlonglong current = list->currentItem() ? list->currentItem()->data(Qt::UserRole).toLongLong() : -1;
-		QSignalBlocker block(list);
-		list->clear();
-		/* O OBS guarda do fundo para a frente; a lista mostra a frente em cima. */
-		for (auto it = items.rbegin(); it != items.rend(); ++it) {
-			obs_sceneitem_t *item = *it;
-			obs_source_t *s = obs_sceneitem_get_source(item);
-			auto *row = new QListWidgetItem(QString::fromUtf8(s ? obs_source_get_name(s) : ""), list);
-			row->setData(Qt::UserRole, (qlonglong)obs_sceneitem_get_id(item));
-			row->setFlags(row->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsDragEnabled);
-			row->setFlags(row->flags() & ~Qt::ItemIsDropEnabled);
-			row->setCheckState(obs_sceneitem_visible(item) ? Qt::Checked : Qt::Unchecked);
-			if (row->data(Qt::UserRole).toLongLong() == current) {
-				list->setCurrentItem(row);
-			}
-		}
-		releaseItems(items);
-	}
-
-	void applyOrder()
-	{
-		obs_source_t *src = sceneSource();
-		obs_scene_t *scene = obs_scene_from_source(src);
-		if (scene) {
-			std::vector<obs_sceneitem_t *> order;
-			for (int i = list->count() - 1; i >= 0; i--) {
-				obs_sceneitem_t *item = obs_scene_find_sceneitem_by_id(
-					scene, list->item(i)->data(Qt::UserRole).toLongLong());
-				if (item) {
-					order.push_back(item);
-				}
-			}
-			obs_scene_reorder_items(scene, order.data(), order.size());
-		}
-		obs_source_release(src);
-		reload(true);
-	}
-
-	void applyVisible(QListWidgetItem *row)
-	{
-		if (obs_sceneitem_t *item = itemFor(row)) {
-			obs_sceneitem_set_visible(item, row->checkState() == Qt::Checked);
-		}
-	}
-
-	void moveLayer(enum obs_order_movement movement)
-	{
-		if (obs_sceneitem_t *item = itemFor(list->currentItem())) {
-			obs_sceneitem_set_order(item, movement);
-			reload(true);
-		}
-	}
-
-	/* Seleciona a fonte na prévia (as alças vermelhas aparecem para mover e redimensionar). */
-	void selectInPreview()
-	{
-		obs_source_t *src = sceneSource();
-		ItemList items = sceneItems(src);
-		obs_source_release(src);
-		obs_sceneitem_t *chosen = itemFor(list->currentItem());
-		for (obs_sceneitem_t *item : items) {
-			obs_sceneitem_select(item, item == chosen);
-		}
-		releaseItems(items);
-	}
-
-	void openProperties()
-	{
-		if (obs_sceneitem_t *item = itemFor(list->currentItem())) {
-			obs_frontend_open_source_properties(obs_sceneitem_get_source(item));
-		}
-	}
-
-	void openFilters()
-	{
-		if (obs_sceneitem_t *item = itemFor(list->currentItem())) {
-			obs_frontend_open_source_filters(obs_sceneitem_get_source(item));
-		}
-	}
-
-	/* Tira da entrada; a fonte continua no OBS e nas outras entradas que a usam. */
-	void removeCurrent()
-	{
-		QListWidgetItem *row = list->currentItem();
-		obs_sceneitem_t *item = itemFor(row);
-		if (!item) {
-			return;
-		}
-		QString text = msg("Entries.RemoveConfirm").arg(row->text());
-		if (QMessageBox::question(this, msg("Entries.Remove"), text) != QMessageBox::Yes) {
-			return;
-		}
-		item = itemFor(row);
-		if (item) {
-			obs_sceneitem_remove(item);
-		}
-		reload(true);
-	}
-
-	obs_weak_source_t *weak = nullptr;
-	QListWidget *list = nullptr;
-	QTimer *timer = nullptr;
-	QStringList shown;
-};
-
-QPointer<SourcesWindow> sourcesWindow;
-
-/* Abre (ou troca) a janela de fontes desta entrada. Com o modo estúdio, a entrada vai para a prévia,
- * para dar para reposicionar as fontes com o mouse. */
+/* "Organizar fontes": mostra o painel Fontes original do OBS com as fontes desta entrada. O painel
+ * Fontes mostra a cena atual do OBS: com o modo estúdio, é a da prévia, então a entrada vai antes
+ * para a prévia (nada muda no ar). Sem o modo estúdio, só dá se a entrada já estiver no ar. */
 void organizeEntry(obs_source_t *sceneSource)
 {
+	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	auto *sources = mainWindow ? mainWindow->findChild<QDockWidget *>("sourcesDock") : nullptr;
+	if (!sources) {
+		return;
+	}
+
 	if (obs_frontend_preview_program_mode_active()) {
 		obs_frontend_set_current_preview_scene(sceneSource);
+	} else {
+		obs_source_t *program = obs_frontend_get_current_scene();
+		bool onAir = program == sceneSource;
+		obs_source_release(program);
+		if (!onAir) {
+			QMessageBox::information(dock, msg("Entries.Organize"), msg("Entries.NeedStudio"));
+			return;
+		}
 	}
-	if (!sourcesWindow) {
-		sourcesWindow = new SourcesWindow(static_cast<QWidget *>(obs_frontend_get_main_window()));
+
+	/* Liga o painel se estiver desligado e o traz para a frente (mesmo numa aba). */
+	sources->setVisible(true);
+	sources->raise();
+	if (sources->isFloating()) {
+		sources->activateWindow();
 	}
-	sourcesWindow->setEntry(sceneSource);
-	sourcesWindow->show();
-	sourcesWindow->raise();
-	sourcesWindow->activateWindow();
 }
 
 void renameEntry(obs_source_t *sceneSource)
