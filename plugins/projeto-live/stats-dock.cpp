@@ -116,10 +116,10 @@ public:
 		line->setSpacing(6);
 		line->addWidget(area, 1);
 		line->addWidget(button(obs_module_text("Studio.ToLive"), openLive));
-		line->addWidget(button(obs_module_text("Layout.Panels"), [](QWidget *from) {
-			pl_layout_show_panels_menu(from);
-		}));
-		line->addWidget(button(obs_module_text("Layout.Menu"), [](QWidget *from) { pl_layout_show_menu(from); }));
+		line->addWidget(button(obs_module_text("Layout.Panels"),
+				       [](QWidget *from) { pl_layout_show_panels_menu(from); }));
+		line->addWidget(
+			button(obs_module_text("Layout.Menu"), [](QWidget *from) { pl_layout_show_menu(from); }));
 		outer->addLayout(line);
 
 		setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
