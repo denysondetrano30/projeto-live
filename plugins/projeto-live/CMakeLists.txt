@@ -54,6 +54,7 @@ target_sources(
     layout.h
     scene-audio.cpp
     scene-audio.h
+    source-row.hpp
     stats-dock.cpp
     stats-dock.h
     stream-dock.cpp

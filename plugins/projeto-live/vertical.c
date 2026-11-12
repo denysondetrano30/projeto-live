@@ -200,93 +200,15 @@ void pl_vertical_fit_item(obs_sceneitem_t *item, enum pl_vertical_fit fit)
 	pl_vertical_touch();
 }
 
-/* Matriz da caixa de um item na tela horizontal; dentro de um grupo, já somada à do grupo. */
-static void horizontal_transform(obs_sceneitem_t *item, obs_sceneitem_t *group, struct matrix4 *transform)
-{
-	obs_sceneitem_get_box_transform(item, transform);
-	if (group) {
-		struct matrix4 group_transform;
-		obs_sceneitem_get_draw_transform(group, &group_transform);
-		matrix4_mul(transform, transform, &group_transform);
-	}
-}
-
-/* Retângulo que o item ocupa na tela horizontal. */
-static void item_box(obs_sceneitem_t *item, obs_sceneitem_t *group, float *min_x, float *min_y, float *max_x,
-		     float *max_y)
-{
-	struct matrix4 transform;
-	horizontal_transform(item, group, &transform);
-	*min_x = *min_y = INFINITY;
-	*max_x = *max_y = -INFINITY;
-	for (int corner = 0; corner < 4; corner++) {
-		struct vec3 point;
-		vec3_set(&point, (float)(corner & 1), (float)(corner >> 1), 0.0f);
-		vec3_transform(&point, &point, &transform);
-		*min_x = fminf(*min_x, point.x);
-		*min_y = fminf(*min_y, point.y);
-		*max_x = fmaxf(*max_x, point.x);
-		*max_y = fmaxf(*max_y, point.y);
-	}
-}
-
-/* Enquadramento automático na gêmea, a partir de onde o item está na cena horizontal. */
-static void auto_frame(obs_sceneitem_t *vertical_item, obs_sceneitem_t *horizontal_item, obs_sceneitem_t *group)
+/*
+ * Enquadramento automático de uma fonte que acabou de entrar no vertical: o mesmo que "Redefinir
+ * enquadramento" (inteira e no meio da tela). Câmera preenche a tela em pé. Antes ela vinha do lugar
+ * da fonte na horizontal e quase sempre caía pequena no canto de cima; a pessoa reposiciona depois.
+ */
+static void auto_frame(obs_sceneitem_t *vertical_item)
 {
 	obs_source_t *source = obs_sceneitem_get_source(vertical_item);
-	/*
-	 * Fonte recém-criada ainda sem tamanho (imagem ou celular carregando): não dá para saber onde
-	 * ela fica na horizontal. Entra no meio da tela, inteira; o quadro se ajusta sozinho quando ela
-	 * carregar.
-	 */
-	if (!horizontal_item || !obs_source_get_width(source) || !obs_source_get_height(source)) {
-		pl_vertical_fit_item(vertical_item, is_camera(source) ? PL_FIT_FILL : PL_FIT_WHOLE);
-		return;
-	}
-
-	struct obs_video_info ovi;
-	if (!obs_get_video_info(&ovi) || !ovi.base_width || !ovi.base_height) {
-		pl_vertical_fit_item(vertical_item, PL_FIT_WHOLE);
-		return;
-	}
-	float width = (float)ovi.base_width;
-	float height = (float)ovi.base_height;
-
-	float min_x, min_y, max_x, max_y;
-	item_box(horizontal_item, group, &min_x, &min_y, &max_x, &max_y);
-
-	struct obs_sceneitem_crop crop;
-	obs_sceneitem_get_crop(horizontal_item, &crop);
-	obs_sceneitem_set_crop(vertical_item, &crop);
-
-	/* Ocupa quase a tela toda: é câmera (preenche) ou slide/letra (inteiro). */
-	float visible_w = fminf(max_x, width) - fmaxf(min_x, 0.0f);
-	float visible_h = fminf(max_y, height) - fmaxf(min_y, 0.0f);
-	float area = (visible_w > 0 && visible_h > 0) ? visible_w * visible_h : 0.0f;
-	if (area >= 0.8f * width * height) {
-		pl_vertical_fit_item(vertical_item, is_camera(source) ? PL_FIT_FILL : PL_FIT_WHOLE);
-		return;
-	}
-
-	/* Faixa, logo etc.: encolhe na mesma proporção da largura e fica no alto ou embaixo. */
-	float scale = PL_VERTICAL_WIDTH / width;
-	float box_w = (max_x - min_x) * scale;
-	float box_h = (max_y - min_y) * scale;
-	float x = min_x * scale;
-	bool top = (min_y + max_y) / 2.0f < height / 2.0f;
-	float y = top ? min_y * scale : PL_VERTICAL_HEIGHT - (height - min_y) * scale;
-
-	struct obs_transform_info info = {0};
-	info.pos.x = x;
-	info.pos.y = y;
-	info.scale.x = 1.0f;
-	info.scale.y = 1.0f;
-	info.alignment = OBS_ALIGN_LEFT | OBS_ALIGN_TOP;
-	info.bounds_type = OBS_BOUNDS_SCALE_INNER;
-	info.bounds_alignment = OBS_ALIGN_CENTER;
-	info.bounds.x = fmaxf(box_w, 1.0f);
-	info.bounds.y = fmaxf(box_h, 1.0f);
-	obs_sceneitem_set_info2(vertical_item, &info);
+	pl_vertical_fit_item(vertical_item, is_camera(source) ? PL_FIT_FILL : PL_FIT_WHOLE);
 	pl_vertical_touch();
 }
 
@@ -412,8 +334,7 @@ static void add_twin_item(obs_source_t *twin, obs_sceneitem_t *horizontal_item, 
 			obs_data_set_string(marks, ORIGINAL_KEY,
 					    obs_source_get_uuid(obs_sceneitem_get_source(horizontal_item)));
 			obs_data_release(marks);
-			bool paired = pair != obs_sceneitem_get_source(horizontal_item);
-			auto_frame(item, paired ? NULL : horizontal_item, group);
+			auto_frame(item);
 			bool visible = obs_sceneitem_visible(horizontal_item) &&
 				       (!group || obs_sceneitem_visible(group));
 			obs_sceneitem_set_visible(item, visible);

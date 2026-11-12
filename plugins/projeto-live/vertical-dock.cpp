@@ -22,6 +22,7 @@
  */
 
 #include "vertical-dock.h"
+#include "source-row.hpp"
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
@@ -1255,6 +1256,30 @@ private:
 /* ------------------------------------------------------------------------- */
 /* Painel "Fontes verticais"                                                  */
 
+/* Um item da cena vertical que está sendo mexida, se ele ainda existir (sem referência; usar na hora). */
+obs_sceneitem_t *verticalItemById(qlonglong id)
+{
+	obs_source_t *sceneSource = editingScene();
+	obs_scene_t *scene = obs_scene_from_source(sceneSource);
+	obs_sceneitem_t *item = scene ? obs_scene_find_sceneitem_by_id(scene, id) : nullptr;
+	obs_source_release(sceneSource);
+	return item;
+}
+
+void setVerticalVisible(qlonglong id, bool on)
+{
+	if (obs_sceneitem_t *item = verticalItemById(id)) {
+		obs_sceneitem_set_visible(item, on);
+	}
+}
+
+void setVerticalLocked(qlonglong id, bool on)
+{
+	if (obs_sceneitem_t *item = verticalItemById(id)) {
+		obs_sceneitem_set_locked(item, on);
+	}
+}
+
 class SourcesDock : public QWidget {
 public:
 	explicit SourcesDock(QWidget *parent) : QWidget(parent)
@@ -1262,10 +1287,22 @@ public:
 		auto *layout = new QVBoxLayout(this);
 		layout->setContentsMargins(4, 4, 4, 4);
 
+		/* Em cima: o nome da cena e só dois ícones, "+" e a engrenagem (o resto fica no botão direito). */
+		auto *head = new QHBoxLayout();
 		title = new QLabel(this);
 		title->setWordWrap(true);
 		title->setTextFormat(Qt::RichText);
-		layout->addWidget(title);
+		head->addWidget(title, 1);
+		auto *add =
+			plIconButton(this, "icon-plus", ":/res/images/plus.svg", moduleText("Vertical.Sources.Add"));
+		connect(add, &QToolButton::clicked, this,
+			[this, add]() { addSource(add->mapToGlobal(QPoint(0, add->height()))); });
+		head->addWidget(add);
+		auto *gear = plIconButton(this, "icon-gear", ":/settings/images/settings/general.svg",
+					  moduleText("Vertical.Sources.Properties"));
+		connect(gear, &QToolButton::clicked, this, [this]() { openProperties(); });
+		head->addWidget(gear);
+		layout->addLayout(head);
 
 		list = new QListWidget(this);
 		list->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -1290,21 +1327,6 @@ public:
 		connect(list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) { swap(); });
 		connect(list, &QListWidget::customContextMenuRequested, this,
 			[this](const QPoint &point) { showMenu(list->mapToGlobal(point)); });
-
-		auto *buttons = new QHBoxLayout();
-		auto *add = new QPushButton(QStringLiteral("+"), this);
-		add->setToolTip(moduleText("Vertical.Sources.Add"));
-		auto *remove = new QPushButton(QString::fromUtf8("−"), this);
-		remove->setToolTip(moduleText("Vertical.Sources.Remove"));
-		auto *swapButton = new QPushButton(moduleText("Vertical.Swap.Button"), this);
-		connect(add, &QPushButton::clicked, this,
-			[this, add]() { addSource(add->mapToGlobal(QPoint(0, add->height()))); });
-		connect(remove, &QPushButton::clicked, this, [this]() { removeSource(); });
-		connect(swapButton, &QPushButton::clicked, this, [this]() { swap(); });
-		buttons->addWidget(add);
-		buttons->addWidget(remove);
-		buttons->addWidget(swapButton, 1);
-		layout->addLayout(buttons);
 	}
 
 	~SourcesDock() override { clearRows(); }
@@ -1349,12 +1371,22 @@ public:
 					}
 					obs_source_release(original);
 				}
-				auto *row = new QListWidgetItem(text);
-				if (!obs_sceneitem_visible(item)) {
-					row->setForeground(QColor(128, 128, 128));
-				}
-				row->setData(Qt::UserRole, QVariant((qlonglong)obs_sceneitem_get_id(item)));
+				auto *row = new QListWidgetItem();
+				qlonglong id = (qlonglong)obs_sceneitem_get_id(item);
+				row->setData(Qt::UserRole, QVariant(id));
 				list->addItem(row);
+				/* Nome, olho e cadeado, como no painel Fontes do OBS. */
+				auto onVisible = [id](bool on) {
+					setVerticalVisible(id, on);
+				};
+				auto onLock = [id](bool on) {
+					setVerticalLocked(id, on);
+				};
+				bool shownNow = obs_sceneitem_visible(item);
+				bool lockedNow = obs_sceneitem_locked(item);
+				auto *widget = new PLSourceRow(list, text, shownNow, lockedNow, onVisible, onLock);
+				row->setSizeHint(QSize(0, std::max(widget->sizeHint().height(), 26)));
+				list->setItemWidget(row, widget);
 				Row entry;
 				entry.id = obs_sceneitem_get_id(item);
 				rows.push_back(entry);
@@ -1559,6 +1591,16 @@ public:
 	}
 
 	/* Botão direito: o menu do OBS para a fonte, mais trocar, adicionar e remover só no vertical. */
+	/* A engrenagem: propriedades da fonte escolhida. */
+	void openProperties()
+	{
+		obs_sceneitem_t *item = itemAt(list->currentRow());
+		if (item) {
+			obs_frontend_open_source_properties(obs_sceneitem_get_source(item));
+			obs_sceneitem_release(item);
+		}
+	}
+
 	void showMenu(const QPoint &where)
 	{
 		int row = list->currentRow();

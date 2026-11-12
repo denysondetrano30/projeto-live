@@ -77,6 +77,7 @@
 #include "audio-dock.h"
 #include "camera-dock.h"
 #include "director-dock.h"
+#include "source-row.hpp"
 #include "stats-dock.h"
 #include "vertical-dock.h"
 
@@ -425,10 +426,13 @@ public:
 		bold.setBold(true);
 		title->setFont(bold);
 		head->addWidget(title, 1);
-		addButton = new QPushButton(msg("Studio.AddSource"), this);
-		addButton->setToolTip(msg("Entries.AddSource"));
-		connect(addButton, &QPushButton::clicked, this, [this]() { addSource(); });
+		addButton = plIconButton(this, "icon-plus", ":/res/images/plus.svg", msg("Entries.AddSource"));
+		connect(addButton, &QToolButton::clicked, this, [this]() { addSource(); });
 		head->addWidget(addButton);
+		gearButton = plIconButton(this, "icon-gear", ":/settings/images/settings/general.svg",
+					  msg("Studio.Properties"));
+		connect(gearButton, &QToolButton::clicked, this, [this]() { openProperties(); });
+		head->addWidget(gearButton);
 		layout->addLayout(head);
 
 		/* Duas páginas: as fontes da entrada (horizontal) e as fontes verticais. */
@@ -469,7 +473,6 @@ public:
 		pageLayout->addWidget(list, 1);
 
 		connect(list->model(), &QAbstractItemModel::rowsMoved, this, [this]() { applyOrder(); });
-		connect(list, &QListWidget::itemChanged, this, [this](QListWidgetItem *row) { applyVisible(row); });
 		connect(list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) { openProperties(); });
 		connect(list, &QWidget::customContextMenuRequested, this,
 			[this](const QPoint &pos) { showMenu(list->viewport()->mapToGlobal(pos)); });
@@ -500,9 +503,10 @@ public:
 		signature << name;
 		for (obs_sceneitem_t *item : items) {
 			obs_source_t *src = obs_sceneitem_get_source(item);
-			signature << QString("%1|%2|%3")
+			signature << QString("%1|%2%3|%4")
 					     .arg((qlonglong)obs_sceneitem_get_id(item))
 					     .arg(obs_sceneitem_visible(item) ? "1" : "0")
+					     .arg(obs_sceneitem_locked(item) ? "1" : "0")
 					     .arg(QString::fromUtf8(src ? obs_source_get_name(src) : ""));
 		}
 		if (signature == shown) {
@@ -518,11 +522,23 @@ public:
 		for (auto it = items.rbegin(); it != items.rend(); ++it) {
 			obs_sceneitem_t *item = *it;
 			obs_source_t *src = obs_sceneitem_get_source(item);
-			auto *row = new QListWidgetItem(QString::fromUtf8(src ? obs_source_get_name(src) : ""), list);
-			row->setData(Qt::UserRole, (qlonglong)obs_sceneitem_get_id(item));
-			row->setFlags((row->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsDragEnabled) &
-				      ~Qt::ItemIsDropEnabled);
-			row->setCheckState(obs_sceneitem_visible(item) ? Qt::Checked : Qt::Unchecked);
+			auto *row = new QListWidgetItem(list);
+			qlonglong id = (qlonglong)obs_sceneitem_get_id(item);
+			row->setData(Qt::UserRole, id);
+			row->setFlags((row->flags() | Qt::ItemIsDragEnabled) & ~Qt::ItemIsDropEnabled);
+			/* Nome, olho e cadeado, como no painel Fontes do OBS. */
+			QString name = QString::fromUtf8(src ? obs_source_get_name(src) : "");
+			auto onVisible = [this, id](bool on) {
+				setItemVisible(id, on);
+			};
+			auto onLock = [this, id](bool on) {
+				setItemLocked(id, on);
+			};
+			bool shownNow = obs_sceneitem_visible(item);
+			bool lockedNow = obs_sceneitem_locked(item);
+			auto *widget = new PLSourceRow(list, name, shownNow, lockedNow, onVisible, onLock);
+			row->setSizeHint(QSize(0, std::max(widget->sizeHint().height(), 26)));
+			list->setItemWidget(row, widget);
 			if (row->data(Qt::UserRole).toLongLong() == current) {
 				list->setCurrentItem(row);
 			}
@@ -536,6 +552,7 @@ private:
 	{
 		pages->setCurrentIndex(index);
 		addButton->setVisible(index == 0);
+		gearButton->setVisible(index == 0);
 	}
 
 	/* O item da cena que a linha representa (sem referência; usar na hora). */
@@ -580,10 +597,26 @@ private:
 		shown.clear();
 	}
 
-	void applyVisible(QListWidgetItem *row)
+	obs_sceneitem_t *itemById(qlonglong id) const
 	{
-		if (obs_sceneitem_t *item = itemFor(row)) {
-			obs_sceneitem_set_visible(item, row->checkState() == Qt::Checked);
+		obs_source_t *src = obs_weak_source_get_source(weak);
+		obs_scene_t *scene = obs_scene_from_source(src);
+		obs_sceneitem_t *item = scene ? obs_scene_find_sceneitem_by_id(scene, id) : nullptr;
+		obs_source_release(src);
+		return item;
+	}
+
+	void setItemVisible(qlonglong id, bool on)
+	{
+		if (obs_sceneitem_t *item = itemById(id)) {
+			obs_sceneitem_set_visible(item, on);
+		}
+	}
+
+	void setItemLocked(qlonglong id, bool on)
+	{
+		if (obs_sceneitem_t *item = itemById(id)) {
+			obs_sceneitem_set_locked(item, on);
 		}
 	}
 
@@ -605,16 +638,11 @@ private:
 		QAction *add = menu.addAction(msg("Entries.AddSource"));
 		QAction *properties = nullptr;
 		QAction *filters = nullptr;
-		QAction *up = nullptr;
-		QAction *down = nullptr;
 		QAction *remove = nullptr;
 		if (row) {
 			menu.addSeparator();
 			properties = menu.addAction(msg("Studio.Properties"));
 			filters = menu.addAction(msg("Studio.Filters"));
-			menu.addSeparator();
-			up = menu.addAction(msg("Studio.Up"));
-			down = menu.addAction(msg("Studio.Down"));
 			menu.addSeparator();
 			remove = menu.addAction(msg("Studio.RemoveSource"));
 		}
@@ -635,10 +663,6 @@ private:
 			obs_frontend_open_source_properties(obs_sceneitem_get_source(item));
 		} else if (chosen == filters) {
 			obs_frontend_open_source_filters(obs_sceneitem_get_source(item));
-		} else if (chosen == up) {
-			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_UP);
-		} else if (chosen == down) {
-			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_DOWN);
 		} else if (chosen == remove) {
 			QString text = msg("Studio.RemoveConfirm").arg(row->text());
 			if (QMessageBox::question(this, msg("Studio.RemoveSource"), text) == QMessageBox::Yes) {
@@ -652,7 +676,8 @@ private:
 	}
 
 	obs_weak_source_t *weak = nullptr;
-	QPushButton *addButton = nullptr;
+	QToolButton *addButton = nullptr;
+	QToolButton *gearButton = nullptr;
 	QPushButton *horizontalTab = nullptr;
 	QPushButton *verticalTab = nullptr;
 	QStackedWidget *pages = nullptr;
