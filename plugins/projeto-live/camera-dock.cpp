@@ -18,7 +18,8 @@
  * Botão direito:
  * - no espaço vazio: "Nova entrada" (cria uma cena e abre a janela "Adicionar fonte" do OBS);
  * - numa entrada: "Adicionar fonte" (a janela original do OBS, com todos os tipos de fonte e as que
- *   já existem), tirar fonte, renomear ou remover a entrada.
+ *   já existem), "Organizar fontes" (ordem das camadas, olho, tirar, propriedades e filtros, sem
+ *   precisar do painel Fontes do OBS), renomear ou remover a entrada.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -42,7 +43,6 @@
 #include <QComboBox>
 #include <QContextMenuEvent>
 #include <QDialog>
-#include <QDialogButtonBox>
 #include <QEvent>
 #include <QFont>
 #include <QFrame>
@@ -62,6 +62,8 @@
 #include <QPaintEvent>
 #include <QPlatformSurfaceEvent>
 #include <QPoint>
+#include <QPushButton>
+#include <QAbstractItemModel>
 #include <QPointer>
 #include <QRect>
 #include <QResizeEvent>
@@ -949,36 +951,6 @@ CameraDock *dock = nullptr;
 /* ------------------------------------------------------------------------- */
 /* Botão direito: criar, editar, renomear e remover entradas                  */
 
-/* Uma lista de nomes para marcar (várias ao mesmo tempo). Devolve os escolhidos. */
-QStringList pickNames(const QString &title, const QString &caption, const QStringList &names)
-{
-	QDialog dialog(dock);
-	dialog.setWindowTitle(title);
-	auto *layout = new QVBoxLayout(&dialog);
-
-	auto *label = new QLabel(caption, &dialog);
-	layout->addWidget(label);
-
-	auto *list = new QListWidget(&dialog);
-	list->setSelectionMode(QAbstractItemView::ExtendedSelection);
-	list->addItems(names);
-	layout->addWidget(list);
-
-	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-	QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-	QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-	layout->addWidget(buttons);
-
-	dialog.resize(340, 380);
-	QStringList chosen;
-	if (dialog.exec() == QDialog::Accepted) {
-		for (QListWidgetItem *item : list->selectedItems()) {
-			chosen << item->text();
-		}
-	}
-	return chosen;
-}
-
 /* Abre a janela "Adicionar fonte" original do OBS, já apontada para esta entrada.
  * Essa janela põe a fonte na cena atual do OBS: com o modo estúdio ligado, é a cena da prévia, então
  * a entrada vai para a prévia antes (nada muda no ar). Sem o modo estúdio, a cena atual é a do ar, e
@@ -1012,31 +984,240 @@ void openAddSource(obs_source_t *sceneSource)
 	});
 }
 
-/* Tira fontes desta entrada (a fonte continua no OBS, só sai desta cena). */
-void removeFromEntry(obs_source_t *sceneSource)
-{
-	ItemList items = sceneItems(sceneSource);
-	QStringList names;
-	for (obs_sceneitem_t *item : items) {
-		obs_source_t *src = obs_sceneitem_get_source(item);
-		if (src) {
-			names << QString::fromUtf8(obs_source_get_name(src));
-		}
-	}
-	if (names.isEmpty()) {
-		releaseItems(items);
-		QMessageBox::information(dock, msg("Entries.Remove"), msg("Entries.NoneToRemove"));
-		return;
+/* Janela "Fontes da entrada": a lista das fontes dentro de uma entrada, de cima (frente) para baixo
+ * (fundo), como em qualquer programa de edição. Dá para arrastar ou usar Subir/Descer, ligar e
+ * desligar o olho, tirar da entrada, abrir propriedades e filtros. Clicar numa fonte a seleciona na
+ * prévia, para reposicionar com o mouse. Uma janela só, que troca de entrada. */
+class SourcesWindow : public QDialog {
+public:
+	explicit SourcesWindow(QWidget *parent) : QDialog(parent)
+	{
+		setAttribute(Qt::WA_DeleteOnClose, true);
+		resize(380, 440);
+
+		auto *layout = new QVBoxLayout(this);
+
+		auto *hintLabel = new QLabel(msg("Entries.OrganizeHint"), this);
+		hintLabel->setWordWrap(true);
+		hintLabel->setEnabled(false);
+		layout->addWidget(hintLabel);
+
+		list = new QListWidget(this);
+		list->setDragDropMode(QAbstractItemView::InternalMove);
+		list->setDefaultDropAction(Qt::MoveAction);
+		list->setSelectionMode(QAbstractItemView::SingleSelection);
+		layout->addWidget(list, 1);
+
+		connect(list->model(), &QAbstractItemModel::rowsMoved, this, [this]() { applyOrder(); });
+		connect(list, &QListWidget::itemChanged, this, [this](QListWidgetItem *row) { applyVisible(row); });
+		connect(list, &QListWidget::currentRowChanged, this, [this](int) { selectInPreview(); });
+		connect(list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) { openProperties(); });
+
+		auto *row1 = new QHBoxLayout();
+		row1->addWidget(button(msg("Entries.AddSource"), [this]() {
+			obs_source_t *scene = sceneSource();
+			if (scene) {
+				openAddSource(scene);
+				obs_source_release(scene);
+			}
+		}));
+		row1->addWidget(button(msg("Entries.Up"), [this]() { moveLayer(OBS_ORDER_MOVE_UP); }));
+		row1->addWidget(button(msg("Entries.Down"), [this]() { moveLayer(OBS_ORDER_MOVE_DOWN); }));
+		layout->addLayout(row1);
+
+		auto *row2 = new QHBoxLayout();
+		row2->addWidget(button(msg("Entries.Properties"), [this]() { openProperties(); }));
+		row2->addWidget(button(msg("Entries.Filters"), [this]() { openFilters(); }));
+		row2->addWidget(button(msg("Entries.Remove"), [this]() { removeCurrent(); }));
+		layout->addLayout(row2);
+
+		timer = new QTimer(this);
+		timer->setInterval(400);
+		connect(timer, &QTimer::timeout, this, [this]() { reload(false); });
+		timer->start();
 	}
 
-	QStringList chosen = pickNames(msg("Entries.Remove"), msg("Entries.PickRemove"), names);
-	for (obs_sceneitem_t *item : items) {
-		obs_source_t *src = obs_sceneitem_get_source(item);
-		if (src && chosen.contains(QString::fromUtf8(obs_source_get_name(src)))) {
-			obs_sceneitem_remove(item);
+	~SourcesWindow() override { obs_weak_source_release(weak); }
+
+	void setEntry(obs_source_t *scene)
+	{
+		obs_weak_source_release(weak);
+		weak = obs_source_get_weak_source(scene);
+		setWindowTitle(msg("Entries.OrganizeTitle").arg(QString::fromUtf8(obs_source_get_name(scene))));
+		reload(true);
+	}
+
+private:
+	template<typename F> QPushButton *button(const QString &text, F callback)
+	{
+		auto *b = new QPushButton(text, this);
+		b->setAutoDefault(false);
+		connect(b, &QPushButton::clicked, this, callback);
+		return b;
+	}
+
+	obs_source_t *sceneSource() const { return obs_weak_source_get_source(weak); }
+
+	/* O item da cena que a linha representa (sem referência; usar na hora). */
+	obs_sceneitem_t *itemFor(QListWidgetItem *row) const
+	{
+		if (!row) {
+			return nullptr;
+		}
+		obs_source_t *src = sceneSource();
+		obs_scene_t *scene = obs_scene_from_source(src);
+		obs_sceneitem_t *item =
+			scene ? obs_scene_find_sceneitem_by_id(scene, row->data(Qt::UserRole).toLongLong()) : nullptr;
+		obs_source_release(src);
+		return item;
+	}
+
+	/* Refaz a lista só quando algo mudou na cena (fonte nova, ordem, olho, nome). */
+	void reload(bool force)
+	{
+		obs_source_t *src = sceneSource();
+		if (!src) {
+			close();
+			return;
+		}
+		ItemList items = sceneItems(src);
+		obs_source_release(src);
+
+		QStringList signature;
+		for (obs_sceneitem_t *item : items) {
+			obs_source_t *s = obs_sceneitem_get_source(item);
+			signature << QString("%1|%2|%3")
+					     .arg((qlonglong)obs_sceneitem_get_id(item))
+					     .arg(obs_sceneitem_visible(item) ? "1" : "0")
+					     .arg(QString::fromUtf8(s ? obs_source_get_name(s) : ""));
+		}
+		if (!force && signature == shown) {
+			releaseItems(items);
+			return;
+		}
+		shown = signature;
+
+		qlonglong current = list->currentItem() ? list->currentItem()->data(Qt::UserRole).toLongLong() : -1;
+		QSignalBlocker block(list);
+		list->clear();
+		/* O OBS guarda do fundo para a frente; a lista mostra a frente em cima. */
+		for (auto it = items.rbegin(); it != items.rend(); ++it) {
+			obs_sceneitem_t *item = *it;
+			obs_source_t *s = obs_sceneitem_get_source(item);
+			auto *row = new QListWidgetItem(QString::fromUtf8(s ? obs_source_get_name(s) : ""), list);
+			row->setData(Qt::UserRole, (qlonglong)obs_sceneitem_get_id(item));
+			row->setFlags(row->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsDragEnabled);
+			row->setFlags(row->flags() & ~Qt::ItemIsDropEnabled);
+			row->setCheckState(obs_sceneitem_visible(item) ? Qt::Checked : Qt::Unchecked);
+			if (row->data(Qt::UserRole).toLongLong() == current) {
+				list->setCurrentItem(row);
+			}
+		}
+		releaseItems(items);
+	}
+
+	void applyOrder()
+	{
+		obs_source_t *src = sceneSource();
+		obs_scene_t *scene = obs_scene_from_source(src);
+		if (scene) {
+			std::vector<obs_sceneitem_t *> order;
+			for (int i = list->count() - 1; i >= 0; i--) {
+				obs_sceneitem_t *item = obs_scene_find_sceneitem_by_id(
+					scene, list->item(i)->data(Qt::UserRole).toLongLong());
+				if (item) {
+					order.push_back(item);
+				}
+			}
+			obs_scene_reorder_items(scene, order.data(), order.size());
+		}
+		obs_source_release(src);
+		reload(true);
+	}
+
+	void applyVisible(QListWidgetItem *row)
+	{
+		if (obs_sceneitem_t *item = itemFor(row)) {
+			obs_sceneitem_set_visible(item, row->checkState() == Qt::Checked);
 		}
 	}
-	releaseItems(items);
+
+	void moveLayer(enum obs_order_movement movement)
+	{
+		if (obs_sceneitem_t *item = itemFor(list->currentItem())) {
+			obs_sceneitem_set_order(item, movement);
+			reload(true);
+		}
+	}
+
+	/* Seleciona a fonte na prévia (as alças vermelhas aparecem para mover e redimensionar). */
+	void selectInPreview()
+	{
+		obs_source_t *src = sceneSource();
+		ItemList items = sceneItems(src);
+		obs_source_release(src);
+		obs_sceneitem_t *chosen = itemFor(list->currentItem());
+		for (obs_sceneitem_t *item : items) {
+			obs_sceneitem_select(item, item == chosen);
+		}
+		releaseItems(items);
+	}
+
+	void openProperties()
+	{
+		if (obs_sceneitem_t *item = itemFor(list->currentItem())) {
+			obs_frontend_open_source_properties(obs_sceneitem_get_source(item));
+		}
+	}
+
+	void openFilters()
+	{
+		if (obs_sceneitem_t *item = itemFor(list->currentItem())) {
+			obs_frontend_open_source_filters(obs_sceneitem_get_source(item));
+		}
+	}
+
+	/* Tira da entrada; a fonte continua no OBS e nas outras entradas que a usam. */
+	void removeCurrent()
+	{
+		QListWidgetItem *row = list->currentItem();
+		obs_sceneitem_t *item = itemFor(row);
+		if (!item) {
+			return;
+		}
+		QString text = msg("Entries.RemoveConfirm").arg(row->text());
+		if (QMessageBox::question(this, msg("Entries.Remove"), text) != QMessageBox::Yes) {
+			return;
+		}
+		item = itemFor(row);
+		if (item) {
+			obs_sceneitem_remove(item);
+		}
+		reload(true);
+	}
+
+	obs_weak_source_t *weak = nullptr;
+	QListWidget *list = nullptr;
+	QTimer *timer = nullptr;
+	QStringList shown;
+};
+
+QPointer<SourcesWindow> sourcesWindow;
+
+/* Abre (ou troca) a janela de fontes desta entrada. Com o modo estúdio, a entrada vai para a prévia,
+ * para dar para reposicionar as fontes com o mouse. */
+void organizeEntry(obs_source_t *sceneSource)
+{
+	if (obs_frontend_preview_program_mode_active()) {
+		obs_frontend_set_current_preview_scene(sceneSource);
+	}
+	if (!sourcesWindow) {
+		sourcesWindow = new SourcesWindow(static_cast<QWidget *>(obs_frontend_get_main_window()));
+	}
+	sourcesWindow->setEntry(sceneSource);
+	sourcesWindow->show();
+	sourcesWindow->raise();
+	sourcesWindow->activateWindow();
 }
 
 void renameEntry(obs_source_t *sceneSource)
@@ -1123,7 +1304,7 @@ void showCardMenu(Card *card, const QPoint &where)
 
 	QMenu menu;
 	QAction *addAction = menu.addAction(msg("Entries.AddSource"));
-	QAction *removeAction = menu.addAction(msg("Entries.Remove"));
+	QAction *organizeAction = menu.addAction(msg("Entries.Organize"));
 	menu.addSeparator();
 	QAction *renameAction = menu.addAction(msg("Entries.Rename"));
 	QAction *deleteAction = menu.addAction(msg("Entries.Delete"));
@@ -1131,8 +1312,8 @@ void showCardMenu(Card *card, const QPoint &where)
 	QAction *chosen = menu.exec(where);
 	if (chosen == addAction) {
 		openAddSource(scene);
-	} else if (chosen == removeAction) {
-		removeFromEntry(scene);
+	} else if (chosen == organizeAction) {
+		organizeEntry(scene);
 	} else if (chosen == renameAction) {
 		renameEntry(scene);
 	} else if (chosen == deleteAction) {
