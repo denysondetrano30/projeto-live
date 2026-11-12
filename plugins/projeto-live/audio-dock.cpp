@@ -228,8 +228,8 @@ public:
 		if (!target) {
 			return;
 		}
-		obs_source_set_monitoring_type(target, on ? OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT
-							 : OBS_MONITORING_TYPE_NONE);
+		/* Ligado = ouvir e continuar na saída (nunca só ouvir: isso tiraria o som da live). */
+		obs_source_set_monitoring_enabled(target, on);
 		obs_source_release(target);
 		QSignalBlocker block(phone);
 		phone->setChecked(on);
@@ -249,7 +249,7 @@ public:
 		}
 		{
 			QSignalBlocker block(phone);
-			phone->setChecked(obs_source_get_monitoring_type(target) != OBS_MONITORING_TYPE_NONE);
+			phone->setChecked(obs_source_get_monitoring_enabled(target));
 		}
 		float db = obs_mul_to_db(obs_source_get_volume(target));
 		if (!std::isfinite(db) || db < -95.0f) {
