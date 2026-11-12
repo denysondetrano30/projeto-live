@@ -1,22 +1,24 @@
 /*
- * Projeto Live: painel "Câmeras".
+ * Projeto Live: painel "Entradas".
  *
- * Uma fileira de miniaturas ao vivo, uma por entrada nossa (fonte "Celular" e "Telão (projeção)"),
- * para o operador ver tudo numa tela só — sem precisar do multiview, que tapa o OBS inteiro, nem
- * de um segundo monitor.
+ * Cada entrada é uma cena do OBS. Dentro dela ficam as fontes que a pessoa quiser (câmera, legenda,
+ * letterbox, logo em PNG, vídeo, telão), e a entrada mostra a cena inteira. Uma fonte que está em
+ * duas cenas é a mesma fonte (o OBS não duplica), por isso o botão direito reaproveita o que já
+ * existe no OBS.
  *
  * Cada miniatura mostra:
- * - a imagem ao vivo (uma tela do OBS por miniatura, igual à janela de vídeo do vertical);
- * - a moldura: vermelha no ar, verde na prévia, amarela quando a imagem travou, cinza no resto;
- * - o nome, o atraso medido daquela câmera e uma barrinha com o som que vem dela;
- * - a bolinha de sinal: verde recebendo, amarela travada, vermelha sem imagem.
+ * - a cena ao vivo (uma tela do OBS por miniatura, igual à janela de vídeo do vertical);
+ * - a moldura: vermelha no ar, verde na prévia, amarela quando a câmera dentro dela travou,
+ *   vermelha escura sem sinal, cinza no resto;
+ * - o nome, o atraso da câmera (se a entrada tiver uma) e uma barrinha com o som da entrada;
+ * - a bolinha de sinal.
  *
- * A moldura amarela é o aviso de câmera caída (a "câmera de reserva" com corte automático foi
- * descartada em 11/11: cortar sozinho no meio do culto é pior que a imagem travar).
+ * Um clique manda a entrada para a prévia e dois cliques cortam para o ar.
  *
- * Um clique manda a câmera para a prévia e dois cliques cortam para o ar. Como no OBS quem entra no
- * ar é uma cena (não uma fonte), o painel usa a primeira cena que contém aquela câmera; sem nenhuma
- * cena, o clique não faz nada e a miniatura explica o motivo.
+ * Botão direito:
+ * - no espaço vazio: "Nova entrada" (cria uma cena e abre o menu para pôr fontes nela);
+ * - numa entrada: adicionar uma fonte que já existe, criar uma fonte nova (imagem, vídeo, legenda,
+ *   telão), tirar fonte, renomear ou remover a entrada.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -34,27 +36,41 @@
 
 #include <util/platform.h>
 
+#include <QAbstractItemView>
+#include <QAction>
 #include <QColor>
 #include <QComboBox>
+#include <QContextMenuEvent>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QEvent>
-#include <QList>
-#include <QMargins>
-#include <QPainter>
-#include <QPoint>
-#include <QRect>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFont>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLayout>
+#include <QLineEdit>
+#include <QList>
+#include <QListWidget>
+#include <QListWidgetItem>
+#include <QMargins>
+#include <QMenu>
+#include <QMessageBox>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QPaintEvent>
 #include <QPlatformSurfaceEvent>
+#include <QPoint>
+#include <QRect>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSize>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -73,6 +89,9 @@
 namespace {
 
 const char *const MIRROR_SOURCE_ID = "projeto_live_mirror";
+const char *const CAPTION_SOURCE_ID = "projeto_live_caption";
+const char *const IMAGE_SOURCE_ID = "image_source";
+const char *const VIDEO_SOURCE_ID = "ffmpeg_source";
 const char *const SIZE_FILE = "cameras.json";
 
 const float SILENCE_DB = -60.0f;
@@ -84,7 +103,16 @@ enum class Tally { Off, Preview, Program };
 
 enum class Signal { None, Stalled, Live };
 
-/* Barrinha com o som que vem daquela câmera. */
+/* Tipos de fonte nova que o botão direito sabe criar. */
+enum class NewKind { Image, Video, Caption, Mirror };
+
+/* Texto do módulo (pt-BR ou en-US, conforme o OBS). */
+QString msg(const char *key)
+{
+	return QString::fromUtf8(obs_module_text(key));
+}
+
+/* Barrinha com o som que vem daquela entrada. */
 class Level : public QWidget {
 public:
 	explicit Level(QWidget *parent) : QWidget(parent) { setFixedHeight(3); }
@@ -191,8 +219,77 @@ private:
 };
 
 /* ------------------------------------------------------------------------- */
+/* Fontes dentro de uma cena                                                 */
+
+using ItemList = std::vector<obs_sceneitem_t *>;
+
+/* Os itens de uma cena, cada um com referência. Quem chama solta com releaseItems. */
+ItemList sceneItems(obs_source_t *sceneSource)
+{
+	ItemList items;
+	obs_scene_t *scene = obs_scene_from_source(sceneSource);
+	if (scene) {
+		obs_scene_enum_items(
+			scene,
+			[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
+				auto *list = static_cast<ItemList *>(param);
+				obs_sceneitem_addref(item);
+				list->push_back(item);
+				return true;
+			},
+			&items);
+	}
+	return items;
+}
+
+void releaseItems(ItemList &items)
+{
+	for (obs_sceneitem_t *item : items) {
+		obs_sceneitem_release(item);
+	}
+	items.clear();
+}
+
+/* A primeira câmera ("Celular") dentro desta cena, com referência; nulo se não houver. */
+obs_source_t *firstPhone(const ItemList &items)
+{
+	for (obs_sceneitem_t *item : items) {
+		obs_source_t *src = obs_sceneitem_get_source(item);
+		if (src && pl_phone_is_source(src)) {
+			return obs_source_get_ref(src);
+		}
+	}
+	return nullptr;
+}
+
+/* Nome que ainda não existe no OBS: "Palco", "Palco 2", "Palco 3"... */
+QString freeName(const QString &base)
+{
+	QString name = base;
+	for (int n = 2;; n++) {
+		obs_source_t *taken = obs_get_source_by_name(name.toUtf8().constData());
+		if (!taken) {
+			return name;
+		}
+		obs_source_release(taken);
+		name = QString("%1 %2").arg(base).arg(n);
+	}
+}
+
+bool nameTaken(const QString &name)
+{
+	obs_source_t *taken = obs_get_source_by_name(name.toUtf8().constData());
+	obs_source_release(taken);
+	return taken != nullptr;
+}
+
+/* ------------------------------------------------------------------------- */
 
 class Card;
+
+/* Decide o que o botão direito de uma entrada (ou do espaço vazio) mostra. */
+void showCardMenu(Card *card, const QPoint &where);
+void showEmptyMenu(const QPoint &where);
 
 /* A imagem ao vivo de uma miniatura: uma tela do OBS, como a janela de vídeo do vertical. */
 class Thumb : public QWidget {
@@ -207,6 +304,7 @@ protected:
 	void resizeEvent(QResizeEvent *event) override;
 	void mousePressEvent(QMouseEvent *event) override;
 	void mouseDoubleClickEvent(QMouseEvent *event) override;
+	void contextMenuEvent(QContextMenuEvent *event) override;
 	bool eventFilter(QObject *object, QEvent *event) override;
 
 private:
@@ -229,23 +327,23 @@ private:
 
 /* ------------------------------------------------------------------------- */
 
-/* Uma miniatura inteira: imagem, moldura, nome, atraso e barrinha de som. */
+/* Uma miniatura inteira (uma entrada = uma cena): imagem, moldura, nome, atraso e barrinha. */
 class Card : public QFrame {
 public:
-	Card(QWidget *parent, obs_source_t *source) : QFrame(parent)
+	Card(QWidget *parent, obs_source_t *scene) : QFrame(parent)
 	{
-		weak = obs_source_get_weak_source(source);
-		phone = pl_phone_is_source(source);
+		weak = obs_source_get_weak_source(scene);
 
 		setObjectName("plCard");
 		setFrameShape(QFrame::NoFrame);
 		setCursor(Qt::PointingHandCursor);
+		setToolTip(msg("Cameras.Hint"));
 
 		auto *layout = new QVBoxLayout(this);
 		layout->setContentsMargins(3, 3, 3, 3);
 		layout->setSpacing(4);
 
-		thumb = new Thumb(this, source);
+		thumb = new Thumb(this, scene);
 		layout->addWidget(thumb);
 
 		auto *row = new QHBoxLayout();
@@ -286,6 +384,7 @@ public:
 		obs_weak_source_release(weak);
 	}
 
+	/* A cena desta entrada, com referência (quem chama solta). */
 	obs_source_t *source() const { return obs_weak_source_get_source(weak); }
 
 	bool isSource(obs_source_t *other) const
@@ -303,11 +402,10 @@ public:
 		setFixedWidth(cardWidth + 6);
 	}
 
-	/* Um clique: manda para a prévia (ou para o ar, se o modo estúdio estiver desligado e a
-	 * pessoa der dois cliques). */
+	/* Um clique: manda para a prévia (só funciona com o modo estúdio ligado). */
 	void sendToPreview()
 	{
-		obs_source_t *scene = firstScene();
+		obs_source_t *scene = source();
 		if (!scene) {
 			return;
 		}
@@ -317,9 +415,10 @@ public:
 		obs_source_release(scene);
 	}
 
+	/* Dois cliques: corta para o ar. */
 	void sendToProgram()
 	{
-		obs_source_t *scene = firstScene();
+		obs_source_t *scene = source();
 		if (!scene) {
 			return;
 		}
@@ -327,8 +426,8 @@ public:
 		obs_source_release(scene);
 	}
 
-	/* Chamado pelo relógio do painel; `deep` = também procurar a cena desta câmera. */
-	void refresh(bool deep)
+	/* Chamado pelo relógio do painel. */
+	void refresh()
 	{
 		obs_source_t *src = source();
 		if (!src) {
@@ -344,11 +443,16 @@ public:
 			tally = Tally::Preview;
 		}
 
+		ItemList items = sceneItems(src);
+		bool blank = items.empty();
+		obs_source_t *cam = firstPhone(items);
+		releaseItems(items);
+
 		Signal signal = Signal::Live;
 		QString info;
-		if (phone) {
+		if (cam) {
 			struct pl_phone_status status;
-			if (pl_phone_get_status(src, &status)) {
+			if (pl_phone_get_status(cam, &status)) {
 				if (status.stalled_ms < 0) {
 					signal = Signal::None;
 				} else if (status.stalled_ms >= PL_PHONE_STALL_MS) {
@@ -357,38 +461,32 @@ public:
 				if (signal == Signal::Live && status.latency_ms >= 0) {
 					info = QString::number(status.latency_ms / 1000.0, 'f', 2) + " s";
 				} else if (signal == Signal::Stalled) {
-					info = QString::fromUtf8(obs_module_text("Cameras.Stalled"));
+					info = msg("Cameras.Stalled");
 				} else {
-					info = QString::fromUtf8(obs_module_text("Cameras.NoSignal"));
+					info = msg("Cameras.NoSignal");
 				}
 				if (signal == Signal::Live && status.usb) {
-					info = QString::fromUtf8(obs_module_text("Cameras.Cable"));
+					info = msg("Cameras.Cable");
 				}
 			}
-		} else {
-			/* Telão da projeção: tem imagem se a fonte tem tamanho. */
-			if (!obs_source_get_width(src)) {
-				signal = Signal::None;
-				info = QString::fromUtf8(obs_module_text("Cameras.NoSignal"));
-			}
+			obs_source_release(cam);
+		} else if (blank) {
+			signal = Signal::None;
+			info = msg("Entries.Blank");
 		}
 
 		detail->setText(info);
 		applyColors(tally, signal);
 		updateLevel(src);
 
-		if (deep) {
-			obs_source_t *scene = firstScene();
-			bool found = scene != nullptr;
-			obs_source_release(scene);
-			if (found != sceneFound || toolTip().isEmpty()) {
-				sceneFound = found;
-				setToolTip(
-					QString::fromUtf8(obs_module_text(found ? "Cameras.Hint" : "Cameras.NoScene")));
-			}
-		}
-
 		obs_source_release(src);
+	}
+
+protected:
+	void contextMenuEvent(QContextMenuEvent *event) override
+	{
+		showCardMenu(this, event->globalPos());
+		event->accept();
 	}
 
 private:
@@ -478,49 +576,7 @@ private:
 		}
 	}
 
-	/* A primeira cena (na ordem da lista do OBS) que usa esta câmera. */
-	obs_source_t *firstScene()
-	{
-		obs_source_t *src = source();
-		if (!src) {
-			return nullptr;
-		}
-		struct obs_frontend_source_list scenes = {};
-		obs_frontend_get_scenes(&scenes);
-		obs_source_t *found = nullptr;
-		for (size_t i = 0; i < scenes.sources.num && !found; i++) {
-			obs_source_t *sceneSource = scenes.sources.array[i];
-			obs_scene_t *scene = obs_scene_from_source(sceneSource);
-			if (!scene) {
-				continue;
-			}
-			struct Search {
-				obs_source_t *wanted;
-				bool found;
-			} search = {src, false};
-			obs_scene_enum_items(
-				scene,
-				[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
-					auto *s = static_cast<Search *>(param);
-					if (obs_sceneitem_get_source(item) == s->wanted) {
-						s->found = true;
-						return false;
-					}
-					return true;
-				},
-				&search);
-			if (search.found) {
-				found = obs_source_get_ref(sceneSource);
-			}
-		}
-		obs_frontend_source_list_free(&scenes);
-		obs_source_release(src);
-		return found;
-	}
-
 	obs_weak_source_t *weak = nullptr;
-	bool phone = false;
-	bool sceneFound = false;
 	std::string shownBorder;
 	std::string shownBadge;
 	std::string shownDot;
@@ -606,6 +662,14 @@ void Thumb::mouseDoubleClickEvent(QMouseEvent *event)
 	QWidget::mouseDoubleClickEvent(event);
 }
 
+void Thumb::contextMenuEvent(QContextMenuEvent *event)
+{
+	if (card) {
+		showCardMenu(card, event->globalPos());
+	}
+	event->accept();
+}
+
 bool Thumb::eventFilter(QObject *object, QEvent *event)
 {
 	/* A janela nativa vai ser trocada (painel solto ou preso de novo): solta a tela antes. */
@@ -632,7 +696,7 @@ void Thumb::draw(void *data, uint32_t cx, uint32_t cy)
 		return;
 	}
 
-	/* Encaixa a imagem inteira na miniatura, sem deformar. */
+	/* Encaixa a cena inteira na miniatura, sem deformar. */
 	float scale = std::min((float)cx / (float)sw, (float)cy / (float)sh);
 	int w = std::max((int)std::lround(sw * scale), 1);
 	int h = std::max((int)std::lround(sh * scale), 1);
@@ -711,14 +775,14 @@ public:
 		top->setContentsMargins(0, 0, 0, 0);
 		top->setSpacing(6);
 
-		hint = new QLabel(QString::fromUtf8(obs_module_text("Cameras.Hint")), this);
+		hint = new QLabel(msg("Cameras.Hint"), this);
 		hint->setEnabled(false);
 		top->addWidget(hint, 1);
 
 		sizeBox = new QComboBox(this);
-		sizeBox->addItem(QString::fromUtf8(obs_module_text("Cameras.Size.Small")));
-		sizeBox->addItem(QString::fromUtf8(obs_module_text("Cameras.Size.Medium")));
-		sizeBox->addItem(QString::fromUtf8(obs_module_text("Cameras.Size.Large")));
+		sizeBox->addItem(msg("Cameras.Size.Small"));
+		sizeBox->addItem(msg("Cameras.Size.Medium"));
+		sizeBox->addItem(msg("Cameras.Size.Large"));
 		sizeBox->setCurrentIndex(loadSize());
 		connect(sizeBox, &QComboBox::currentIndexChanged, this, [this](int index) {
 			for (Card *card : cards) {
@@ -730,15 +794,21 @@ public:
 
 		outer->addLayout(top);
 
-		empty = new QLabel(QString::fromUtf8(obs_module_text("Cameras.Empty")), this);
+		/* Sem entradas, o aviso também aceita o botão direito (é daqui que se cria a primeira). */
+		empty = new QLabel(msg("Cameras.Empty"), this);
 		empty->setWordWrap(true);
-		empty->setEnabled(false);
+		empty->setContextMenuPolicy(Qt::CustomContextMenu);
+		connect(empty, &QWidget::customContextMenuRequested, this,
+			[this](const QPoint &pos) { showEmptyMenu(empty->mapToGlobal(pos)); });
 		outer->addWidget(empty);
 
 		area = new QScrollArea(this);
 		area->setWidgetResizable(true);
 		area->setFrameShape(QFrame::NoFrame);
 		holder = new QWidget(area);
+		holder->setContextMenuPolicy(Qt::CustomContextMenu);
+		connect(holder, &QWidget::customContextMenuRequested, this,
+			[this](const QPoint &pos) { showEmptyMenu(holder->mapToGlobal(pos)); });
 		flow = new FlowLayout(holder);
 		area->setWidget(holder);
 		outer->addWidget(area, 1);
@@ -751,7 +821,7 @@ public:
 				rebuild();
 			}
 			for (Card *card : cards) {
-				card->refresh(deep);
+				card->refresh();
 			}
 		});
 		timer->start();
@@ -759,65 +829,43 @@ public:
 		rebuild();
 	}
 
-private:
-	/* Câmeras na frente, depois o telão, depois as outras entradas. */
-	static int sourceRank(obs_source_t *source)
+	/* Refaz a lista agora (depois de criar ou remover uma entrada). */
+	void rebuildNow() { rebuild(); }
+
+	/* A miniatura desta cena, se ela já existir no painel. */
+	Card *cardFor(obs_source_t *scene) const
 	{
-		if (pl_phone_is_source(source)) {
-			return 0;
+		for (Card *card : cards) {
+			if (card->isSource(scene)) {
+				return card;
+			}
 		}
-		const char *id = obs_source_get_id(source);
-		return id && strcmp(id, MIRROR_SOURCE_ID) == 0 ? 1 : 2;
+		return nullptr;
 	}
 
-	/* Procura as entradas e cria ou tira miniaturas. */
+private:
+	/* Uma miniatura por cena do OBS, na mesma ordem da lista de cenas. */
 	void rebuild()
 	{
-		struct Found {
-			std::vector<obs_source_t *> sources;
-		} found;
+		std::vector<obs_source_t *> found;
+		struct obs_frontend_source_list scenes = {};
+		obs_frontend_get_scenes(&scenes);
+		for (size_t i = 0; i < scenes.sources.num; i++) {
+			found.push_back(obs_source_get_ref(scenes.sources.array[i]));
+		}
+		obs_frontend_source_list_free(&scenes);
 
-		/* Tudo o que entra imagem no OBS é uma entrada: as câmeras, o telão, um vídeo, uma
-		 * imagem de aviso, uma captura de tela. Sem isso, a pessoa não consegue ver nem mandar
-		 * para a prévia o que está nas outras cenas. */
-		obs_enum_sources(
-			[](void *param, obs_source_t *source) {
-				if (obs_source_get_type(source) != OBS_SOURCE_TYPE_INPUT) {
-					return true;
-				}
-				if ((obs_source_get_output_flags(source) & OBS_SOURCE_VIDEO) == 0) {
-					return true;
-				}
-				/* Segura a fonte: os ponteiros do obs_enum_sources só valem dentro
-				 * desta função. */
-				static_cast<Found *>(param)->sources.push_back(obs_source_get_ref(source));
-				return true;
-			},
-			&found);
-
-		/* Ordem: primeiro as câmeras, depois o telão, depois o resto pelo nome. */
-		std::sort(found.sources.begin(), found.sources.end(), [](obs_source_t *a, obs_source_t *b) {
-			int rankA = sourceRank(a);
-			int rankB = sourceRank(b);
-			if (rankA != rankB) {
-				return rankA < rankB;
-			}
-			const char *nameA = obs_source_get_name(a);
-			const char *nameB = obs_source_get_name(b);
-			return strcmp(nameA ? nameA : "", nameB ? nameB : "") < 0;
-		});
-
-		/* Tira as que não existem mais. */
+		/* Tira as cenas que não existem mais. */
 		for (int i = (int)cards.size() - 1; i >= 0; i--) {
+			Card *card = cards[(size_t)i];
 			bool keep = false;
-			for (obs_source_t *source : found.sources) {
-				if (cards[(size_t)i]->isSource(source)) {
+			for (obs_source_t *scene : found) {
+				if (card->isSource(scene)) {
 					keep = true;
 					break;
 				}
 			}
 			if (!keep) {
-				Card *card = cards[(size_t)i];
 				cards.erase(cards.begin() + i);
 				card->releaseMeter();
 				flow->removeWidget(card);
@@ -825,33 +873,23 @@ private:
 			}
 		}
 
-		/* Põe as novas, na ordem em que o OBS as devolveu. */
-		for (obs_source_t *source : found.sources) {
-			bool known = false;
-			for (Card *card : cards) {
-				if (card->isSource(source)) {
-					known = true;
-					break;
-				}
-			}
-			if (known) {
+		/* Põe as cenas novas. */
+		for (obs_source_t *scene : found) {
+			if (cardFor(scene)) {
 				continue;
 			}
-			auto *card = new Card(holder, source);
+			auto *card = new Card(holder, scene);
 			card->setSize(sizeBox->currentIndex());
 			flow->addWidget(card);
 			cards.push_back(card);
 		}
 
-		/* Põe as miniaturas na ordem acima. */
+		/* Põe as miniaturas na ordem da lista de cenas do OBS. */
 		std::vector<Card *> ordered;
 		ordered.reserve(cards.size());
-		for (obs_source_t *source : found.sources) {
-			for (Card *card : cards) {
-				if (card->isSource(source)) {
-					ordered.push_back(card);
-					break;
-				}
+		for (obs_source_t *scene : found) {
+			if (Card *card = cardFor(scene)) {
+				ordered.push_back(card);
 			}
 		}
 		if (ordered.size() == cards.size() && ordered != cards) {
@@ -864,12 +902,11 @@ private:
 			cards = ordered;
 		}
 
-		for (obs_source_t *source : found.sources) {
-			obs_source_release(source);
+		for (obs_source_t *scene : found) {
+			obs_source_release(scene);
 		}
 
 		empty->setVisible(cards.empty());
-		area->setVisible(!cards.empty());
 		hint->setVisible(!cards.empty());
 	}
 
@@ -916,6 +953,292 @@ private:
 };
 
 CameraDock *dock = nullptr;
+
+/* ------------------------------------------------------------------------- */
+/* Botão direito: criar, editar, renomear e remover entradas                  */
+
+/* Uma lista de nomes para marcar (várias ao mesmo tempo). Devolve os escolhidos. */
+QStringList pickNames(const QString &title, const QString &caption, const QStringList &names)
+{
+	QDialog dialog(dock);
+	dialog.setWindowTitle(title);
+	auto *layout = new QVBoxLayout(&dialog);
+
+	auto *label = new QLabel(caption, &dialog);
+	layout->addWidget(label);
+
+	auto *list = new QListWidget(&dialog);
+	list->setSelectionMode(QAbstractItemView::ExtendedSelection);
+	list->addItems(names);
+	layout->addWidget(list);
+
+	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+	QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+	QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+	layout->addWidget(buttons);
+
+	dialog.resize(340, 380);
+	QStringList chosen;
+	if (dialog.exec() == QDialog::Accepted) {
+		for (QListWidgetItem *item : list->selectedItems()) {
+			chosen << item->text();
+		}
+	}
+	return chosen;
+}
+
+/* Nomes das fontes de imagem que já existem no OBS (as que podem entrar numa cena). */
+QStringList videoInputNames()
+{
+	QStringList names;
+	obs_enum_sources(
+		[](void *param, obs_source_t *source) {
+			auto *list = static_cast<QStringList *>(param);
+			if (obs_source_get_type(source) == OBS_SOURCE_TYPE_INPUT &&
+			    (obs_source_get_output_flags(source) & OBS_SOURCE_VIDEO)) {
+				list->append(QString::fromUtf8(obs_source_get_name(source)));
+			}
+			return true;
+		},
+		&names);
+	names.sort(Qt::CaseInsensitive);
+	return names;
+}
+
+/* Nomes das fontes que já estão dentro da cena. */
+QStringList sceneNames(obs_source_t *sceneSource)
+{
+	QStringList names;
+	ItemList items = sceneItems(sceneSource);
+	for (obs_sceneitem_t *item : items) {
+		obs_source_t *src = obs_sceneitem_get_source(item);
+		if (src) {
+			names << QString::fromUtf8(obs_source_get_name(src));
+		}
+	}
+	releaseItems(items);
+	return names;
+}
+
+/* Reaproveita uma fonte que já existe no OBS: ela passa a estar nesta cena também. */
+void addExisting(obs_source_t *sceneSource)
+{
+	QStringList inScene = sceneNames(sceneSource);
+	QStringList available;
+	for (const QString &name : videoInputNames()) {
+		if (!inScene.contains(name)) {
+			available << name;
+		}
+	}
+	if (available.isEmpty()) {
+		QMessageBox::information(dock, msg("Entries.AddExisting"), msg("Entries.NoneToAdd"));
+		return;
+	}
+
+	QStringList chosen = pickNames(msg("Entries.AddExisting"), msg("Entries.PickAdd"), available);
+	obs_scene_t *scene = obs_scene_from_source(sceneSource);
+	for (const QString &name : chosen) {
+		obs_source_t *src = obs_get_source_by_name(name.toUtf8().constData());
+		if (src && scene) {
+			obs_scene_add(scene, src);
+		}
+		obs_source_release(src);
+	}
+}
+
+/* Cria uma fonte nova e a põe nesta cena. Imagem e vídeo pedem o arquivo. */
+void addNew(obs_source_t *sceneSource, NewKind kind)
+{
+	obs_scene_t *scene = obs_scene_from_source(sceneSource);
+	if (!scene) {
+		return;
+	}
+
+	const char *id = nullptr;
+	QString base;
+	obs_data_t *settings = obs_data_create();
+
+	if (kind == NewKind::Image || kind == NewKind::Video) {
+		bool image = kind == NewKind::Image;
+		QString file = QFileDialog::getOpenFileName(dock,
+							    msg(image ? "Entries.ImageFile" : "Entries.VideoFile"),
+							    QString(),
+							    msg(image ? "Entries.ImageFilter" : "Entries.VideoFilter"));
+		if (file.isEmpty()) {
+			obs_data_release(settings);
+			return;
+		}
+		base = QFileInfo(file).completeBaseName();
+		if (image) {
+			id = IMAGE_SOURCE_ID;
+			obs_data_set_string(settings, "file", file.toUtf8().constData());
+		} else {
+			id = VIDEO_SOURCE_ID;
+			obs_data_set_bool(settings, "is_local_file", true);
+			obs_data_set_string(settings, "local_file", file.toUtf8().constData());
+		}
+	} else if (kind == NewKind::Caption) {
+		id = CAPTION_SOURCE_ID;
+		base = msg("Entries.Kind.Caption");
+	} else {
+		id = MIRROR_SOURCE_ID;
+		base = msg("Entries.Kind.Mirror");
+	}
+
+	obs_source_t *src = obs_source_create(id, freeName(base).toUtf8().constData(), settings, nullptr);
+	obs_data_release(settings);
+	if (src) {
+		obs_scene_add(scene, src);
+		obs_source_release(src);
+	}
+}
+
+/* Tira fontes desta entrada (a fonte continua no OBS, só sai desta cena). */
+void removeFromEntry(obs_source_t *sceneSource)
+{
+	ItemList items = sceneItems(sceneSource);
+	QStringList names;
+	for (obs_sceneitem_t *item : items) {
+		obs_source_t *src = obs_sceneitem_get_source(item);
+		if (src) {
+			names << QString::fromUtf8(obs_source_get_name(src));
+		}
+	}
+	if (names.isEmpty()) {
+		releaseItems(items);
+		QMessageBox::information(dock, msg("Entries.Remove"), msg("Entries.NoneToRemove"));
+		return;
+	}
+
+	QStringList chosen = pickNames(msg("Entries.Remove"), msg("Entries.PickRemove"), names);
+	for (obs_sceneitem_t *item : items) {
+		obs_source_t *src = obs_sceneitem_get_source(item);
+		if (src && chosen.contains(QString::fromUtf8(obs_source_get_name(src)))) {
+			obs_sceneitem_remove(item);
+		}
+	}
+	releaseItems(items);
+}
+
+void renameEntry(obs_source_t *sceneSource)
+{
+	QString current = QString::fromUtf8(obs_source_get_name(sceneSource));
+	bool ok = false;
+	QString text = QInputDialog::getText(dock, msg("Entries.Rename"), msg("Entries.RenamePrompt"),
+					     QLineEdit::Normal, current, &ok)
+			       .trimmed();
+	if (!ok || text.isEmpty() || text == current) {
+		return;
+	}
+	if (nameTaken(text)) {
+		QMessageBox::warning(dock, msg("Entries.Rename"), msg("Entries.NameTaken"));
+		return;
+	}
+	obs_source_set_name(sceneSource, text.toUtf8().constData());
+}
+
+void deleteEntry(obs_source_t *sceneSource)
+{
+	/* Não tira a cena que está no ar ou na prévia: senão a saída fica sem cena. */
+	obs_source_t *program = obs_frontend_get_current_scene();
+	obs_source_t *preview = obs_frontend_get_current_preview_scene();
+	bool busy = sceneSource == program || sceneSource == preview;
+	obs_source_release(program);
+	obs_source_release(preview);
+	if (busy) {
+		QMessageBox::information(dock, msg("Entries.DeleteTitle"), msg("Entries.Busy"));
+		return;
+	}
+
+	QString text = msg("Entries.DeleteConfirm").arg(QString::fromUtf8(obs_source_get_name(sceneSource)));
+	if (QMessageBox::question(dock, msg("Entries.DeleteTitle"), text) != QMessageBox::Yes) {
+		return;
+	}
+	obs_source_remove(sceneSource);
+}
+
+/* Cria uma cena nova (entrada). Depois abre o menu dela, para pôr as fontes. */
+void newEntry(const QPoint &where)
+{
+	bool ok = false;
+	QString text = QInputDialog::getText(dock, msg("Entries.NewTitle"), msg("Entries.NewPrompt"), QLineEdit::Normal,
+					     freeName(msg("Entries.DefaultName")), &ok)
+			       .trimmed();
+	if (!ok || text.isEmpty()) {
+		return;
+	}
+	if (nameTaken(text)) {
+		QMessageBox::warning(dock, msg("Entries.NewTitle"), msg("Entries.NameTaken"));
+		return;
+	}
+
+	obs_scene_t *scene = obs_scene_create(text.toUtf8().constData());
+	if (!scene) {
+		return;
+	}
+	obs_source_t *sceneSource = obs_scene_get_source(scene);
+	dock->rebuildNow();
+	if (Card *card = dock->cardFor(sceneSource)) {
+		showCardMenu(card, where);
+	}
+	obs_scene_release(scene);
+}
+
+void showEmptyMenu(const QPoint &where)
+{
+	if (!dock) {
+		return;
+	}
+	QMenu menu;
+	QAction *create = menu.addAction(msg("Entries.New"));
+	if (menu.exec(where) == create) {
+		newEntry(where);
+	}
+}
+
+void showCardMenu(Card *card, const QPoint &where)
+{
+	/* Segura a cena enquanto o menu está aberto: a miniatura pode ser refeita no meio. */
+	obs_source_t *scene = card->source();
+	if (!scene) {
+		return;
+	}
+
+	QMenu menu;
+	QAction *addExistingAction = menu.addAction(msg("Entries.AddExisting"));
+
+	QMenu *addNewMenu = menu.addMenu(msg("Entries.AddNew"));
+	QAction *newImage = addNewMenu->addAction(msg("Entries.Kind.Image"));
+	QAction *newVideo = addNewMenu->addAction(msg("Entries.Kind.Video"));
+	QAction *newCaption = addNewMenu->addAction(msg("Entries.Kind.Caption"));
+	QAction *newMirror = addNewMenu->addAction(msg("Entries.Kind.Mirror"));
+
+	QAction *removeAction = menu.addAction(msg("Entries.Remove"));
+	menu.addSeparator();
+	QAction *renameAction = menu.addAction(msg("Entries.Rename"));
+	QAction *deleteAction = menu.addAction(msg("Entries.Delete"));
+
+	QAction *chosen = menu.exec(where);
+	if (chosen == addExistingAction) {
+		addExisting(scene);
+	} else if (chosen == newImage) {
+		addNew(scene, NewKind::Image);
+	} else if (chosen == newVideo) {
+		addNew(scene, NewKind::Video);
+	} else if (chosen == newCaption) {
+		addNew(scene, NewKind::Caption);
+	} else if (chosen == newMirror) {
+		addNew(scene, NewKind::Mirror);
+	} else if (chosen == removeAction) {
+		removeFromEntry(scene);
+	} else if (chosen == renameAction) {
+		renameEntry(scene);
+	} else if (chosen == deleteAction) {
+		deleteEntry(scene);
+	}
+
+	obs_source_release(scene);
+}
 
 } // namespace
 
