@@ -57,6 +57,8 @@ target_sources(
     stats-dock.cpp
     stats-dock.h
     stream-dock.cpp
+    studio-window.cpp
+    studio-window.h
     stream-dock.h
     usb-relay.c
     usb-relay.h

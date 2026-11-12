@@ -40,8 +40,14 @@
 #include "phone-video.h"
 #include "pl-sync.h"
 #include "projection-link.h"
+#include "studio-window.h"
 
 namespace {
+
+void openLive(QWidget *)
+{
+	pl_studio_window_enter_live();
+}
 
 /* Um item da faixa: a bolinha colorida e o texto. */
 class Item : public QWidget {
@@ -109,6 +115,7 @@ public:
 		line->setContentsMargins(0, 0, 8, 0);
 		line->setSpacing(6);
 		line->addWidget(area, 1);
+		line->addWidget(button(obs_module_text("Studio.ToLive"), openLive));
 		line->addWidget(button(obs_module_text("Layout.Panels"), [](QWidget *from) {
 			pl_layout_show_panels_menu(from);
 		}));

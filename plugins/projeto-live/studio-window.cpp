@@ -1,0 +1,626 @@
+/*
+ * Projeto Live: a janela própria do Projeto Live.
+ *
+ * Dois modos, um clique:
+ * - modo Projeto Live: esta janela, com a cara do produto (Prévia e Programa lado a lado, CORTAR e
+ *   Transição no meio, Entradas embaixo). A janela do OBS fica escondida;
+ * - modo OBS: a janela original do OBS, como sempre foi. Esta fica escondida.
+ *
+ * O OBS lembra o último modo usado (modo.json) e abre nele.
+ *
+ * Prévia e Programa são desenhados aqui mesmo (o OBS deixa desenhar uma cena em qualquer janela):
+ * a Prévia desenha a cena da prévia; o Programa desenha a saída do OBS, a mesma que vai para a live,
+ * com a transição no meio.
+ *
+ * O modo Projeto Live liga o modo estúdio do OBS (prévia antes de cortar).
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 2 of the License, or
+ * (at your option) any later version.
+ */
+
+#include "studio-window.h"
+
+#include <obs-frontend-api.h>
+#include <obs-module.h>
+#if !defined(_WIN32) && !defined(__APPLE__)
+#include <obs-nix-platform.h>
+#endif
+
+#include <util/platform.h>
+
+#include <QCloseEvent>
+#include <QEvent>
+#include <QFont>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QHideEvent>
+#include <QLabel>
+#include <QMetaObject>
+#include <QPaintEvent>
+#include <QPlatformSurfaceEvent>
+#include <QPointer>
+#include <QPushButton>
+#include <QResizeEvent>
+#include <QScreen>
+#include <QShowEvent>
+#include <QSize>
+#include <QString>
+#include <QTimer>
+#include <QVBoxLayout>
+#include <QWidget>
+#include <QWindow>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <mutex>
+#include <string>
+
+#include "camera-dock.h"
+
+namespace {
+
+const char *const MODE_FILE = "modo.json";
+const char *const MODE_LIVE = "projeto-live";
+const char *const MODE_OBS = "obs";
+
+QString msg(const char *key)
+{
+	return QString::fromUtf8(obs_module_text(key));
+}
+
+QWidget *obsWindow()
+{
+	return static_cast<QWidget *>(obs_frontend_get_main_window());
+}
+
+/* Mostra ou esconde a janela do OBS do mesmo jeito que o ícone da bandeja faz (guarda a posição,
+ * esconde as janelinhas filhas e desliga a prévia do OBS enquanto ela está escondida). */
+void setObsShowing(bool showing)
+{
+	if (QWidget *main = obsWindow()) {
+		QMetaObject::invokeMethod(main, "SetShowing", Q_ARG(bool, showing));
+	}
+}
+
+std::string loadMode()
+{
+	char *path = obs_module_config_path(MODE_FILE);
+	obs_data_t *data = path ? obs_data_create_from_json_file_safe(path, "bak") : nullptr;
+	bfree(path);
+	std::string mode = MODE_OBS;
+	if (data) {
+		const char *saved = obs_data_get_string(data, "modo");
+		if (saved && *saved) {
+			mode = saved;
+		}
+		obs_data_release(data);
+	}
+	return mode;
+}
+
+void saveMode(const char *mode)
+{
+	obs_data_t *data = obs_data_create();
+	obs_data_set_string(data, "modo", mode);
+	char *dir = obs_module_config_path("");
+	if (dir) {
+		os_mkdirs(dir);
+		bfree(dir);
+	}
+	char *path = obs_module_config_path(MODE_FILE);
+	if (path) {
+		obs_data_save_json_safe(data, path, "tmp", "bak");
+		bfree(path);
+	}
+	obs_data_release(data);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Uma tela do OBS dentro da nossa janela (igual às miniaturas das Entradas)  */
+
+class PLScreen : public QWidget {
+public:
+	using DrawFn = void (*)(void *owner, uint32_t cx, uint32_t cy);
+
+	PLScreen(QWidget *parent, DrawFn fn, void *owner) : QWidget(parent), drawFn(fn), owner(owner)
+	{
+		setAttribute(Qt::WA_PaintOnScreen);
+		setAttribute(Qt::WA_StaticContents);
+		setAttribute(Qt::WA_NoSystemBackground);
+		setAttribute(Qt::WA_OpaquePaintEvent);
+		setAttribute(Qt::WA_DontCreateNativeAncestors);
+		setAttribute(Qt::WA_NativeWindow);
+		setMinimumSize(160, 90);
+
+		if (QWindow *window = windowHandle()) {
+			window->installEventFilter(this);
+			connect(window, &QWindow::visibleChanged, this, [this](bool visible) {
+				if (visible) {
+					createDisplay();
+					resizeDisplay();
+				}
+			});
+		}
+	}
+
+	~PLScreen() override { destroyDisplay(); }
+
+	QPaintEngine *paintEngine() const override { return nullptr; }
+
+	/* Solta a tela do OBS já (antes de o OBS fechar a parte gráfica). */
+	void destroyDisplay()
+	{
+		if (display) {
+			obs_display_remove_draw_callback(display, draw, this);
+			obs_display_destroy(display);
+			display = nullptr;
+		}
+	}
+
+protected:
+	void paintEvent(QPaintEvent *event) override
+	{
+		createDisplay();
+		QWidget::paintEvent(event);
+	}
+
+	void resizeEvent(QResizeEvent *event) override
+	{
+		QWidget::resizeEvent(event);
+		createDisplay();
+		resizeDisplay();
+	}
+
+	void showEvent(QShowEvent *event) override
+	{
+		QWidget::showEvent(event);
+		if (display) {
+			obs_display_set_enabled(display, true);
+		}
+	}
+
+	void hideEvent(QHideEvent *event) override
+	{
+		QWidget::hideEvent(event);
+		if (display) {
+			obs_display_set_enabled(display, false);
+		}
+	}
+
+	bool eventFilter(QObject *object, QEvent *event) override
+	{
+		if (event->type() == QEvent::PlatformSurface) {
+			auto *surface = static_cast<QPlatformSurfaceEvent *>(event);
+			if (surface->surfaceEventType() == QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed) {
+				destroyDisplay();
+			}
+		}
+		return QWidget::eventFilter(object, event);
+	}
+
+private:
+	static void draw(void *data, uint32_t cx, uint32_t cy)
+	{
+		auto *self = static_cast<PLScreen *>(data);
+		self->drawFn(self->owner, cx, cy);
+	}
+
+	QSize pixelSize() const
+	{
+		qreal ratio = devicePixelRatioF();
+		return QSize((int)(width() * ratio), (int)(height() * ratio));
+	}
+
+	void createDisplay()
+	{
+		if (display || !windowHandle() || !windowHandle()->isExposed()) {
+			return;
+		}
+		QSize size = pixelSize();
+		gs_init_data info = {};
+		info.cx = (uint32_t)std::max(size.width(), 1);
+		info.cy = (uint32_t)std::max(size.height(), 1);
+		info.format = GS_BGRA;
+		info.zsformat = GS_ZS_NONE;
+#ifdef _WIN32
+		info.window.hwnd = (void *)windowHandle()->winId();
+#elif defined(__APPLE__)
+		info.window.view = (id)windowHandle()->winId();
+#else
+		if (obs_get_nix_platform() != OBS_NIX_PLATFORM_X11_EGL) {
+			return;
+		}
+		info.window.id = (uint32_t)windowHandle()->winId();
+		info.window.display = obs_get_nix_platform_display();
+#endif
+		display = obs_display_create(&info, 0xFF101014);
+		if (display) {
+			obs_display_add_draw_callback(display, draw, this);
+		}
+	}
+
+	void resizeDisplay()
+	{
+		if (display && isVisible()) {
+			QSize size = pixelSize();
+			obs_display_resize(display, (uint32_t)std::max(size.width(), 1),
+					   (uint32_t)std::max(size.height(), 1));
+		}
+	}
+
+	DrawFn drawFn = nullptr;
+	void *owner = nullptr;
+	obs_display_t *display = nullptr;
+};
+
+/* Encaixa uma imagem de sw x sh numa tela de cx x cy sem deformar e prepara o desenho. */
+bool beginFit(uint32_t sw, uint32_t sh, uint32_t cx, uint32_t cy)
+{
+	if (!sw || !sh || !cx || !cy) {
+		return false;
+	}
+	float scale = std::min((float)cx / (float)sw, (float)cy / (float)sh);
+	int w = std::max((int)std::lround(sw * scale), 1);
+	int h = std::max((int)std::lround(sh * scale), 1);
+	int x = ((int)cx - w) / 2;
+	int y = ((int)cy - h) / 2;
+
+	gs_projection_push();
+	gs_viewport_push();
+	gs_set_viewport(x, y, w, h);
+	gs_ortho(0.0f, (float)sw, 0.0f, (float)sh, -100.0f, 100.0f);
+	return true;
+}
+
+void endFit()
+{
+	gs_viewport_pop();
+	gs_projection_pop();
+}
+
+/* ------------------------------------------------------------------------- */
+
+/* Uma das duas telas grandes (Prévia ou Programa), com a moldura colorida e o título. */
+class Monitor : public QFrame {
+public:
+	Monitor(QWidget *parent, const QString &title, const char *color, PLScreen::DrawFn fn, void *owner)
+		: QFrame(parent)
+	{
+		auto *outer = new QVBoxLayout(this);
+		outer->setContentsMargins(0, 0, 0, 0);
+		outer->setSpacing(4);
+
+		auto *head = new QHBoxLayout();
+		auto *label = new QLabel(title, this);
+		QFont bold = label->font();
+		bold.setBold(true);
+		label->setFont(bold);
+		label->setStyleSheet(QString("color: %1;").arg(color));
+		head->addWidget(label);
+		head->addStretch(1);
+		sceneName = new QLabel(this);
+		head->addWidget(sceneName);
+		outer->addLayout(head);
+
+		auto *frame = new QFrame(this);
+		frame->setObjectName("plMonitor");
+		frame->setStyleSheet(
+			QString("QFrame#plMonitor { border: 2px solid %1; border-radius: 6px; }").arg(color));
+		auto *inner = new QVBoxLayout(frame);
+		inner->setContentsMargins(2, 2, 2, 2);
+		view = new PLScreen(frame, fn, owner);
+		inner->addWidget(view);
+		outer->addWidget(frame, 1);
+	}
+
+	void setSceneName(const QString &text)
+	{
+		if (sceneName->text() != text) {
+			sceneName->setText(text);
+		}
+	}
+
+	PLScreen *view = nullptr;
+
+private:
+	QLabel *sceneName = nullptr;
+};
+
+/* ------------------------------------------------------------------------- */
+
+class StudioWindow : public QWidget {
+public:
+	StudioWindow() : QWidget(nullptr)
+	{
+		setWindowTitle(msg("Studio.Title"));
+		if (QWidget *main = obsWindow()) {
+			setWindowIcon(main->windowIcon());
+		}
+		resize(1280, 760);
+
+		auto *outer = new QVBoxLayout(this);
+		outer->setContentsMargins(10, 8, 10, 10);
+		outer->setSpacing(8);
+
+		/* Faixa de cima: nome do produto e o botão de voltar ao OBS. */
+		auto *top = new QHBoxLayout();
+		auto *brand = new QLabel(msg("Studio.Brand"), this);
+		QFont brandFont = brand->font();
+		brandFont.setBold(true);
+		brandFont.setLetterSpacing(QFont::AbsoluteSpacing, 1.5);
+		brand->setFont(brandFont);
+		top->addWidget(brand);
+		top->addStretch(1);
+		auto *toObs = new QPushButton(msg("Studio.ToObs"), this);
+		toObs->setToolTip(msg("Studio.ToObsHint"));
+		connect(toObs, &QPushButton::clicked, this, []() { enterObs(); });
+		top->addWidget(toObs);
+		outer->addLayout(top);
+
+		/* Prévia | CORTAR e Transição | Programa */
+		auto *middle = new QHBoxLayout();
+		middle->setSpacing(12);
+
+		preview = new Monitor(this, msg("Studio.Preview"), "#2fa84f", drawPreview, this);
+		middle->addWidget(preview, 1);
+
+		auto *center = new QVBoxLayout();
+		center->addStretch(1);
+		auto *cut = new QPushButton(msg("Studio.Cut"), this);
+		cut->setMinimumSize(110, 48);
+		QFont cutFont = cut->font();
+		cutFont.setBold(true);
+		cut->setFont(cutFont);
+		cut->setStyleSheet("QPushButton { background: #e5352b; color: white; border-radius: 6px; }"
+				   "QPushButton:hover { background: #f0473d; }"
+				   "QPushButton:pressed { background: #c22a22; }");
+		cut->setToolTip(msg("Studio.CutHint"));
+		connect(cut, &QPushButton::clicked, this, []() { cutNow(); });
+		center->addWidget(cut);
+		auto *transition = new QPushButton(msg("Studio.Transition"), this);
+		transition->setMinimumSize(110, 34);
+		transition->setToolTip(msg("Studio.TransitionHint"));
+		connect(transition, &QPushButton::clicked, this, []() { transitionNow(); });
+		center->addWidget(transition);
+		transitionInfo = new QLabel(this);
+		transitionInfo->setAlignment(Qt::AlignCenter);
+		transitionInfo->setEnabled(false);
+		center->addWidget(transitionInfo);
+		center->addStretch(1);
+		middle->addLayout(center);
+
+		program = new Monitor(this, msg("Studio.Program"), "#e5352b", drawProgram, this);
+		middle->addWidget(program, 1);
+
+		outer->addLayout(middle, 3);
+
+		/* Entradas: a mesma lista do painel do OBS (outra cópia, que mostra as mesmas cenas). */
+		entries = pl_camera_dock_create(this);
+		outer->addWidget(entries, 2);
+
+		timer = new QTimer(this);
+		timer->setInterval(200);
+		connect(timer, &QTimer::timeout, this, [this]() { refresh(); });
+		timer->start();
+		refresh();
+	}
+
+	~StudioWindow() override
+	{
+		releaseScreens();
+		std::lock_guard<std::mutex> lock(previewMutex);
+		obs_weak_source_release(previewScene);
+		previewScene = nullptr;
+	}
+
+	/* Solta as telas do OBS (chamado antes de o OBS desligar a parte gráfica). */
+	void releaseScreens()
+	{
+		if (preview) {
+			preview->view->destroyDisplay();
+		}
+		if (program) {
+			program->view->destroyDisplay();
+		}
+	}
+
+	/* Fechar a nossa janela é fechar o OBS (com as perguntas de sempre, se estiver ao vivo). */
+	static void enterObs();
+	static void cutNow();
+	static void transitionNow() { obs_frontend_preview_program_trigger_transition(); }
+
+protected:
+	void closeEvent(QCloseEvent *event) override
+	{
+		event->ignore();
+		if (QWidget *main = obsWindow()) {
+			QMetaObject::invokeMethod(main, "close", Qt::QueuedConnection);
+		}
+	}
+
+private:
+	void refresh()
+	{
+		obs_source_t *previewSource = obs_frontend_get_current_preview_scene();
+		obs_source_t *programSource = obs_frontend_get_current_scene();
+
+		{
+			std::lock_guard<std::mutex> lock(previewMutex);
+			obs_weak_source_release(previewScene);
+			previewScene = previewSource ? obs_source_get_weak_source(previewSource) : nullptr;
+		}
+
+		preview->setSceneName(previewSource ? QString::fromUtf8(obs_source_get_name(previewSource))
+						    : QString());
+		program->setSceneName(programSource ? QString::fromUtf8(obs_source_get_name(programSource))
+						    : QString());
+		obs_source_release(previewSource);
+		obs_source_release(programSource);
+
+		obs_source_t *transition = obs_frontend_get_current_transition();
+		QString info;
+		if (transition) {
+			info = QString("%1 · %2 ms")
+				       .arg(QString::fromUtf8(obs_source_get_name(transition)))
+				       .arg(obs_frontend_get_transition_duration());
+			obs_source_release(transition);
+		}
+		if (transitionInfo->text() != info) {
+			transitionInfo->setText(info);
+		}
+	}
+
+	static void drawPreview(void *data, uint32_t cx, uint32_t cy)
+	{
+		auto *self = static_cast<StudioWindow *>(data);
+		obs_source_t *scene = nullptr;
+		{
+			std::lock_guard<std::mutex> lock(self->previewMutex);
+			scene = obs_weak_source_get_source(self->previewScene);
+		}
+		if (!scene) {
+			return;
+		}
+		if (beginFit(obs_source_get_width(scene), obs_source_get_height(scene), cx, cy)) {
+			obs_source_video_render(scene);
+			endFit();
+		}
+		obs_source_release(scene);
+	}
+
+	/* A saída do OBS: o que vai para a live, com a transição acontecendo. */
+	static void drawProgram(void *, uint32_t cx, uint32_t cy)
+	{
+		struct obs_video_info ovi;
+		if (!obs_get_video_info(&ovi)) {
+			return;
+		}
+		if (beginFit(ovi.base_width, ovi.base_height, cx, cy)) {
+			obs_render_main_texture();
+			endFit();
+		}
+	}
+
+	Monitor *preview = nullptr;
+	Monitor *program = nullptr;
+	QLabel *transitionInfo = nullptr;
+	QWidget *entries = nullptr;
+	QTimer *timer = nullptr;
+
+	std::mutex previewMutex;
+	obs_weak_source_t *previewScene = nullptr;
+};
+
+QPointer<StudioWindow> studioWindow;
+bool started = false;
+
+void StudioWindow::enterObs()
+{
+	saveMode(MODE_OBS);
+	setObsShowing(true);
+	if (studioWindow) {
+		studioWindow->hide();
+	}
+}
+
+/* CORTAR: troca na hora, sem a transição. Usa a transição "Cortar" do OBS só para este corte e
+ * volta para a transição escolhida logo depois (no OBS isso tudo acontece de uma vez). */
+void StudioWindow::cutNow()
+{
+	obs_source_t *current = obs_frontend_get_current_transition();
+	obs_source_t *cut = nullptr;
+
+	struct obs_frontend_source_list transitions = {};
+	obs_frontend_get_transitions(&transitions);
+	for (size_t i = 0; i < transitions.sources.num; i++) {
+		obs_source_t *each = transitions.sources.array[i];
+		const char *id = obs_source_get_unversioned_id(each);
+		if (id && strcmp(id, "cut_transition") == 0) {
+			cut = obs_source_get_ref(each);
+			break;
+		}
+	}
+	obs_frontend_source_list_free(&transitions);
+
+	if (cut && current && cut != current) {
+		obs_frontend_set_current_transition(cut);
+		obs_frontend_preview_program_trigger_transition();
+		obs_frontend_set_current_transition(current);
+	} else {
+		obs_frontend_preview_program_trigger_transition();
+	}
+
+	obs_source_release(cut);
+	obs_source_release(current);
+}
+
+void enterLive()
+{
+	saveMode(MODE_LIVE);
+	if (!obs_frontend_preview_program_mode_active()) {
+		obs_frontend_set_preview_program_mode(true);
+	}
+	if (!studioWindow) {
+		studioWindow = new StudioWindow();
+		/* Abre na mesma tela em que estava a janela do OBS. */
+		if (QWidget *main = obsWindow()) {
+			if (QScreen *screen = main->screen()) {
+				studioWindow->move(screen->availableGeometry().topLeft());
+			}
+		}
+	}
+	studioWindow->showMaximized();
+	studioWindow->raise();
+	studioWindow->activateWindow();
+	setObsShowing(false);
+}
+
+void toolsMenuClicked(void *)
+{
+	if (studioWindow && studioWindow->isVisible()) {
+		StudioWindow::enterObs();
+	} else {
+		enterLive();
+	}
+}
+
+void frontendEvent(enum obs_frontend_event event, void *)
+{
+	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING && !started) {
+		started = true;
+		if (loadMode() == MODE_LIVE) {
+			/* Depois de o OBS terminar de mostrar a janela dele. */
+			QTimer::singleShot(0, []() { enterLive(); });
+		}
+	} else if (event == OBS_FRONTEND_EVENT_EXIT) {
+		if (studioWindow) {
+			studioWindow->releaseScreens();
+			delete studioWindow.data();
+		}
+	}
+}
+
+} // namespace
+
+void pl_studio_window_enter_live(void)
+{
+	enterLive();
+}
+
+void pl_studio_window_load(void)
+{
+	obs_frontend_add_event_callback(frontendEvent, nullptr);
+	obs_frontend_add_tools_menu_item(obs_module_text("Studio.ToolsMenu"), toolsMenuClicked, nullptr);
+}
+
+void pl_studio_window_unload(void)
+{
+	obs_frontend_remove_event_callback(frontendEvent, nullptr);
+	if (studioWindow) {
+		studioWindow->releaseScreens();
+		delete studioWindow.data();
+	}
+}

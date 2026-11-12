@@ -18,4 +18,9 @@ void pl_camera_dock_load(void);
 
 #ifdef __cplusplus
 }
+
+class QWidget;
+
+/* Mais uma cópia do painel Entradas (a janela do Projeto Live usa uma; a do OBS, outra). */
+QWidget *pl_camera_dock_create(QWidget *parent);
 #endif

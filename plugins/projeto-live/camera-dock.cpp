@@ -43,7 +43,9 @@
 #include <QContextMenuEvent>
 #include <QEvent>
 #include <QFont>
+#include <QApplication>
 #include <QFrame>
+#include <QHideEvent>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
@@ -63,6 +65,7 @@
 #include <QRect>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QShowEvent>
 #include <QSize>
 #include <QString>
 #include <QTimer>
@@ -277,6 +280,7 @@ class Card;
 /* Decide o que o botão direito de uma entrada (ou do espaço vazio) mostra. */
 void showCardMenu(Card *card, const QPoint &where);
 void showEmptyMenu(const QPoint &where);
+void newEntry();
 
 /* A imagem ao vivo de uma miniatura: uma tela do OBS, como a janela de vídeo do vertical. */
 class Thumb : public QWidget {
@@ -292,6 +296,8 @@ protected:
 	void mousePressEvent(QMouseEvent *event) override;
 	void mouseDoubleClickEvent(QMouseEvent *event) override;
 	void contextMenuEvent(QContextMenuEvent *event) override;
+	void showEvent(QShowEvent *event) override;
+	void hideEvent(QHideEvent *event) override;
 	bool eventFilter(QObject *object, QEvent *event) override;
 
 private:
@@ -657,6 +663,23 @@ void Thumb::contextMenuEvent(QContextMenuEvent *event)
 	event->accept();
 }
 
+/* Escondida (a janela do OBS ou a do Projeto Live fora de uso): para de desenhar, para não gastar a placa. */
+void Thumb::showEvent(QShowEvent *event)
+{
+	QWidget::showEvent(event);
+	if (display) {
+		obs_display_set_enabled(display, true);
+	}
+}
+
+void Thumb::hideEvent(QHideEvent *event)
+{
+	QWidget::hideEvent(event);
+	if (display) {
+		obs_display_set_enabled(display, false);
+	}
+}
+
 bool Thumb::eventFilter(QObject *object, QEvent *event)
 {
 	/* A janela nativa vai ser trocada (painel solto ou preso de novo): solta a tela antes. */
@@ -750,6 +773,42 @@ void Thumb::destroyDisplay()
 
 /* ------------------------------------------------------------------------- */
 
+/* O cartão pontilhado "+ Entrada", sempre o último da lista: cria uma entrada nova. */
+class AddCard : public QFrame {
+public:
+	explicit AddCard(QWidget *parent) : QFrame(parent)
+	{
+		setObjectName("plAddCard");
+		setCursor(Qt::PointingHandCursor);
+		setToolTip(msg("Entries.New"));
+		setStyleSheet("QFrame#plAddCard { border: 2px dashed #4a4a55; border-radius: 6px; }");
+		auto *layout = new QVBoxLayout(this);
+		auto *label = new QLabel(msg("Entries.AddCard"), this);
+		label->setAlignment(Qt::AlignCenter);
+		label->setEnabled(false);
+		layout->addWidget(label);
+	}
+
+	void setSize(int index)
+	{
+		int cardWidth = CARD_WIDTHS[std::clamp(index, 0, 2)];
+		/* Mesma altura do cartão de entrada: imagem 16:9 mais a linha do nome. */
+		setFixedSize(cardWidth + 6, cardWidth * 9 / 16 + 34);
+	}
+
+protected:
+	void mouseReleaseEvent(QMouseEvent *event) override
+	{
+		if (event->button() == Qt::LeftButton && rect().contains(event->pos())) {
+			newEntry();
+		}
+		QFrame::mouseReleaseEvent(event);
+	}
+};
+
+class CameraDock;
+std::vector<CameraDock *> instances;
+
 class CameraDock : public QWidget {
 public:
 	explicit CameraDock(QWidget *parent) : QWidget(parent)
@@ -775,6 +834,9 @@ public:
 			for (Card *card : cards) {
 				card->setSize(index);
 			}
+			if (addCard) {
+				addCard->setSize(index);
+			}
 			saveSize(index);
 		});
 		top->addWidget(sizeBox);
@@ -797,6 +859,9 @@ public:
 		connect(holder, &QWidget::customContextMenuRequested, this,
 			[this](const QPoint &pos) { showEmptyMenu(holder->mapToGlobal(pos)); });
 		flow = new FlowLayout(holder);
+		addCard = new AddCard(holder);
+		addCard->setSize(sizeBox->currentIndex());
+		flow->addWidget(addCard);
 		area->setWidget(holder);
 		outer->addWidget(area, 1);
 
@@ -813,7 +878,13 @@ public:
 		});
 		timer->start();
 
+		instances.push_back(this);
 		rebuild();
+	}
+
+	~CameraDock() override
+	{
+		instances.erase(std::remove(instances.begin(), instances.end(), this), instances.end());
 	}
 
 	/* Refaz a lista agora (depois de criar ou remover uma entrada). */
@@ -861,6 +932,7 @@ private:
 		}
 
 		/* Põe as cenas novas. */
+		bool moved = false;
 		for (obs_source_t *scene : found) {
 			if (cardFor(scene)) {
 				continue;
@@ -869,6 +941,7 @@ private:
 			card->setSize(sizeBox->currentIndex());
 			flow->addWidget(card);
 			cards.push_back(card);
+			moved = true;
 		}
 
 		/* Põe as miniaturas na ordem da lista de cenas do OBS. */
@@ -887,6 +960,13 @@ private:
 				flow->addWidget(card);
 			}
 			cards = ordered;
+			moved = true;
+		}
+
+		/* O "+ Entrada" fica sempre por último. */
+		if (moved) {
+			flow->removeWidget(addCard);
+			flow->addWidget(addCard);
 		}
 
 		for (obs_source_t *scene : found) {
@@ -930,6 +1010,7 @@ private:
 
 	QLabel *hint = nullptr;
 	QLabel *empty = nullptr;
+	AddCard *addCard = nullptr;
 	QComboBox *sizeBox = nullptr;
 	QScrollArea *area = nullptr;
 	QWidget *holder = nullptr;
@@ -940,6 +1021,13 @@ private:
 };
 
 CameraDock *dock = nullptr;
+
+/* Janela para as perguntas (nome, remover...): a que está na frente, seja a do OBS ou a do Projeto Live. */
+QWidget *dialogParent()
+{
+	QWidget *active = QApplication::activeWindow();
+	return active ? active : static_cast<QWidget *>(obs_frontend_get_main_window());
+}
 
 /* ------------------------------------------------------------------------- */
 /* Botão direito: criar, editar, renomear e remover entradas                  */
@@ -963,7 +1051,7 @@ void openAddSource(obs_source_t *sceneSource)
 		bool onAir = program == sceneSource;
 		obs_source_release(program);
 		if (!onAir) {
-			QMessageBox::information(dock, msg("Entries.AddSource"), msg("Entries.NeedStudio"));
+			QMessageBox::information(dialogParent(), msg("Entries.AddSource"), msg("Entries.NeedStudio"));
 			return;
 		}
 	}
@@ -995,7 +1083,7 @@ void organizeEntry(obs_source_t *sceneSource)
 		bool onAir = program == sceneSource;
 		obs_source_release(program);
 		if (!onAir) {
-			QMessageBox::information(dock, msg("Entries.Organize"), msg("Entries.NeedStudio"));
+			QMessageBox::information(dialogParent(), msg("Entries.Organize"), msg("Entries.NeedStudio"));
 			return;
 		}
 	}
@@ -1012,14 +1100,14 @@ void renameEntry(obs_source_t *sceneSource)
 {
 	QString current = QString::fromUtf8(obs_source_get_name(sceneSource));
 	bool ok = false;
-	QString text = QInputDialog::getText(dock, msg("Entries.Rename"), msg("Entries.RenamePrompt"),
+	QString text = QInputDialog::getText(dialogParent(), msg("Entries.Rename"), msg("Entries.RenamePrompt"),
 					     QLineEdit::Normal, current, &ok)
 			       .trimmed();
 	if (!ok || text.isEmpty() || text == current) {
 		return;
 	}
 	if (nameTaken(text)) {
-		QMessageBox::warning(dock, msg("Entries.Rename"), msg("Entries.NameTaken"));
+		QMessageBox::warning(dialogParent(), msg("Entries.Rename"), msg("Entries.NameTaken"));
 		return;
 	}
 	obs_source_set_name(sceneSource, text.toUtf8().constData());
@@ -1034,12 +1122,12 @@ void deleteEntry(obs_source_t *sceneSource)
 	obs_source_release(program);
 	obs_source_release(preview);
 	if (busy) {
-		QMessageBox::information(dock, msg("Entries.DeleteTitle"), msg("Entries.Busy"));
+		QMessageBox::information(dialogParent(), msg("Entries.DeleteTitle"), msg("Entries.Busy"));
 		return;
 	}
 
 	QString text = msg("Entries.DeleteConfirm").arg(QString::fromUtf8(obs_source_get_name(sceneSource)));
-	if (QMessageBox::question(dock, msg("Entries.DeleteTitle"), text) != QMessageBox::Yes) {
+	if (QMessageBox::question(dialogParent(), msg("Entries.DeleteTitle"), text) != QMessageBox::Yes) {
 		return;
 	}
 	obs_source_remove(sceneSource);
@@ -1049,14 +1137,14 @@ void deleteEntry(obs_source_t *sceneSource)
 void newEntry()
 {
 	bool ok = false;
-	QString text = QInputDialog::getText(dock, msg("Entries.NewTitle"), msg("Entries.NewPrompt"), QLineEdit::Normal,
-					     freeName(msg("Entries.DefaultName")), &ok)
+	QString text = QInputDialog::getText(dialogParent(), msg("Entries.NewTitle"), msg("Entries.NewPrompt"),
+					     QLineEdit::Normal, freeName(msg("Entries.DefaultName")), &ok)
 			       .trimmed();
 	if (!ok || text.isEmpty()) {
 		return;
 	}
 	if (nameTaken(text)) {
-		QMessageBox::warning(dock, msg("Entries.NewTitle"), msg("Entries.NameTaken"));
+		QMessageBox::warning(dialogParent(), msg("Entries.NewTitle"), msg("Entries.NameTaken"));
 		return;
 	}
 
@@ -1065,16 +1153,15 @@ void newEntry()
 		return;
 	}
 	obs_source_t *sceneSource = obs_scene_get_source(scene);
-	dock->rebuildNow();
+	for (CameraDock *each : instances) {
+		each->rebuildNow();
+	}
 	openAddSource(sceneSource);
 	obs_scene_release(scene);
 }
 
 void showEmptyMenu(const QPoint &where)
 {
-	if (!dock) {
-		return;
-	}
 	QMenu menu;
 	QAction *create = menu.addAction(msg("Entries.New"));
 	if (menu.exec(where) == create) {
@@ -1127,4 +1214,9 @@ void pl_camera_dock_load(void)
 		return;
 	}
 	QObject::connect(dock, &QObject::destroyed, []() { dock = nullptr; });
+}
+
+QWidget *pl_camera_dock_create(QWidget *parent)
+{
+	return new CameraDock(parent);
 }
