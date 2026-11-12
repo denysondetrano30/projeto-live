@@ -19,4 +19,9 @@ void pl_audio_dock_unload(void);
 
 #ifdef __cplusplus
 }
+
+class QWidget;
+
+/* Mais um painel Som (para a janela do Projeto Live). Já começa ligado. */
+QWidget *pl_audio_dock_create(QWidget *parent);
 #endif

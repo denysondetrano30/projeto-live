@@ -2,8 +2,10 @@
  * Projeto Live: a janela própria do Projeto Live.
  *
  * Dois modos, um clique:
- * - modo Projeto Live: esta janela, com a cara do produto (Prévia e Programa lado a lado, CORTAR e
- *   Transição no meio, Entradas embaixo). A janela do OBS fica escondida;
+ * - modo Projeto Live: esta janela, com a cara do produto. Em cima, a faixa Situação; à esquerda, as
+ *   fontes da entrada da prévia e o Diretor; no meio, Prévia e Programa lado a lado com CORTAR e
+ *   Transição; embaixo, Entradas e Som; no rodapé, Transmitir, Gravar e Configurações. A janela do
+ *   OBS fica escondida. Os painéis são cópias dos mesmos painéis do OBS (mesmo código);
  * - modo OBS: a janela original do OBS, como sempre foi. Esta fica escondida.
  *
  * O OBS lembra o último modo usado (modo.json) e abre nele.
@@ -30,7 +32,17 @@
 
 #include <util/platform.h>
 
+#include <QAbstractItemModel>
+#include <QAbstractItemView>
+#include <QAction>
 #include <QCloseEvent>
+#include <QContextMenuEvent>
+#include <QListWidget>
+#include <QListWidgetItem>
+#include <QMenu>
+#include <QMessageBox>
+#include <QSignalBlocker>
+#include <QStringList>
 #include <QEvent>
 #include <QFont>
 #include <QFrame>
@@ -57,8 +69,12 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
+#include "audio-dock.h"
 #include "camera-dock.h"
+#include "director-dock.h"
+#include "stats-dock.h"
 
 namespace {
 
@@ -149,6 +165,24 @@ public:
 	~PLScreen() override { destroyDisplay(); }
 
 	QPaintEngine *paintEngine() const override { return nullptr; }
+
+	/* Confere se a tela do OBS tem o tamanho da janela (ao maximizar, ela pode ficar com o tamanho
+	 * antigo e a imagem sai torta e encostada num canto). */
+	void syncSize()
+	{
+		if (!display || !isVisible()) {
+			return;
+		}
+		uint32_t cx = 0;
+		uint32_t cy = 0;
+		obs_display_size(display, &cx, &cy);
+		QSize size = pixelSize();
+		uint32_t wantX = (uint32_t)std::max(size.width(), 1);
+		uint32_t wantY = (uint32_t)std::max(size.height(), 1);
+		if (cx != wantX || cy != wantY) {
+			obs_display_resize(display, wantX, wantY);
+		}
+	}
 
 	/* Solta a tela do OBS já (antes de o OBS fechar a parte gráfica). */
 	void destroyDisplay()
@@ -331,6 +365,270 @@ private:
 
 /* ------------------------------------------------------------------------- */
 
+/* ------------------------------------------------------------------------- */
+/* Coluna "Fontes da entrada": as fontes da entrada que está na prévia.       */
+
+using ItemList = std::vector<obs_sceneitem_t *>;
+
+ItemList sceneItems(obs_source_t *sceneSource)
+{
+	ItemList items;
+	obs_scene_t *scene = obs_scene_from_source(sceneSource);
+	if (scene) {
+		obs_scene_enum_items(
+			scene,
+			[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
+				obs_sceneitem_addref(item);
+				static_cast<ItemList *>(param)->push_back(item);
+				return true;
+			},
+			&items);
+	}
+	return items;
+}
+
+void releaseItems(ItemList &items)
+{
+	for (obs_sceneitem_t *item : items) {
+		obs_sceneitem_release(item);
+	}
+	items.clear();
+}
+
+/* A cena que o painel Fontes do OBS mostraria: a da prévia (modo estúdio) ou a do ar. */
+obs_source_t *workingScene()
+{
+	obs_source_t *scene = obs_frontend_get_current_preview_scene();
+	if (!scene) {
+		scene = obs_frontend_get_current_scene();
+	}
+	return scene;
+}
+
+class SourcesPanel : public QFrame {
+public:
+	explicit SourcesPanel(QWidget *parent) : QFrame(parent)
+	{
+		setObjectName("plSources");
+		setStyleSheet("QFrame#plSources { border: 1px solid #33333d; border-radius: 6px; }");
+		auto *layout = new QVBoxLayout(this);
+		layout->setContentsMargins(8, 6, 8, 8);
+		layout->setSpacing(4);
+
+		auto *head = new QHBoxLayout();
+		auto *title = new QLabel(msg("Studio.Sources"), this);
+		QFont bold = title->font();
+		bold.setBold(true);
+		title->setFont(bold);
+		head->addWidget(title, 1);
+		auto *add = new QPushButton("+", this);
+		add->setFixedSize(26, 22);
+		add->setToolTip(msg("Entries.AddSource"));
+		connect(add, &QPushButton::clicked, this, [this]() { addSource(); });
+		head->addWidget(add);
+		layout->addLayout(head);
+
+		entryName = new QLabel(this);
+		entryName->setEnabled(false);
+		layout->addWidget(entryName);
+
+		list = new QListWidget(this);
+		list->setDragDropMode(QAbstractItemView::InternalMove);
+		list->setDefaultDropAction(Qt::MoveAction);
+		list->setSelectionMode(QAbstractItemView::SingleSelection);
+		list->setContextMenuPolicy(Qt::CustomContextMenu);
+		list->setToolTip(msg("Studio.SourcesHint"));
+		layout->addWidget(list, 1);
+
+		connect(list->model(), &QAbstractItemModel::rowsMoved, this, [this]() { applyOrder(); });
+		connect(list, &QListWidget::itemChanged, this, [this](QListWidgetItem *row) { applyVisible(row); });
+		connect(list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) { openProperties(); });
+		connect(list, &QWidget::customContextMenuRequested, this,
+			[this](const QPoint &pos) { showMenu(list->viewport()->mapToGlobal(pos)); });
+	}
+
+	~SourcesPanel() override { obs_weak_source_release(weak); }
+
+	/* Chamado pelo relógio da janela: segue a entrada da prévia e refaz a lista se algo mudou. */
+	void refresh()
+	{
+		preview->view->syncSize();
+		program->view->syncSize();
+		sources->refresh();
+		updateFooter();
+
+		obs_source_t *scene = workingScene();
+		obs_source_t *mine = obs_weak_source_get_source(weak);
+		if (scene != mine) {
+			obs_weak_source_release(weak);
+			weak = scene ? obs_source_get_weak_source(scene) : nullptr;
+		}
+		obs_source_release(mine);
+
+		QString name = scene ? QString::fromUtf8(obs_source_get_name(scene)) : QString();
+		if (entryName->text() != name) {
+			entryName->setText(name);
+		}
+
+		ItemList items = scene ? sceneItems(scene) : ItemList();
+		obs_source_release(scene);
+
+		QStringList signature;
+		signature << name;
+		for (obs_sceneitem_t *item : items) {
+			obs_source_t *src = obs_sceneitem_get_source(item);
+			signature << QString("%1|%2|%3")
+					     .arg((qlonglong)obs_sceneitem_get_id(item))
+					     .arg(obs_sceneitem_visible(item) ? "1" : "0")
+					     .arg(QString::fromUtf8(src ? obs_source_get_name(src) : ""));
+		}
+		if (signature == shown) {
+			releaseItems(items);
+			return;
+		}
+		shown = signature;
+
+		qlonglong current = list->currentItem() ? list->currentItem()->data(Qt::UserRole).toLongLong() : -1;
+		QSignalBlocker block(list);
+		list->clear();
+		/* O OBS guarda do fundo para a frente; a lista mostra a frente em cima. */
+		for (auto it = items.rbegin(); it != items.rend(); ++it) {
+			obs_sceneitem_t *item = *it;
+			obs_source_t *src = obs_sceneitem_get_source(item);
+			auto *row = new QListWidgetItem(QString::fromUtf8(src ? obs_source_get_name(src) : ""), list);
+			row->setData(Qt::UserRole, (qlonglong)obs_sceneitem_get_id(item));
+			row->setFlags((row->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsDragEnabled) &
+				      ~Qt::ItemIsDropEnabled);
+			row->setCheckState(obs_sceneitem_visible(item) ? Qt::Checked : Qt::Unchecked);
+			if (row->data(Qt::UserRole).toLongLong() == current) {
+				list->setCurrentItem(row);
+			}
+		}
+		releaseItems(items);
+	}
+
+private:
+	/* O item da cena que a linha representa (sem referência; usar na hora). */
+	obs_sceneitem_t *itemFor(QListWidgetItem *row) const
+	{
+		if (!row) {
+			return nullptr;
+		}
+		obs_source_t *src = obs_weak_source_get_source(weak);
+		obs_scene_t *scene = obs_scene_from_source(src);
+		obs_sceneitem_t *item =
+			scene ? obs_scene_find_sceneitem_by_id(scene, row->data(Qt::UserRole).toLongLong()) : nullptr;
+		obs_source_release(src);
+		return item;
+	}
+
+	void addSource()
+	{
+		obs_source_t *src = obs_weak_source_get_source(weak);
+		if (src) {
+			pl_entries_add_source(src);
+			obs_source_release(src);
+		}
+	}
+
+	void applyOrder()
+	{
+		obs_source_t *src = obs_weak_source_get_source(weak);
+		obs_scene_t *scene = obs_scene_from_source(src);
+		if (scene) {
+			std::vector<obs_sceneitem_t *> order;
+			for (int i = list->count() - 1; i >= 0; i--) {
+				obs_sceneitem_t *item = obs_scene_find_sceneitem_by_id(
+					scene, list->item(i)->data(Qt::UserRole).toLongLong());
+				if (item) {
+					order.push_back(item);
+				}
+			}
+			obs_scene_reorder_items(scene, order.data(), order.size());
+		}
+		obs_source_release(src);
+		shown.clear();
+	}
+
+	void applyVisible(QListWidgetItem *row)
+	{
+		if (obs_sceneitem_t *item = itemFor(row)) {
+			obs_sceneitem_set_visible(item, row->checkState() == Qt::Checked);
+		}
+	}
+
+	void openProperties()
+	{
+		if (obs_sceneitem_t *item = itemFor(list->currentItem())) {
+			obs_frontend_open_source_properties(obs_sceneitem_get_source(item));
+		}
+	}
+
+	void showMenu(const QPoint &where)
+	{
+		QListWidgetItem *row = list->itemAt(list->viewport()->mapFromGlobal(where));
+		if (row) {
+			list->setCurrentItem(row);
+		}
+
+		QMenu menu;
+		QAction *add = menu.addAction(msg("Entries.AddSource"));
+		QAction *properties = nullptr;
+		QAction *filters = nullptr;
+		QAction *up = nullptr;
+		QAction *down = nullptr;
+		QAction *remove = nullptr;
+		if (row) {
+			menu.addSeparator();
+			properties = menu.addAction(msg("Studio.Properties"));
+			filters = menu.addAction(msg("Studio.Filters"));
+			menu.addSeparator();
+			up = menu.addAction(msg("Studio.Up"));
+			down = menu.addAction(msg("Studio.Down"));
+			menu.addSeparator();
+			remove = menu.addAction(msg("Studio.RemoveSource"));
+		}
+
+		QAction *chosen = menu.exec(where);
+		if (!chosen) {
+			return;
+		}
+		if (chosen == add) {
+			addSource();
+			return;
+		}
+		obs_sceneitem_t *item = itemFor(row);
+		if (!item) {
+			return;
+		}
+		if (chosen == properties) {
+			obs_frontend_open_source_properties(obs_sceneitem_get_source(item));
+		} else if (chosen == filters) {
+			obs_frontend_open_source_filters(obs_sceneitem_get_source(item));
+		} else if (chosen == up) {
+			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_UP);
+		} else if (chosen == down) {
+			obs_sceneitem_set_order(item, OBS_ORDER_MOVE_DOWN);
+		} else if (chosen == remove) {
+			QString text = msg("Studio.RemoveConfirm").arg(row->text());
+			if (QMessageBox::question(this, msg("Studio.RemoveSource"), text) == QMessageBox::Yes) {
+				/* A pergunta pode ter demorado: procura o item de novo. */
+				if (obs_sceneitem_t *again = itemFor(row)) {
+					obs_sceneitem_remove(again);
+				}
+			}
+		}
+		shown.clear();
+	}
+
+	obs_weak_source_t *weak = nullptr;
+	QLabel *entryName = nullptr;
+	QListWidget *list = nullptr;
+	QStringList shown;
+};
+
+/* ------------------------------------------------------------------------- */
+
 class StudioWindow : public QWidget {
 public:
 	StudioWindow() : QWidget(nullptr)
@@ -339,13 +637,13 @@ public:
 		if (QWidget *main = obsWindow()) {
 			setWindowIcon(main->windowIcon());
 		}
-		resize(1280, 760);
+		resize(1400, 860);
 
 		auto *outer = new QVBoxLayout(this);
-		outer->setContentsMargins(10, 8, 10, 10);
+		outer->setContentsMargins(10, 6, 10, 8);
 		outer->setSpacing(8);
 
-		/* Faixa de cima: nome do produto e o botão de voltar ao OBS. */
+		/* Faixa de cima: nome do produto, a faixa Situação e o botão de voltar ao OBS. */
 		auto *top = new QHBoxLayout();
 		auto *brand = new QLabel(msg("Studio.Brand"), this);
 		QFont brandFont = brand->font();
@@ -353,12 +651,32 @@ public:
 		brandFont.setLetterSpacing(QFont::AbsoluteSpacing, 1.5);
 		brand->setFont(brandFont);
 		top->addWidget(brand);
-		top->addStretch(1);
+		top->addSpacing(12);
+		top->addWidget(pl_stats_dock_create(this), 1);
 		auto *toObs = new QPushButton(msg("Studio.ToObs"), this);
 		toObs->setToolTip(msg("Studio.ToObsHint"));
 		connect(toObs, &QPushButton::clicked, this, []() { enterObs(); });
 		top->addWidget(toObs);
 		outer->addLayout(top);
+
+		auto *body = new QHBoxLayout();
+		body->setSpacing(10);
+
+		/* Coluna da esquerda: as fontes da entrada da prévia e o Diretor. */
+		auto *left = new QVBoxLayout();
+		left->setSpacing(10);
+		sources = new SourcesPanel(this);
+		left->addWidget(sources, 2);
+		auto *director = pl_director_dock_create(this);
+		left->addWidget(director, 3);
+		auto *leftHolder = new QWidget(this);
+		leftHolder->setLayout(left);
+		left->setContentsMargins(0, 0, 0, 0);
+		leftHolder->setFixedWidth(260);
+		body->addWidget(leftHolder);
+
+		auto *right = new QVBoxLayout();
+		right->setSpacing(8);
 
 		/* Prévia | CORTAR e Transição | Programa */
 		auto *middle = new QHBoxLayout();
@@ -395,11 +713,38 @@ public:
 		program = new Monitor(this, msg("Studio.Program"), "#e5352b", drawProgram, this);
 		middle->addWidget(program, 1);
 
-		outer->addLayout(middle, 3);
+		right->addLayout(middle, 5);
 
 		/* Entradas: a mesma lista do painel do OBS (outra cópia, que mostra as mesmas cenas). */
-		entries = pl_camera_dock_create(this);
-		outer->addWidget(entries, 2);
+		right->addWidget(pl_camera_dock_create(this), 3);
+
+		/* Som: o mesmo painel Som do OBS (outra cópia). */
+		auto *audio = pl_audio_dock_create(this);
+		audio->setMaximumHeight(170);
+		right->addWidget(audio, 2);
+
+		body->addLayout(right, 1);
+		outer->addLayout(body, 1);
+
+		/* Rodapé: transmitir, gravar e as configurações do OBS. */
+		auto *footer = new QHBoxLayout();
+		streamButton = new QPushButton(this);
+		streamButton->setMinimumHeight(34);
+		connect(streamButton, &QPushButton::clicked, this, [this]() { toggleStream(); });
+		footer->addWidget(streamButton);
+		recordButton = new QPushButton(this);
+		recordButton->setMinimumHeight(34);
+		connect(recordButton, &QPushButton::clicked, this, []() { toggleRecord(); });
+		footer->addWidget(recordButton);
+		footer->addStretch(1);
+		auto *studioNote = new QLabel(msg("Studio.StudioNote"), this);
+		studioNote->setEnabled(false);
+		footer->addWidget(studioNote);
+		auto *settings = new QPushButton(msg("Studio.Settings"), this);
+		settings->setMinimumHeight(34);
+		connect(settings, &QPushButton::clicked, this, []() { openSettings(); });
+		footer->addWidget(settings);
+		outer->addLayout(footer);
 
 		timer = new QTimer(this);
 		timer->setInterval(200);
@@ -473,6 +818,56 @@ private:
 		}
 	}
 
+	void updateFooter()
+	{
+		bool streaming = obs_frontend_streaming_active();
+		QString streamText = msg(streaming ? "Studio.StreamStop" : "Studio.StreamStart");
+		if (streamButton->text() != streamText) {
+			streamButton->setText(streamText);
+			streamButton->setStyleSheet(streaming ? "QPushButton { background: #1f4fa8; color: white; }"
+							      : QString());
+		}
+		bool recording = obs_frontend_recording_active();
+		QString recordText = msg(recording ? "Studio.RecordStop" : "Studio.RecordStart");
+		if (recordButton->text() != recordText) {
+			recordButton->setText(recordText);
+			recordButton->setStyleSheet(recording ? "QPushButton { background: #8c2a24; color: white; }"
+							      : QString());
+		}
+	}
+
+	/* Parar a transmissão pergunta antes (um clique sem querer derrubaria a live). */
+	void toggleStream()
+	{
+		if (!obs_frontend_streaming_active()) {
+			obs_frontend_streaming_start();
+			return;
+		}
+		if (QMessageBox::question(this, msg("Studio.StreamStop"), msg("Studio.StreamStopConfirm")) ==
+		    QMessageBox::Yes) {
+			obs_frontend_streaming_stop();
+		}
+	}
+
+	static void toggleRecord()
+	{
+		if (obs_frontend_recording_active()) {
+			obs_frontend_recording_stop();
+		} else {
+			obs_frontend_recording_start();
+		}
+	}
+
+	/* As configurações do OBS (a mesma janela do menu Arquivo > Configurações). */
+	static void openSettings()
+	{
+		QWidget *main = obsWindow();
+		QAction *action = main ? main->findChild<QAction *>("action_Settings") : nullptr;
+		if (action) {
+			action->trigger();
+		}
+	}
+
 	static void drawPreview(void *data, uint32_t cx, uint32_t cy)
 	{
 		auto *self = static_cast<StudioWindow *>(data);
@@ -507,7 +902,9 @@ private:
 	Monitor *preview = nullptr;
 	Monitor *program = nullptr;
 	QLabel *transitionInfo = nullptr;
-	QWidget *entries = nullptr;
+	SourcesPanel *sources = nullptr;
+	QPushButton *streamButton = nullptr;
+	QPushButton *recordButton = nullptr;
 	QTimer *timer = nullptr;
 
 	std::mutex previewMutex;

@@ -65,6 +65,7 @@ const int CARD_WIDTH = 204;
 class AudioDock;
 
 QWidget *dock = nullptr;
+std::vector<AudioDock *> instances;
 
 /* ------------------------------------------------------------------------- */
 /* Medidor                                                                   */
@@ -354,6 +355,11 @@ public:
 		connect(timer, &QTimer::timeout, this, [this]() { tick(); });
 	}
 
+	~AudioDock() override
+	{
+		instances.erase(std::remove(instances.begin(), instances.end(), this), instances.end());
+	}
+
 	/* O OBS acabou de abrir. */
 	void start()
 	{
@@ -572,8 +578,8 @@ void frontendEvent(enum obs_frontend_event event, void *param)
 	(void)param;
 	(void)event;
 	/* Qualquer aviso do OBS serve para saber que ele já abriu: start() só age na primeira vez. */
-	if (dock) {
-		static_cast<AudioDock *>(dock)->start();
+	for (AudioDock *each : instances) {
+		each->start();
 	}
 }
 
@@ -592,6 +598,7 @@ void pl_audio_dock_load(void)
 		return;
 	}
 	dock = created;
+	instances.push_back(created);
 	QObject::connect(created, &QObject::destroyed, []() { dock = nullptr; });
 	obs_frontend_add_event_callback(frontendEvent, nullptr);
 }
@@ -599,4 +606,12 @@ void pl_audio_dock_load(void)
 void pl_audio_dock_unload(void)
 {
 	obs_frontend_remove_event_callback(frontendEvent, nullptr);
+}
+
+QWidget *pl_audio_dock_create(QWidget *parent)
+{
+	auto *created = new AudioDock(parent);
+	instances.push_back(created);
+	created->start();
+	return created;
 }

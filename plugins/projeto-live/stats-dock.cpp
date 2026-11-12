@@ -49,6 +49,16 @@ void openLive(QWidget *)
 	pl_studio_window_enter_live();
 }
 
+void openPanels(QWidget *from)
+{
+	pl_layout_show_panels_menu(from);
+}
+
+void openLayout(QWidget *from)
+{
+	pl_layout_show_menu(from);
+}
+
 /* Um item da faixa: a bolinha colorida e o texto. */
 class Item : public QWidget {
 public:
@@ -88,9 +98,13 @@ private:
 	std::string shownColor;
 };
 
+class StatsDock;
+void removeInstance(StatsDock *gone);
+
 class StatsDock : public QWidget {
 public:
-	explicit StatsDock(QWidget *parent) : QWidget(parent)
+	/* withButtons: na janela do Projeto Live a faixa vem sem os botões Projeto Live, Painéis e Layout. */
+	explicit StatsDock(QWidget *parent, bool withButtons = true) : QWidget(parent)
 	{
 		cpuInfo = os_cpu_usage_info_start();
 
@@ -115,11 +129,11 @@ public:
 		line->setContentsMargins(0, 0, 8, 0);
 		line->setSpacing(6);
 		line->addWidget(area, 1);
-		line->addWidget(button(obs_module_text("Studio.ToLive"), openLive));
-		line->addWidget(button(obs_module_text("Layout.Panels"),
-				       [](QWidget *from) { pl_layout_show_panels_menu(from); }));
-		line->addWidget(
-			button(obs_module_text("Layout.Menu"), [](QWidget *from) { pl_layout_show_menu(from); }));
+		if (withButtons) {
+			line->addWidget(button(obs_module_text("Studio.ToLive"), openLive));
+			line->addWidget(button(obs_module_text("Layout.Panels"), openPanels));
+			line->addWidget(button(obs_module_text("Layout.Menu"), openLayout));
+		}
 		outer->addLayout(line);
 
 		setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
@@ -144,6 +158,7 @@ public:
 
 	~StatsDock() override
 	{
+		removeInstance(this);
 		if (cpuInfo) {
 			os_cpu_usage_info_destroy(cpuInfo);
 		}
@@ -299,18 +314,23 @@ private:
 };
 
 StatsDock *dock = nullptr;
+std::vector<StatsDock *> instances;
+
+void removeInstance(StatsDock *gone)
+{
+	instances.erase(std::remove(instances.begin(), instances.end(), gone), instances.end());
+}
 
 void frontendEvent(enum obs_frontend_event event, void *param)
 {
 	(void)param;
-	if (!dock) {
-		return;
-	}
 	/* Qualquer aviso do OBS serve para saber que ele já abriu: start() só age na primeira vez.
 	 * Assim a faixa não fica parada para sempre se o aviso de "terminei de abrir" não vier. */
-	dock->start();
-	if (event == OBS_FRONTEND_EVENT_RECORDING_STARTING) {
-		dock->recordingStarted();
+	for (StatsDock *each : instances) {
+		each->start();
+		if (event == OBS_FRONTEND_EVENT_RECORDING_STARTING) {
+			each->recordingStarted();
+		}
 	}
 }
 
@@ -329,6 +349,7 @@ void pl_stats_dock_load(void)
 		dock = nullptr;
 		return;
 	}
+	instances.push_back(dock);
 	QObject::connect(dock, &QObject::destroyed, []() { dock = nullptr; });
 	obs_frontend_add_event_callback(frontendEvent, nullptr);
 }
@@ -336,4 +357,12 @@ void pl_stats_dock_load(void)
 void pl_stats_dock_unload(void)
 {
 	obs_frontend_remove_event_callback(frontendEvent, nullptr);
+}
+
+QWidget *pl_stats_dock_create(QWidget *parent)
+{
+	auto *created = new StatsDock(parent, false);
+	instances.push_back(created);
+	created->start();
+	return created;
 }

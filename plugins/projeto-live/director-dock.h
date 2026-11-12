@@ -18,4 +18,9 @@ void pl_director_dock_load(void);
 
 #ifdef __cplusplus
 }
+
+class QWidget;
+
+/* Mais um painel Diretor (para a janela do Projeto Live). */
+QWidget *pl_director_dock_create(QWidget *parent);
 #endif

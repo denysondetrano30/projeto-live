@@ -19,4 +19,9 @@ void pl_stats_dock_unload(void);
 
 #ifdef __cplusplus
 }
+
+class QWidget;
+
+/* Mais uma faixa Situação, sem os botões (para a janela do Projeto Live). Já começa ligada. */
+QWidget *pl_stats_dock_create(QWidget *parent);
 #endif

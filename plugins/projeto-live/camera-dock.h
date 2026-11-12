@@ -20,7 +20,11 @@ void pl_camera_dock_load(void);
 }
 
 class QWidget;
+struct obs_source;
 
 /* Mais uma cópia do painel Entradas (a janela do Projeto Live usa uma; a do OBS, outra). */
 QWidget *pl_camera_dock_create(QWidget *parent);
+
+/* Abre a janela "Adicionar fonte" do OBS para esta entrada (cena). */
+void pl_entries_add_source(struct obs_source *scene);
 #endif

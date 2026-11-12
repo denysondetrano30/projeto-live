@@ -1220,3 +1220,10 @@ QWidget *pl_camera_dock_create(QWidget *parent)
 {
 	return new CameraDock(parent);
 }
+
+void pl_entries_add_source(obs_source_t *scene)
+{
+	if (scene) {
+		openAddSource(scene);
+	}
+}

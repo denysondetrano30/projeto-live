@@ -593,3 +593,8 @@ void pl_director_dock_load(void)
 						   latchPressed, nullptr);
 	obs_frontend_add_save_callback(saveHotkeys, nullptr);
 }
+
+QWidget *pl_director_dock_create(QWidget *parent)
+{
+	return new DirectorDock(parent);
+}
