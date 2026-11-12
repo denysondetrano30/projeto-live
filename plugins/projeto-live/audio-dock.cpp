@@ -216,10 +216,7 @@ public:
 		}
 	}
 
-	bool holds(obs_source_t *target) const
-	{
-		return source && obs_weak_source_references_source(source, target);
-	}
+	bool holds(obs_source_t *target) const { return source && obs_weak_source_references_source(source, target); }
 
 	/* Liga ou desliga o fone neste canal, sem mexer no que vai para a live. */
 	void setListening(bool on)
@@ -275,8 +272,7 @@ public:
 
 private:
 	static void levelCallback(void *data, const float magnitude[MAX_AUDIO_CHANNELS],
-				  const float peak[MAX_AUDIO_CHANNELS],
-				  const float inputPeak[MAX_AUDIO_CHANNELS])
+				  const float peak[MAX_AUDIO_CHANNELS], const float inputPeak[MAX_AUDIO_CHANNELS])
 	{
 		(void)magnitude;
 		(void)inputPeak;
@@ -408,8 +404,7 @@ private:
 		if (id.isEmpty()) {
 			return;
 		}
-		obs_set_audio_monitoring_device(devices->itemText(index).toUtf8().constData(),
-						id.toUtf8().constData());
+		obs_set_audio_monitoring_device(devices->itemText(index).toUtf8().constData(), id.toUtf8().constData());
 		warning->clear();
 		save(devices->itemText(index), id);
 	}
