@@ -1094,9 +1094,20 @@ private:
 			delete item;
 		}
 		for (const Recado &recado : hub->recados) {
-			box->addWidget(card(recado));
+			QWidget *item = card(recado);
+			box->addWidget(item);
+			/* Com a janelinha já aberta, o Qt só mostraria o cartão novo depois; mostra já, para
+			 * medir o tamanho certo (senão ela vai parar na borda da tela). */
+			item->show();
 		}
+		box->activate();
 		place();
+		QPointer<Toasts> self(this);
+		QTimer::singleShot(0, this, [self]() {
+			if (self) {
+				self->place();
+			}
+		});
 	}
 
 	QVBoxLayout *box = nullptr;
