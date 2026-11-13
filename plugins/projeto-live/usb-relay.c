@@ -1,5 +1,5 @@
 /*
- * Projeto Live: imagem do iPhone pelo cabo USB (veja usb-relay.h).
+ * Projeto Live: imagem do celular (iPhone ou Android) pelo cabo USB (veja usb-relay.h).
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,6 +17,7 @@
 #include <obs-module.h>
 #include <util/bmem.h>
 #include <util/dstr.h>
+#include <util/pipe.h>
 #include <util/platform.h>
 #include <util/threading.h>
 
@@ -25,6 +26,9 @@
 #include "usb-relay.h"
 
 #define USBMUXD_WINDOWS_PORT 27015
+#define ADB_PORT 5037
+#define ADB_START_RETRY_NS (15 * SECOND_NS)
+#define ADB_SERIAL_MAX 96
 #ifndef USBMUXD_UNIX_PATH
 #define USBMUXD_UNIX_PATH "/var/run/usbmuxd"
 #endif
@@ -88,6 +92,15 @@ static void release_device(long long id)
 	}
 	pthread_mutex_unlock(&claimed_mutex);
 }
+
+/* Um celular no cabo: iPhone (pelo usbmuxd da Apple) ou Android (pelo adb do Google). */
+enum phone_kind { PHONE_IPHONE, PHONE_ANDROID };
+
+struct phone_dev {
+	enum phone_kind kind;
+	long long id; /* iPhone: o número do usbmuxd; Android: um número tirado do serial */
+	char serial[ADB_SERIAL_MAX];
+};
 
 /* ------------------------------------------------------------------------- */
 /* Ajudantes                                                                 */
@@ -284,42 +297,250 @@ static pl_socket_t connect_device(long long id, int port, long long *result)
 	return sock;
 }
 
-/* Liga para o vídeo do app num iPhone do cabo que nenhuma outra fonte esteja usando.
- * Devolve o túnel (socket) e o iPhone escolhido, ou PL_INVALID_SOCKET. */
-static pl_socket_t connect_phone(struct pl_usb_relay *relay, long long *device_id)
+/* ------------------------------------------------------------------------- */
+/* Android: o servidor do adb (127.0.0.1:5037)                               */
+/*
+ * Conversa do adb: cada pedido vai como 4 dígitos hexadecimais com o tamanho + o texto; a
+ * resposta começa com "OKAY" ou "FAIL". "host:devices" lista os aparelhos; "host:transport:<serial>"
+ * escolhe um; depois "tcp:<porta>" vira um túnel direto até essa porta dentro do celular.
+ * Se o servidor não estiver rodando, o plugin liga o adb que vem com o Projeto Live.
+ */
+
+static uint64_t adb_next_start_ns;
+
+static pl_socket_t adb_connect_once(void)
 {
-	long long ids[MAX_DEVICES];
-	size_t count = list_devices(ids, MAX_DEVICES);
-	if (count == (size_t)-1) {
-		set_status(relay, "serviço da Apple (Apple Mobile Device) não encontrado; instale o iTunes ou o "
-				  "app Dispositivos Apple");
+	pl_socket_t sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (sock == PL_INVALID_SOCKET) {
 		return PL_INVALID_SOCKET;
 	}
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(ADB_PORT);
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+		pl_close_socket(sock);
+		return PL_INVALID_SOCKET;
+	}
+	pl_no_sigpipe(sock);
+	return sock;
+}
+
+/* Liga o servidor do adb ("adb start-server"), no máximo a cada 15 segundos. */
+static void adb_start_server(void)
+{
+	uint64_t now = os_gettime_ns();
+	if (now < adb_next_start_ns) {
+		return;
+	}
+	adb_next_start_ns = now + ADB_START_RETRY_NS;
+
+	struct dstr cmd = {0};
+#ifdef _WIN32
+	char *path = obs_module_file("adb/adb.exe");
+	if (!path) {
+		return;
+	}
+	dstr_printf(&cmd, "\"%s\" start-server", path);
+	bfree(path);
+#else
+	dstr_copy(&cmd, "adb start-server");
+#endif
+	os_process_pipe_t *pipe = os_process_pipe_create(cmd.array, "r");
+	dstr_free(&cmd);
+	if (!pipe) {
+		return;
+	}
+	/* Não lê a saída: o servidor do adb que fica rodando pode herdar a ponta do cano e a leitura
+	 * nunca terminaria. Só espera o "adb start-server" sair (ele sai quando o servidor está pronto). */
+	os_process_pipe_destroy(pipe);
+}
+
+static pl_socket_t adb_connect(void)
+{
+	pl_socket_t sock = adb_connect_once();
+	if (sock == PL_INVALID_SOCKET) {
+		adb_start_server();
+		sock = adb_connect_once();
+	}
+	return sock;
+}
+
+static bool adb_request(pl_socket_t sock, const char *text)
+{
+	char header[5];
+	size_t len = strlen(text);
+	if (len > 0xFFFF) {
+		return false;
+	}
+	snprintf(header, sizeof(header), "%04x", (unsigned)len);
+	if (!pl_send_all(sock, header, 4) || !pl_send_all(sock, text, len)) {
+		return false;
+	}
+	if (pl_wait_readable(sock, 3000) != 1) {
+		return false;
+	}
+	char status[4];
+	return pl_recv_all(sock, status, 4) && memcmp(status, "OKAY", 4) == 0;
+}
+
+static long long adb_id(const char *serial)
+{
+	/* Um número estável para o serial (para não pegar o mesmo Android em duas fontes). */
+	unsigned long long hash = 1469598103934665603ULL;
+	for (const char *c = serial; *c; c++) {
+		hash = (hash ^ (unsigned char)*c) * 1099511628211ULL;
+	}
+	return (long long)((hash & 0x3FFFFFFFFFFFFFFFULL) | 0x4000000000000000ULL);
+}
+
+/* Lista os Androids. Devolve quantos estão prontos; `unauthorized` conta os que ainda não
+ * aceitaram este computador. (size_t)-1 = sem adb. */
+static size_t adb_list(struct phone_dev *devs, size_t max, size_t *unauthorized)
+{
+	*unauthorized = 0;
+	pl_socket_t sock = adb_connect();
+	if (sock == PL_INVALID_SOCKET) {
+		return (size_t)-1;
+	}
+	size_t count = 0;
+	char size_text[5] = {0};
+	if (adb_request(sock, "host:devices") && pl_wait_readable(sock, 3000) == 1 && pl_recv_all(sock, size_text, 4)) {
+		size_t size = (size_t)strtoul(size_text, NULL, 16);
+		char *list = bzalloc(size + 1);
+		if (size == 0 || pl_recv_all(sock, list, size)) {
+			char *line = list;
+			while (line && *line) {
+				char *next = strchr(line, '\n');
+				if (next) {
+					*next++ = 0;
+				}
+				char *tab = strchr(line, '\t');
+				if (tab) {
+					*tab = 0;
+					const char *state = tab + 1;
+					if (strncmp(state, "device", 6) == 0 && count < max &&
+					    strlen(line) < ADB_SERIAL_MAX) {
+						devs[count].kind = PHONE_ANDROID;
+						snprintf(devs[count].serial, ADB_SERIAL_MAX, "%s", line);
+						devs[count].id = adb_id(line);
+						count++;
+					} else if (strncmp(state, "unauthorized", 12) == 0) {
+						(*unauthorized)++;
+					}
+				}
+				line = next;
+			}
+		}
+		bfree(list);
+	}
+	pl_close_socket(sock);
+	return count;
+}
+
+/* Túnel pelo cabo até a porta `port` do app no Android `serial`. */
+static pl_socket_t adb_connect_port(const char *serial, int port)
+{
+	pl_socket_t sock = adb_connect();
+	if (sock == PL_INVALID_SOCKET) {
+		return PL_INVALID_SOCKET;
+	}
+	char text[ADB_SERIAL_MAX + 32];
+	snprintf(text, sizeof(text), "host:transport:%s", serial);
+	if (!adb_request(sock, text)) {
+		pl_close_socket(sock);
+		return PL_INVALID_SOCKET;
+	}
+	snprintf(text, sizeof(text), "tcp:%d", port);
+	if (!adb_request(sock, text)) {
+		pl_close_socket(sock);
+		return PL_INVALID_SOCKET;
+	}
+	pl_no_delay(sock);
+	return sock;
+}
+
+/* Abre o túnel até a porta `port` do app no celular `dev` (iPhone ou Android). */
+static pl_socket_t connect_dev(const struct phone_dev *dev, int port)
+{
+	if (dev->kind == PHONE_ANDROID) {
+		return adb_connect_port(dev->serial, port);
+	}
+	long long result;
+	return connect_device(dev->id, port, &result);
+}
+
+/* Liga para o vídeo do app num celular do cabo (iPhone ou Android) que nenhuma outra fonte esteja
+ * usando. Devolve o túnel (socket) e o celular escolhido, ou PL_INVALID_SOCKET. */
+static pl_socket_t connect_phone(struct pl_usb_relay *relay, struct phone_dev *chosen)
+{
+	struct phone_dev devs[MAX_DEVICES * 2];
+	size_t count = 0;
+
+	long long ids[MAX_DEVICES];
+	size_t iphones = list_devices(ids, MAX_DEVICES);
+	bool apple_service = iphones != (size_t)-1;
+	for (size_t i = 0; apple_service && i < iphones; i++) {
+		devs[count].kind = PHONE_IPHONE;
+		devs[count].id = ids[i];
+		devs[count].serial[0] = 0;
+		count++;
+	}
+
+	size_t unauthorized = 0;
+	size_t androids = adb_list(devs + count, MAX_DEVICES, &unauthorized);
+	bool adb_service = androids != (size_t)-1;
+	if (adb_service) {
+		count += androids;
+	}
+
 	if (count == 0) {
-		set_status(relay, "nenhum iPhone ligado no cabo");
+		if (unauthorized > 0) {
+			set_status(relay,
+				   "Android no cabo: no celular, toque em \"Permitir\" na pergunta da depuração USB");
+		} else if (!apple_service && !adb_service) {
+			set_status(relay,
+				   "nenhum celular no cabo (iPhone: precisa do iTunes ou do app Dispositivos Apple; "
+				   "Android: ligue a Depuração USB)");
+		} else {
+			set_status(
+				relay,
+				"nenhum celular no cabo (Android: ligue a Depuração USB nas Opções do desenvolvedor)");
+		}
 		return PL_INVALID_SOCKET;
 	}
 
 	bool all_busy = true;
 	for (size_t i = 0; i < count; i++) {
-		if (!claim_device(ids[i])) {
+		if (!claim_device(devs[i].id)) {
 			continue;
 		}
 		all_busy = false;
 
-		long long result;
-		pl_socket_t sock = connect_device(ids[i], PL_USB_PHONE_PORT, &result);
+		pl_socket_t sock = PL_INVALID_SOCKET;
+		long long result = -1;
+		if (devs[i].kind == PHONE_IPHONE) {
+			sock = connect_device(devs[i].id, PL_USB_PHONE_PORT, &result);
+		} else {
+			sock = adb_connect_port(devs[i].serial, PL_USB_PHONE_PORT);
+		}
 		if (sock != PL_INVALID_SOCKET) {
-			set_status(relay, "recebendo a imagem do iPhone");
-			*device_id = ids[i];
+			set_status(relay, devs[i].kind == PHONE_IPHONE ? "recebendo a imagem do iPhone"
+								       : "recebendo a imagem do Android");
+			*chosen = devs[i];
 			return sock;
 		}
-		release_device(ids[i]);
-		set_status(relay, result == 3 ? "iPhone no cabo, mas o app Projeto Live não está aberto"
-					      : "o iPhone não aceitou a conexão pelo cabo");
+		release_device(devs[i].id);
+		if (devs[i].kind == PHONE_IPHONE) {
+			set_status(relay, result == 3 ? "iPhone no cabo, mas o app Projeto Live não está aberto"
+						      : "o iPhone não aceitou a conexão pelo cabo");
+		} else {
+			set_status(relay, "Android no cabo, mas o app Projeto Live não está aberto");
+		}
 	}
 	if (all_busy) {
-		set_status(relay, "todos os iPhones do cabo já estão em outras fontes \"Celular\"");
+		set_status(relay, "todos os celulares do cabo já estão em outras fontes \"Celular\"");
 	}
 	return PL_INVALID_SOCKET;
 }
@@ -404,7 +625,7 @@ static void close_control(struct pl_usb_relay *relay, struct tunnel *control)
 
 /* Repassa o vídeo do iPhone para a Fonte de mídia até um dos lados fechar. Ao mesmo tempo,
  * mantém o túnel de controle (porta 9011): "no ar", avisos do diretor e as confirmações. */
-static void pump(struct pl_usb_relay *relay, pl_socket_t phone, pl_socket_t media, long long device_id)
+static void pump(struct pl_usb_relay *relay, pl_socket_t phone, pl_socket_t media, const struct phone_dev *dev)
 {
 	char *buffer = bmalloc(PUMP_BUFFER);
 	struct tunnel video = {phone, -1};
@@ -422,8 +643,7 @@ static void pump(struct pl_usb_relay *relay, pl_socket_t phone, pl_socket_t medi
 
 		/* Apps antigos (até a versão 0.6) não têm a porta de controle: tenta de novo de vez em quando. */
 		if (control.sock == PL_INVALID_SOCKET && now >= next_control_ns) {
-			long long result;
-			control.sock = connect_device(device_id, PL_USB_CONTROL_PORT, &result);
+			control.sock = connect_dev(dev, PL_USB_CONTROL_PORT);
 			lines.used = 0;
 			next_control_ns = now + CONTROL_RETRY_NS;
 			voice_pending = true;
@@ -431,8 +651,7 @@ static void pump(struct pl_usb_relay *relay, pl_socket_t phone, pl_socket_t medi
 
 		/* Intercom: um terceiro túnel, só de voz (o app 0.8 em diante escuta na porta 9012). */
 		if (relay->voice && now >= next_voice_ns && !pl_voice_peer_has_stream(relay->voice)) {
-			long long result;
-			pl_socket_t voice = connect_device(device_id, PL_USB_VOICE_PORT, &result);
+			pl_socket_t voice = connect_dev(dev, PL_USB_VOICE_PORT);
 			if (voice != PL_INVALID_SOCKET) {
 				pl_voice_peer_attach_stream(relay->voice, voice);
 			}
@@ -532,15 +751,16 @@ static void *relay_thread(void *data)
 		}
 		pl_no_sigpipe(media);
 
-		long long device_id = 0;
-		pl_socket_t phone = connect_phone(relay, &device_id);
+		struct phone_dev dev;
+		memset(&dev, 0, sizeof(dev));
+		pl_socket_t phone = connect_phone(relay, &dev);
 		if (phone != PL_INVALID_SOCKET) {
-			pump(relay, phone, media, device_id);
+			pump(relay, phone, media, &dev);
 			pl_close_socket(phone);
-			release_device(device_id);
+			release_device(dev.id);
 			set_status(relay, "conexão pelo cabo encerrada");
 		}
-		/* Sem iPhone: fecha, e a Fonte de mídia tenta de novo em 1 segundo. */
+		/* Sem celular: fecha, e a Fonte de mídia tenta de novo em 1 segundo. */
 		pl_close_socket(media);
 	}
 	return NULL;

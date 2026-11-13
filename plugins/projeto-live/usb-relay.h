@@ -14,6 +14,11 @@
  *
  * Com mais de um iPhone no cabo, cada fonte "Celular" pega um iPhone que nenhuma outra esteja usando.
  *
+ * Android (app 0.3 em diante): o mesmo, pela Depuração USB. Em vez do usbmuxd, o relé fala com o
+ * servidor do adb (127.0.0.1:5037; se não estiver rodando, liga o adb.exe que o instalador põe em
+ * data/obs-plugins/projeto-live/adb) e abre "tcp:9010", "tcp:9011" e "tcp:9012" no celular. O app
+ * Android escuta nessas portas igual ao do iPhone, com as mesmas mensagens.
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 2 of the License, or
