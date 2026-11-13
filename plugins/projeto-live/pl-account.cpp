@@ -974,9 +974,12 @@ public:
 
 class Toasts : public QWidget {
 public:
-	explicit Toasts(QWidget *host) : QWidget(host)
+	/* Janelinha própria, sem borda, por cima do canto da janela: a Prévia e o Programa são janelas
+	 * de vídeo do sistema e cobririam qualquer coisa desenhada dentro da mesma janela. */
+	explicit Toasts(QWidget *host) : QWidget(host, Qt::Tool | Qt::FramelessWindowHint)
 	{
-		setAttribute(Qt::WA_StyledBackground, false);
+		setAttribute(Qt::WA_ShowWithoutActivating);
+		setAttribute(Qt::WA_TranslucentBackground);
 		box = new QVBoxLayout(this);
 		box->setContentsMargins(0, 0, 0, 0);
 		box->setSpacing(8);
@@ -993,19 +996,36 @@ public:
 protected:
 	bool eventFilter(QObject *watched, QEvent *event) override
 	{
-		if (watched == parent() && (event->type() == QEvent::Resize || event->type() == QEvent::Show)) {
-			place();
+		if (watched == parent()) {
+			switch (event->type()) {
+			case QEvent::Resize:
+			case QEvent::Move:
+			case QEvent::Show:
+			case QEvent::Hide:
+			case QEvent::WindowStateChange:
+				place();
+				break;
+			default:
+				break;
+			}
 		}
 		return QWidget::eventFilter(watched, event);
 	}
 
 private:
+	/* Segue o canto de cima, à direita, da janela; some se ela estiver escondida ou minimizada. */
 	void place()
 	{
 		auto *host = parentWidget();
+		bool wanted = !hub->recados.empty() && host->isVisible() && !host->isMinimized();
+		if (!wanted) {
+			hide();
+			return;
+		}
 		adjustSize();
-		int top = 70;
-		move(host->width() - width() - 16, top);
+		QPoint corner = host->mapToGlobal(QPoint(host->width(), 0));
+		move(corner.x() - width() - 16, corner.y() + 70);
+		QWidget::show();
 		raise();
 	}
 
@@ -1016,7 +1036,8 @@ private:
 		frame->setStyleSheet("#plRecado { background: #1d1f24; border: 1px solid #3a3d44; border-radius: 8px; }"
 				     "#plRecado QLabel { background: transparent; color: #f1f3f4; }"
 				     "#plRecado QPushButton { padding: 3px 10px; }");
-		frame->setFixedWidth(330);
+		frame->setMinimumWidth(340);
+		frame->setMaximumWidth(460);
 		auto *v = new QVBoxLayout(frame);
 		v->setContentsMargins(12, 10, 12, 10);
 		v->setSpacing(6);
@@ -1067,6 +1088,7 @@ private:
 	{
 		while (QLayoutItem *item = box->takeAt(0)) {
 			if (item->widget()) {
+				item->widget()->hide();
 				item->widget()->deleteLater();
 			}
 			delete item;
@@ -1074,10 +1096,7 @@ private:
 		for (const Recado &recado : hub->recados) {
 			box->addWidget(card(recado));
 		}
-		setVisible(!hub->recados.empty());
-		if (!hub->recados.empty()) {
-			place();
-		}
+		place();
 	}
 
 	QVBoxLayout *box = nullptr;
