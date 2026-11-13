@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.28...3.30)
 
 find_package(Qt6 REQUIRED Widgets)
+find_package(CURL REQUIRED)
 find_package(FFmpeg REQUIRED avcodec avformat avutil)
 
 add_library(projeto-live MODULE)
@@ -37,6 +38,8 @@ target_sources(
     phone-video.c
     phone-video.h
     pl-clock.c
+    pl-account.cpp
+    pl-account.h
     pl-clock.h
     pl-link.h
     pl-socket.h
@@ -77,6 +80,7 @@ target_link_libraries(
     OBS::frontend-api
     OBS::libobs
     Qt::Widgets
+    CURL::libcurl
     FFmpeg::avcodec
     FFmpeg::avformat
     FFmpeg::avutil

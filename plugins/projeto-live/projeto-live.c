@@ -20,6 +20,7 @@
 #include "projection-link.h"
 #include "scene-audio.h"
 #include "stats-dock.h"
+#include "pl-account.h"
 #include "studio-window.h"
 #include "stream-dock.h"
 #include "vertical-dock.h"
@@ -58,6 +59,7 @@ bool obs_module_load(void)
 	pl_multistream_ui_load();
 	pl_projection_ui_load();
 	pl_audio_wizard_load();
+	pl_account_load();
 	pl_studio_window_load();
 	pl_projection_start();
 	return true;
@@ -67,6 +69,7 @@ void obs_module_unload(void)
 {
 	pl_projection_stop();
 	pl_studio_window_unload();
+	pl_account_unload();
 	pl_stats_dock_unload();
 	pl_audio_dock_unload();
 	pl_scene_audio_unload();

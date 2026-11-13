@@ -77,6 +77,7 @@
 #include "audio-dock.h"
 #include "camera-dock.h"
 #include "director-dock.h"
+#include "pl-account.h"
 #include "source-row.hpp"
 #include "stats-dock.h"
 #include "vertical-dock.h"
@@ -723,6 +724,9 @@ public:
 		top->addWidget(brand);
 		top->addSpacing(12);
 		top->addWidget(pl_stats_dock_create(this), 1);
+		if (QWidget *badge = pl_account_badge_create(this)) {
+			top->addWidget(badge);
+		}
 		auto *toObs = new QPushButton(msg("Studio.ToObs"), this);
 		toObs->setToolTip(msg("Studio.ToObsHint"));
 		connect(toObs, &QPushButton::clicked, this, []() { enterObs(); });
@@ -822,6 +826,9 @@ public:
 		connect(settings, &QPushButton::clicked, this, []() { openSettings(); });
 		footer->addWidget(settings);
 		outer->addLayout(footer);
+
+		/* Os recados do diretor aparecem no canto de cima, à direita. */
+		pl_account_attach_toasts(this);
 
 		timer = new QTimer(this);
 		timer->setInterval(200);
