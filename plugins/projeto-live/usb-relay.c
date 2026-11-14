@@ -345,7 +345,30 @@ static void adb_start_server(void)
 	dstr_printf(&cmd, "\"%s\" start-server", path);
 	bfree(path);
 #else
-	dstr_copy(&cmd, "adb start-server");
+	/* Mac e Linux: o adb não vem com o OBS. Procura onde ele costuma ficar (o programa aberto pelo
+	 * Finder não enxerga o PATH do Terminal): junto do plugin, Homebrew, Android Studio e a pasta
+	 * "platform-tools" baixada do site do Google para Downloads. */
+	char *bundled = obs_module_file("adb/adb");
+	const char *home = getenv("HOME");
+	struct dstr studio = {0}, downloads = {0};
+	dstr_printf(&studio, "%s/Library/Android/sdk/platform-tools/adb", home ? home : "");
+	dstr_printf(&downloads, "%s/Downloads/platform-tools/adb", home ? home : "");
+	const char *places[] = {bundled ? bundled : "", "/opt/homebrew/bin/adb", "/usr/local/bin/adb", studio.array,
+				downloads.array};
+	const char *found = NULL;
+	for (size_t i = 0; i < sizeof(places) / sizeof(places[0]) && !found; i++) {
+		if (places[i] && *places[i] && os_file_exists(places[i])) {
+			found = places[i];
+		}
+	}
+	if (found) {
+		dstr_printf(&cmd, "\"%s\" start-server", found);
+	} else {
+		dstr_copy(&cmd, "adb start-server");
+	}
+	bfree(bundled);
+	dstr_free(&studio);
+	dstr_free(&downloads);
 #endif
 	os_process_pipe_t *pipe = os_process_pipe_create(cmd.array, "r");
 	dstr_free(&cmd);

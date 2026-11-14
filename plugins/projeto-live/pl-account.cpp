@@ -519,7 +519,7 @@ public:
 				} else if (http.status != 200) {
 					fail = Fail::Other;
 				}
-				for (const QJsonValue &row : QJsonDocument::fromJson(http.body).array()) {
+				for (const QJsonValue row : QJsonDocument::fromJson(http.body).array()) {
 					QJsonObject doc = row.toObject().value("document").toObject();
 					QJsonObject fields = doc.value("fields").toObject();
 					if (doc.isEmpty() || !fields.contains("ultima")) {
@@ -684,7 +684,7 @@ public:
 	void received(const QJsonArray &rows)
 	{
 		bool update = false;
-		for (const QJsonValue &row : rows) {
+		for (const QJsonValue row : rows) {
 			QJsonObject doc = row.toObject().value("document").toObject();
 			if (doc.isEmpty()) {
 				continue;
