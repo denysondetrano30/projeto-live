@@ -1,0 +1,51 @@
+name: Projeto Live (Mac)
+run-name: Publica o OBS do Mac 🍏
+# Pega o .dmg do Mac (chip Apple e Intel) da última compilação "Push" que deu certo no Mac e
+# publica na mesma Release do instalador do Windows (33.0.1-projetolive), com nomes fixos, para
+# ter um link direto de download.
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: 33.0.1-projetolive
+    steps:
+      - name: Acha a compilação do Mac
+        id: find
+        run: |
+          set -euo pipefail
+          for id in $(gh run list -R "$REPO" -w push.yaml -b master -L 30 --json databaseId -q '.[].databaseId'); do
+            ok=$(gh run view "$id" -R "$REPO" --json jobs -q '[.jobs[] | select(.name | test("macOS")) | select(.conclusion == "success")] | length')
+            if [ "$ok" = "2" ]; then
+              sha=$(gh run view "$id" -R "$REPO" --json headSha -q '.headSha[0:9]')
+              echo "id=$id" >> "$GITHUB_OUTPUT"
+              echo "sha=$sha" >> "$GITHUB_OUTPUT"
+              echo "Compilação $id ($sha)"
+              exit 0
+            fi
+          done
+          echo "Nenhuma compilação recente com o Mac pronto" >&2
+          exit 1
+
+      - name: Baixa os .dmg
+        run: |
+          set -euo pipefail
+          mkdir -p mac
+          for target in arm64 x86_64; do
+            gh run download "${{ steps.find.outputs.id }}" -R "$REPO" -n "obs-studio-macos-$target-${{ steps.find.outputs.sha }}" -D "mac/$target"
+          done
+          find mac -type f | head -20
+          cp "$(find mac/arm64 -name '*.dmg' | head -1)" ProjetoLive-OBS-Mac-chip-Apple.dmg
+          cp "$(find mac/x86_64 -name '*.dmg' | head -1)" ProjetoLive-OBS-Mac-Intel.dmg
+
+      - name: Publica na Release
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" -R "$REPO" ProjetoLive-OBS-Mac-chip-Apple.dmg ProjetoLive-OBS-Mac-Intel.dmg --clobber
+          echo "Mac: compilação ${{ steps.find.outputs.sha }}"
