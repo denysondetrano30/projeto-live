@@ -72,7 +72,14 @@ static void receiver_audio(void *param, obs_source_t *source, const struct audio
 	pthread_mutex_unlock(&mirrors_mutex);
 }
 
-static void create_receiver(void)
+/* Teste de atraso (16/11): opções de leitura escolhidas na fonte "Telão" e aplicadas na fonte de
+ * mídia compartilhada. "imediato" mostra cada quadro assim que chega, sem o OBS segurar a imagem
+ * para casar com o som. */
+static bool opt_imediato = false;
+static bool opt_hw = true;
+static bool opt_sem_folga = false;
+
+static obs_data_t *receiver_settings(void)
 {
 	char input[96];
 	snprintf(input, sizeof(input), "tcp://0.0.0.0:%d?listen=1", MIRROR_PORT);
@@ -86,13 +93,20 @@ static void create_receiver(void)
 	obs_data_set_bool(settings, "restart_on_activate", false);
 	obs_data_set_bool(settings, "close_when_inactive", false);
 	obs_data_set_bool(settings, "clear_on_media_end", true);
-	obs_data_set_bool(settings, "hw_decode", true);
+	obs_data_set_bool(settings, "hw_decode", opt_hw);
 	/* Sem folga na leitura: o OBS toca no ritmo do relógio, então qualquer coisa guardada no começo
 	 * vira atraso fixo do telão. ("fflags=nobuffer" foi medido e piora: não usar.) */
-	obs_data_set_string(settings, "ffmpeg_options", "probesize=32768 analyzeduration=200000");
+	obs_data_set_string(settings, "ffmpeg_options", opt_sem_folga ? "fflags=nobuffer flags=low_delay probesize=32768 analyzeduration=200000" : "probesize=32768 analyzeduration=200000");
+	return settings;
+}
+
+static void create_receiver(void)
+{
+	obs_data_t *settings = receiver_settings();
 	receiver = obs_source_create_private("ffmpeg_source", "Projeto Live: telão (recebe)", settings);
 	obs_data_release(settings);
 	if (receiver) {
+		obs_source_set_async_unbuffered(receiver, opt_imediato);
 		obs_source_add_audio_capture_callback(receiver, receiver_audio, NULL);
 	}
 	pl_projection_set_mirror(MIRROR_PORT);
@@ -108,9 +122,41 @@ static void destroy_receiver(void)
 	}
 }
 
+static void read_options(obs_data_t *settings)
+{
+	opt_imediato = obs_data_get_bool(settings, "imediato");
+	opt_hw = obs_data_get_bool(settings, "hw_decode");
+	opt_sem_folga = obs_data_get_bool(settings, "sem_folga");
+}
+
+static void mirror_update(void *data, obs_data_t *settings)
+{
+	(void)data;
+	bool imediato = opt_imediato, hw = opt_hw, sem_folga = opt_sem_folga;
+	read_options(settings);
+	if (!receiver) {
+		return;
+	}
+	if (imediato != opt_imediato) {
+		obs_source_set_async_unbuffered(receiver, opt_imediato);
+	}
+	if (hw != opt_hw || sem_folga != opt_sem_folga) {
+		obs_data_t *rs = receiver_settings();
+		obs_source_update(receiver, rs);
+		obs_data_release(rs);
+	}
+}
+
+static void mirror_defaults(obs_data_t *settings)
+{
+	obs_data_set_default_bool(settings, "imediato", false);
+	obs_data_set_default_bool(settings, "hw_decode", true);
+	obs_data_set_default_bool(settings, "sem_folga", false);
+}
+
 static void *mirror_create(obs_data_t *settings, obs_source_t *source)
 {
-	(void)settings;
+	read_options(settings);
 	struct mirror *mirror = bzalloc(sizeof(*mirror));
 	mirror->self = source;
 
@@ -149,6 +195,10 @@ static obs_properties_t *mirror_properties(void *unused)
 	(void)unused;
 	obs_properties_t *props = obs_properties_create();
 	obs_properties_add_text(props, "info", obs_module_text("Mirror.Info"), OBS_TEXT_INFO);
+	obs_properties_add_text(props, "teste", obs_module_text("Mirror.Test"), OBS_TEXT_INFO);
+	obs_properties_add_bool(props, "imediato", obs_module_text("Mirror.Immediate"));
+	obs_properties_add_bool(props, "hw_decode", obs_module_text("Mirror.HwDecode"));
+	obs_properties_add_bool(props, "sem_folga", obs_module_text("Mirror.NoBuffer"));
 	return props;
 }
 
@@ -206,6 +256,8 @@ struct obs_source_info pl_mirror_source = {
 	.create = mirror_create,
 	.destroy = mirror_destroy,
 	.get_properties = mirror_properties,
+	.get_defaults = mirror_defaults,
+	.update = mirror_update,
 	.video_render = mirror_render,
 	.get_width = mirror_width,
 	.get_height = mirror_height,
