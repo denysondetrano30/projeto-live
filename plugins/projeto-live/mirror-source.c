@@ -87,7 +87,9 @@ static void create_receiver(void)
 	obs_data_set_bool(settings, "close_when_inactive", false);
 	obs_data_set_bool(settings, "clear_on_media_end", true);
 	obs_data_set_bool(settings, "hw_decode", true);
-	obs_data_set_string(settings, "ffmpeg_options", "probesize=65536 analyzeduration=1000000");
+	/* Sem folga na leitura: o OBS toca no ritmo do relógio, então qualquer coisa guardada no começo
+	 * vira atraso fixo do telão (antes ~1 s só aqui). */
+	obs_data_set_string(settings, "ffmpeg_options", "fflags=nobuffer flags=low_delay probesize=32768 analyzeduration=200000 max_delay=0");
 	receiver = obs_source_create_private("ffmpeg_source", "Projeto Live: telão (recebe)", settings);
 	obs_data_release(settings);
 	if (receiver) {
