@@ -115,6 +115,19 @@ jobs:
           mkdir -p ../installer/stage/projecao
           cp -r dist/win-unpacked/. ../installer/stage/projecao/
 
+      - name: NDI para o OBS (fonte "Telão" recebe o telão pelo NDI)
+        shell: pwsh
+        run: |
+          # A biblioteca do NDI que a projeção já leva (pacote grandiose) vai também para o lado do
+          # plugin do OBS, que a carrega na hora (mirror-source.c).
+          $dll = Get-ChildItem -Recurse installer/stage/projecao -Filter "Processing.NDI.Lib.x64.dll" | Select-Object -First 1
+          if (-not $dll) { throw "Processing.NDI.Lib.x64.dll não está no app de projeção" }
+          $dest = "installer/stage/obs/obs-plugins/64bit"
+          if (-not (Test-Path "$dest/projeto-live.dll")) { throw "projeto-live.dll não está em $dest" }
+          Copy-Item $dll.FullName $dest
+          Get-ChildItem -Recurse installer/stage/projecao -Filter "*NDI*Licen*" | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName $dest }
+          Write-Host "NDI: $($dll.FullName) -> $dest"
+
       - name: Monta o instalador
         shell: pwsh
         run: |

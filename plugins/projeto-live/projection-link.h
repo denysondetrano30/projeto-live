@@ -16,6 +16,8 @@
  *                        "WS off" se o servidor do obs-websocket estiver desligado.
  *   OBS -> projeção:     "MIRROR <porta>" / "MIRROR off": mande (ou pare de mandar) o telão em FLV
  *                        para tcp://<este OBS>:<porta> (fonte "Telão (projeção)")
+ *   OBS -> projeção:     "NDI on" / "NDI off": mande (ou pare de mandar) o telão por NDI com o nome
+ *                        "Projeto Live - Telão" (caminho principal; o MIRROR fica de reserva)
  *   projeção -> OBS:     "TEXT <texto em base64>" (texto do slide no telão, para a fonte "Legenda
  *                        (projeção)"; "TEXT -" = telão sem texto)
  *   os dois lados:       "PING" a cada 2 segundos; 6 segundos sem nada = conexão caiu
@@ -52,6 +54,12 @@ uint64_t pl_projection_caption(char *text, size_t size);
 
 /* Porta onde a fonte "Telão (projeção)" escuta o telão (0 = nenhuma fonte, não mandar). */
 void pl_projection_set_mirror(int port);
+
+/* Pede (ou para de pedir) o telão por NDI. */
+void pl_projection_set_ndi(bool on);
+
+/* Implementada em mirror-source.c: 0 = sem fonte "Telão", 1 = NDI (ou procurando), 2 = modo antigo. */
+int pl_mirror_mode(void);
 
 /* Resposta da pergunta "Permitir?" (chamada pela interface). */
 void pl_projection_answer(unsigned int ticket, bool allow);

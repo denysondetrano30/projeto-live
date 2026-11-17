@@ -289,6 +289,12 @@ private:
 			Item *widget = item(used++);
 			widget->set(QString::fromUtf8(obs_module_text("Stats.Projection")), "#2fa84f");
 			widget->setToolTip(QString::fromUtf8(names));
+			/* Aviso discreto: o telão caiu no modo antigo (sem NDI, com mais atraso). */
+			if (pl_mirror_mode() == 2) {
+				Item *old = item(used++);
+				old->set(QString::fromUtf8(obs_module_text("Stats.MirrorOld")), "#d9a21b");
+				old->setToolTip(QString::fromUtf8(obs_module_text("Stats.MirrorOldTip")));
+			}
 		}
 
 		/* Câmeras em sincronia e o atraso que todas usam. */
