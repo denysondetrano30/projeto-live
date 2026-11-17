@@ -327,9 +327,15 @@ static enum speaker_layout speakers_for(int channels)
 	}
 }
 
+/* Hora do próximo pedaço de som. O NDI entrega o som em rajadas (rede, Wi-Fi): com a hora de chegada
+ * de cada pedaço o OBS via buracos e sobreposições e o som travava. Os pedaços seguem em sequência
+ * contínua (amostras / taxa); só volta para a hora de chegada se a diferença passar de 250 ms. */
+static uint64_t audio_next_ts;
+#define AUDIO_RESYNC_NS (250ULL * 1000000ULL)
+
 static void output_ndi_audio(const ndi_audio_frame_v3_t *audio)
 {
-	if (audio->fourcc != NDI_FOURCC_FLTP || audio->no_samples <= 0 || audio->no_channels <= 0 || !audio->p_data) {
+	if (audio->fourcc != NDI_FOURCC_FLTP || audio->no_samples <= 0 || audio->no_channels <= 0 || audio->sample_rate <= 0 || !audio->p_data) {
 		return;
 	}
 	int channels = audio->no_channels;
@@ -344,7 +350,13 @@ static void output_ndi_audio(const ndi_audio_frame_v3_t *audio)
 	out.speakers = speakers_for(channels);
 	out.format = AUDIO_FORMAT_FLOAT_PLANAR;
 	out.samples_per_sec = (uint32_t)audio->sample_rate;
-	out.timestamp = os_gettime_ns();
+	uint64_t now = os_gettime_ns();
+	uint64_t ts = audio_next_ts;
+	if (!ts || ts + AUDIO_RESYNC_NS < now || ts > now + AUDIO_RESYNC_NS) {
+		ts = now;
+	}
+	out.timestamp = ts;
+	audio_next_ts = ts + (uint64_t)audio->no_samples * NS_PER_SEC / (uint64_t)audio->sample_rate;
 	output_to_mirrors(&out);
 }
 
@@ -614,6 +626,7 @@ int pl_mirror_mode(void)
 static void start_all(void)
 {
 	last_video_ns = 0;
+	audio_next_ts = 0;
 	ndi_active = false;
 	if (!load_ndi()) {
 		start_old_mode();
