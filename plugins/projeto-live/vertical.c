@@ -240,6 +240,11 @@ static obs_source_t *find_twin(obs_source_t *horizontal)
 	return find.found;
 }
 
+obs_source_t *pl_vertical_twin_of(obs_source_t *horizontal)
+{
+	return (ready && canvas && horizontal) ? find_twin(horizontal) : NULL;
+}
+
 static void twin_name(obs_source_t *horizontal, char *out, size_t size)
 {
 	snprintf(out, size, "%s (vertical)", obs_source_get_name(horizontal));

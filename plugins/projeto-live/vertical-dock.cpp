@@ -86,11 +86,49 @@ QString moduleText(const char *key)
 }
 
 /* ------------------------------------------------------------------------- */
-/* A cena vertical em que se mexe é sempre a que está no ar (uma live só)   */
+/* A cena vertical em que se mexe é a gêmea da Prévia (como no horizontal)  */
 
+std::mutex previewTwinMutex;
+obs_weak_source_t *previewTwin = nullptr;
+
+/* Nova referência; sem prévia (modo estúdio desligado), a que está no ar. */
 obs_source_t *editingScene()
 {
-	return pl_vertical_current();
+	obs_source_t *twin = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(previewTwinMutex);
+		twin = obs_weak_source_get_source(previewTwin);
+	}
+	return twin ? twin : pl_vertical_current();
+}
+
+/* Chamado pelo relógio, na thread da interface: segue a Prévia. true se ela mudou. */
+bool updatePreviewTwin()
+{
+	obs_source_t *horizontal = obs_frontend_get_current_preview_scene();
+	if (!horizontal) {
+		horizontal = obs_frontend_get_current_scene();
+	}
+	obs_source_t *twin = pl_vertical_twin_of(horizontal);
+	obs_source_release(horizontal);
+
+	std::lock_guard<std::mutex> lock(previewTwinMutex);
+	obs_source_t *old = obs_weak_source_get_source(previewTwin);
+	bool changed = old != twin;
+	obs_source_release(old);
+	if (changed) {
+		obs_weak_source_release(previewTwin);
+		previewTwin = twin ? obs_source_get_weak_source(twin) : nullptr;
+	}
+	obs_source_release(twin);
+	return changed;
+}
+
+void clearPreviewTwin()
+{
+	std::lock_guard<std::mutex> lock(previewTwinMutex);
+	obs_weak_source_release(previewTwin);
+	previewTwin = nullptr;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -382,11 +420,9 @@ void drawSpacing(int index, bool horizontal, float x1, float y1, float x2, float
 }
 
 /* Moldura vermelha e quadradinhos da fonte escolhida. */
-void drawSelection(obs_canvas_t *canvas, float pixelsPerUnit)
+void drawSelection(obs_source_t *current, float pixelsPerUnit)
 {
-	obs_source_t *current = pl_vertical_active_scene(canvas);
 	obs_sceneitem_t *item = current ? selectedItemIn(current) : nullptr;
-	obs_source_release(current);
 	if (!item) {
 		return;
 	}
@@ -638,8 +674,10 @@ void showItemMenu(QWidget *parent, obs_sceneitem_t *item, const QPoint &where);
 /* ------------------------------------------------------------------------- */
 /* Janela de vídeo da tela vertical                                           */
 
-void drawVertical(void *, uint32_t cx, uint32_t cy)
+/* data == nullptr: Programa vertical (o que está no ar). Senão: Prévia vertical. */
+void drawVertical(void *data, uint32_t cx, uint32_t cy)
 {
+	bool preview = data != nullptr;
 	obs_canvas_t *canvas = pl_vertical_get_canvas();
 	if (!canvas) {
 		return;
@@ -663,8 +701,23 @@ void drawVertical(void *, uint32_t cx, uint32_t cy)
 	gs_viewport_push();
 	gs_set_viewport(x, y, width, height);
 	gs_ortho(0.0f, base_w, 0.0f, base_h, -100.0f, 100.0f);
-	obs_render_canvas_texture(canvas);
-	drawSelection(canvas, scale);
+	obs_source_t *editing = editingScene();
+	obs_source_t *shown = nullptr;
+	if (preview) {
+		if (editing) {
+			obs_source_video_render(editing);
+		}
+		shown = obs_source_get_ref(editing);
+	} else {
+		obs_render_canvas_texture(canvas);
+		shown = pl_vertical_active_scene(canvas);
+	}
+	/* A moldura só aparece onde dá para mexer (a Prévia, ou o ar quando ele é a própria prévia). */
+	if (shown && shown == editing) {
+		drawSelection(shown, scale);
+	}
+	obs_source_release(shown);
+	obs_source_release(editing);
 	gs_viewport_pop();
 	gs_projection_pop();
 
@@ -673,7 +726,7 @@ void drawVertical(void *, uint32_t cx, uint32_t cy)
 
 class VerticalDisplay : public QWidget {
 public:
-	explicit VerticalDisplay(QWidget *parent) : QWidget(parent)
+	explicit VerticalDisplay(QWidget *parent, bool preview = false) : QWidget(parent), previewMode(preview)
 	{
 		setAttribute(Qt::WA_PaintOnScreen);
 		setAttribute(Qt::WA_StaticContents);
@@ -702,6 +755,9 @@ public:
 protected:
 	void mousePressEvent(QMouseEvent *event) override
 	{
+		if (!editable()) {
+			return;
+		}
 		if (event->button() == Qt::RightButton) {
 			showMenu(event);
 			return;
@@ -711,7 +767,7 @@ protected:
 		}
 		float x, y;
 		toCanvas(event->position(), x, y);
-		obs_source_t *current = pl_vertical_current();
+		obs_source_t *current = editingScene();
 		obs_scene_t *scene = obs_scene_from_source(current);
 		mode = Mode::None;
 
@@ -749,9 +805,13 @@ protected:
 
 	void mouseMoveEvent(QMouseEvent *event) override
 	{
+		if (!editable()) {
+			unsetCursor();
+			return;
+		}
 		float x, y;
 		toCanvas(event->position(), x, y);
-		obs_source_t *current = pl_vertical_current();
+		obs_source_t *current = editingScene();
 		obs_sceneitem_t *item = current ? selectedItemIn(current) : nullptr;
 		obs_source_release(current);
 
@@ -821,12 +881,26 @@ protected:
 private:
 	enum class Mode { None, Move, Handle };
 
+	/* Na Prévia sempre; no Programa só quando o que está no ar é a própria prévia. */
+	bool editable() const
+	{
+		if (previewMode) {
+			return true;
+		}
+		obs_source_t *onAir = pl_vertical_current();
+		obs_source_t *editing = editingScene();
+		bool same = onAir && onAir == editing;
+		obs_source_release(onAir);
+		obs_source_release(editing);
+		return same;
+	}
+
 	/* Botão direito numa fonte do vertical: escolhe ela e abre o mesmo menu da lista. */
 	void showMenu(QMouseEvent *event)
 	{
 		float x, y;
 		toCanvas(event->position(), x, y);
-		obs_source_t *current = pl_vertical_current();
+		obs_source_t *current = editingScene();
 		obs_scene_t *scene = obs_scene_from_source(current);
 		obs_sceneitem_t *item = scene ? itemAt(scene, x, y) : nullptr;
 		if (item) {
@@ -1078,7 +1152,7 @@ private:
 #endif
 		display = obs_display_create(&info, 0xFF202020);
 		if (display) {
-			obs_display_add_draw_callback(display, drawVertical, nullptr);
+			obs_display_add_draw_callback(display, drawVertical, drawData());
 		}
 	}
 
@@ -1094,12 +1168,15 @@ private:
 	void destroyDisplay()
 	{
 		if (display) {
-			obs_display_remove_draw_callback(display, drawVertical, nullptr);
+			obs_display_remove_draw_callback(display, drawVertical, drawData());
 			obs_display_destroy(display);
 			display = nullptr;
 		}
 	}
 
+	void *drawData() const { return previewMode ? (void *)this : nullptr; }
+
+	bool previewMode = false;
 	obs_display_t *display = nullptr;
 	Mode mode = Mode::None;
 	Box startBox = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -1279,10 +1356,12 @@ void setVerticalLocked(qlonglong id, bool on)
 
 class SourcesDock : public QWidget {
 public:
-	explicit SourcesDock(QWidget *parent) : QWidget(parent)
+	explicit SourcesDock(QWidget *parent, bool compact = false) : QWidget(parent), compactMode(compact)
 	{
 		auto *layout = new QVBoxLayout(this);
-		layout->setContentsMargins(4, 4, 4, 4);
+		/* Compacto: o "+" e a engrenagem ficam em cima, na janela do Projeto Live (iguais aos do horizontal). */
+		layout->setContentsMargins(compact ? 0 : 4, compact ? 0 : 4, compact ? 0 : 4, compact ? 0 : 4);
+		layout->setSpacing(4);
 
 		/* Em cima: o nome da cena e só dois ícones, "+" e a engrenagem (o resto fica no botão direito). */
 		auto *head = new QHBoxLayout();
@@ -1300,6 +1379,12 @@ public:
 		connect(gear, &QToolButton::clicked, this, [this]() { openProperties(); });
 		head->addWidget(gear);
 		layout->addLayout(head);
+		if (compact) {
+			add->hide();
+			gear->hide();
+			title->setEnabled(false);
+			title->setTextFormat(Qt::PlainText);
+		}
 
 		list = new QListWidget(this);
 		list->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -1342,7 +1427,8 @@ public:
 		} else {
 			QString name = QString::fromUtf8(obs_source_get_name(sceneSource));
 			name.remove(QStringLiteral(" (vertical)"));
-			title->setText(moduleText("Vertical.Sources.Title").arg(name.toHtmlEscaped()));
+			title->setText(compactMode ? name
+						   : moduleText("Vertical.Sources.Title").arg(name.toHtmlEscaped()));
 			title->setToolTip(moduleText("Vertical.Sources.Tip"));
 
 			/* O OBS lista de baixo para cima; o painel mostra o que fica por cima primeiro. */
@@ -1576,6 +1662,8 @@ private:
 	}
 
 public:
+	void addAt(const QPoint &where) { addSource(where); }
+
 	/* Escolhe na lista a linha do item com este número (false se não estiver na lista). */
 	bool selectId(int64_t id)
 	{
@@ -1624,6 +1712,7 @@ public:
 
 private:
 	QLabel *title = nullptr;
+	bool compactMode = false;
 	QListWidget *list = nullptr;
 	std::vector<Row> rows;
 	bool rebuilding = false;
@@ -1637,7 +1726,9 @@ bool floating = false;
 class VerticalProgram : public QWidget {
 public:
 	/* withDetach: a cópia da janela do Projeto Live não tem "Soltar" (ele mexe no da janela do OBS). */
-	VerticalProgram(QWidget *parent, bool isFloating, bool withDetach = true) : QWidget(parent)
+	VerticalProgram(QWidget *parent, bool isFloating, bool withDetach = true, bool preview = false)
+		: QWidget(parent),
+		  previewMode(preview)
 	{
 		auto *layout = new QVBoxLayout(this);
 		layout->setContentsMargins(4, isFloating ? 4 : 0, isFloating ? 4 : 0, isFloating ? 4 : 0);
@@ -1658,7 +1749,7 @@ public:
 		header->addWidget(detach);
 		detach->setVisible(withDetach);
 		layout->addLayout(header);
-		layout->addWidget(new VerticalDisplay(this), 1);
+		layout->addWidget(new VerticalDisplay(this, preview), 1);
 
 		if (!isFloating && parent) {
 			parent->installEventFilter(this);
@@ -1670,13 +1761,16 @@ public:
 
 	void refresh()
 	{
-		obs_source_t *current = pl_vertical_current();
+		obs_source_t *current = previewMode ? editingScene() : pl_vertical_current();
 		QString name = current ? QString::fromUtf8(obs_source_get_name(current))
 				       : moduleText("Vertical.Nothing");
 		name.remove(QStringLiteral(" (vertical)"));
 		name = name.toHtmlEscaped();
 		obs_source_release(current);
-		status->setText(moduleText("Vertical.Short.OnAir").arg(name));
+		QString text = moduleText(previewMode ? "Vertical.Short.Preview" : "Vertical.Short.OnAir").arg(name);
+		if (status->text() != text) {
+			status->setText(text);
+		}
 	}
 
 	/* Ao lado do preview: largura certa para a tela em pé caber na altura da área. */
@@ -1700,6 +1794,7 @@ protected:
 	}
 
 private:
+	bool previewMode = false;
 	QLabel *status = nullptr;
 	bool embeddedMode = true;
 };
@@ -1825,6 +1920,7 @@ uint64_t seenVersion = (uint64_t)-1;
 
 void refreshDocks()
 {
+	bool moved = updatePreviewTwin();
 	if (embedded) {
 		embedded->refresh();
 	}
@@ -1835,7 +1931,7 @@ void refreshDocks()
 		each->refresh();
 	}
 	uint64_t now = pl_vertical_version();
-	if (now == seenVersion) {
+	if (now == seenVersion && !moved) {
 		return;
 	}
 	seenVersion = now;
@@ -1855,6 +1951,7 @@ void frontendEvent(enum obs_frontend_event event, void *)
 	}
 	if (event == OBS_FRONTEND_EVENT_EXIT || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) {
 		setSelection(nullptr, 0);
+		clearPreviewTwin();
 	}
 	if (event == OBS_FRONTEND_EVENT_EXIT) {
 		if (timer) {
@@ -1925,9 +2022,34 @@ QWidget *pl_vertical_program_create(QWidget *parent)
 	return created;
 }
 
+QWidget *pl_vertical_preview_create(QWidget *parent)
+{
+	auto *created = new VerticalProgram(parent, false, false, true);
+	extraPrograms.push_back(created);
+	QObject::connect(created, &QObject::destroyed, [created]() {
+		extraPrograms.erase(std::remove(extraPrograms.begin(), extraPrograms.end(), created),
+				    extraPrograms.end());
+	});
+	return created;
+}
+
+void pl_vertical_sources_add(QWidget *sources, const QPoint &where)
+{
+	if (auto *dock = dynamic_cast<SourcesDock *>(sources)) {
+		dock->addAt(where);
+	}
+}
+
+void pl_vertical_sources_properties(QWidget *sources)
+{
+	if (auto *dock = dynamic_cast<SourcesDock *>(sources)) {
+		dock->openProperties();
+	}
+}
+
 QWidget *pl_vertical_sources_create(QWidget *parent)
 {
-	auto *created = new SourcesDock(parent);
+	auto *created = new SourcesDock(parent, true);
 	extraSources.push_back(created);
 	QObject::connect(created, &QObject::destroyed, [created]() {
 		extraSources.erase(std::remove(extraSources.begin(), extraSources.end(), created), extraSources.end());

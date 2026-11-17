@@ -29,4 +29,10 @@ class QWidget;
 /* Cópias para a janela do Projeto Live: a tela do vertical (sem "Soltar") e as Fontes verticais. */
 QWidget *pl_vertical_program_create(QWidget *parent);
 QWidget *pl_vertical_sources_create(QWidget *parent);
+/* A Prévia vertical (a gêmea da cena na Prévia; é nela que se mexe com o mouse). */
+QWidget *pl_vertical_preview_create(QWidget *parent);
+/* O "+" e a engrenagem de cima da janela do Projeto Live agindo nas Fontes verticais. */
+class QPoint;
+void pl_vertical_sources_add(QWidget *sources, const QPoint &where);
+void pl_vertical_sources_properties(QWidget *sources);
 #endif

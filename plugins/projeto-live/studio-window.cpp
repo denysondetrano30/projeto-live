@@ -430,11 +430,24 @@ public:
 		title->setFont(bold);
 		head->addWidget(title, 1);
 		addButton = plIconButton(this, "icon-plus", ":/res/images/plus.svg", msg("Entries.AddSource"));
-		connect(addButton, &QToolButton::clicked, this, [this]() { addSource(); });
+		connect(addButton, &QToolButton::clicked, this, [this]() {
+			if (pages->currentIndex() == 1) {
+				pl_vertical_sources_add(verticalPage,
+							addButton->mapToGlobal(QPoint(0, addButton->height())));
+			} else {
+				addSource();
+			}
+		});
 		head->addWidget(addButton);
 		gearButton = plIconButton(this, "icon-gear", ":/settings/images/settings/general.svg",
 					  msg("Studio.Properties"));
-		connect(gearButton, &QToolButton::clicked, this, [this]() { openProperties(); });
+		connect(gearButton, &QToolButton::clicked, this, [this]() {
+			if (pages->currentIndex() == 1) {
+				pl_vertical_sources_properties(verticalPage);
+			} else {
+				openProperties();
+			}
+		});
 		head->addWidget(gearButton);
 		layout->addLayout(head);
 
@@ -461,7 +474,8 @@ public:
 		pageLayout->setContentsMargins(0, 0, 0, 0);
 		pageLayout->setSpacing(4);
 		pages->addWidget(horizontalPage);
-		pages->addWidget(pl_vertical_sources_create(pages));
+		verticalPage = pl_vertical_sources_create(pages);
+		pages->addWidget(verticalPage);
 
 		entryName = new QLabel(horizontalPage);
 		entryName->setEnabled(false);
@@ -550,13 +564,8 @@ public:
 	}
 
 private:
-	/* A página vertical tem o próprio "+"; o "+ Fonte" de cima é só da horizontal. */
-	void showPage(int index)
-	{
-		pages->setCurrentIndex(index);
-		addButton->setVisible(index == 0);
-		gearButton->setVisible(index == 0);
-	}
+	/* As duas páginas iguais: o "+" e a engrenagem de cima valem para a página aberta. */
+	void showPage(int index) { pages->setCurrentIndex(index); }
 
 	/* O item da cena que a linha representa (sem referência; usar na hora). */
 	obs_sceneitem_t *itemFor(QListWidgetItem *row) const
@@ -684,6 +693,7 @@ private:
 	QPushButton *horizontalTab = nullptr;
 	QPushButton *verticalTab = nullptr;
 	QStackedWidget *pages = nullptr;
+	QWidget *verticalPage = nullptr;
 	QLabel *entryName = nullptr;
 	QListWidget *list = nullptr;
 	QStringList shown;
@@ -760,6 +770,13 @@ public:
 
 		preview = new Monitor(this, msg("Studio.Preview"), "#2fa84f", drawPreview, this);
 		middle->addWidget(preview, 1);
+
+		/* A Prévia vertical, em pé, ao lado da Prévia: é nela que se ajusta o vertical. */
+		verticalPreviewHolder = new QWidget(this);
+		auto *verticalPreviewLayout = new QVBoxLayout(verticalPreviewHolder);
+		verticalPreviewLayout->setContentsMargins(0, 0, 0, 0);
+		verticalPreviewLayout->addWidget(pl_vertical_preview_create(verticalPreviewHolder));
+		middle->addWidget(verticalPreviewHolder);
 
 		auto *center = new QVBoxLayout();
 		center->addStretch(1);
@@ -890,6 +907,9 @@ private:
 		bool vertical = pl_vertical_program_wanted();
 		if (verticalHolder->isHidden() == vertical) {
 			verticalHolder->setVisible(vertical);
+		}
+		if (verticalPreviewHolder->isHidden() == vertical) {
+			verticalPreviewHolder->setVisible(vertical);
 		}
 
 		obs_source_t *previewSource = obs_frontend_get_current_preview_scene();
@@ -1053,6 +1073,7 @@ private:
 	QLabel *transitionInfo = nullptr;
 	SourcesPanel *sources = nullptr;
 	QWidget *verticalHolder = nullptr;
+	QWidget *verticalPreviewHolder = nullptr;
 	QPushButton *streamButton = nullptr;
 	QPushButton *recordButton = nullptr;
 	QTimer *timer = nullptr;

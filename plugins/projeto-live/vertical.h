@@ -36,6 +36,8 @@ void pl_vertical_touch(void);
  * criada sozinha; o vertical sempre acompanha o Programa. Thread da interface.
  */
 obs_source_t *pl_vertical_current(void);
+/* A cena vertical gêmea de uma cena horizontal (nova referência ou NULL). */
+obs_source_t *pl_vertical_twin_of(obs_source_t *horizontal);
 /* O mesmo, para uma tela já em mãos (serve na thread de vídeo). */
 obs_source_t *pl_vertical_active_scene(obs_canvas_t *canvas);
 
