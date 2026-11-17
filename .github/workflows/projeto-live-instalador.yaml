@@ -122,8 +122,9 @@ jobs:
           # plugin do OBS, que a carrega na hora (mirror-source.c).
           $dll = Get-ChildItem -Recurse installer/stage/projecao -Filter "Processing.NDI.Lib.x64.dll" | Select-Object -First 1
           if (-not $dll) { throw "Processing.NDI.Lib.x64.dll não está no app de projeção" }
-          $dest = "installer/stage/obs/obs-plugins/64bit"
-          if (-not (Test-Path "$dest/projeto-live.dll")) { throw "projeto-live.dll não está em $dest" }
+          $plugin = Get-ChildItem -Recurse installer/stage/obs -Filter "projeto-live.dll" | Select-Object -First 1
+          if (-not $plugin) { throw "projeto-live.dll não está no pacote do OBS" }
+          $dest = $plugin.DirectoryName
           Copy-Item $dll.FullName $dest
           Get-ChildItem -Recurse installer/stage/projecao -Filter "*NDI*Licen*" | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName $dest }
           Write-Host "NDI: $($dll.FullName) -> $dest"
