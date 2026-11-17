@@ -772,15 +772,23 @@ static void push_fit(uint32_t width, uint32_t height)
 	gs_matrix_scale3f(scale, scale, 1.0f);
 }
 
+/* Imagem mais larga que 16:9 (junção de projetores): a live mostra só o miolo 16:9, sem faixas
+ * (decisão de 17/11). Mais estreita (4:3) continua encaixada com faixas. */
 static void draw_ndi(void)
 {
 	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 	const bool previous = gs_framebuffer_srgb_enabled();
 	gs_enable_framebuffer_srgb(true);
 	gs_effect_set_texture_srgb(gs_effect_get_param_by_name(effect, "image"), frame_texture);
-	push_fit(texture_width, texture_height);
+	uint32_t x0 = 0;
+	uint32_t cx = texture_width;
+	if ((uint64_t)texture_width * MIRROR_HEIGHT > (uint64_t)texture_height * MIRROR_WIDTH + texture_height) {
+		cx = (uint32_t)((uint64_t)texture_height * MIRROR_WIDTH / MIRROR_HEIGHT);
+		x0 = (texture_width - cx) / 2;
+	}
+	push_fit(cx, texture_height);
 	while (gs_effect_loop(effect, "Draw")) {
-		gs_draw_sprite(frame_texture, 0, texture_width, texture_height);
+		gs_draw_sprite_subregion(frame_texture, 0, x0, 0, cx, texture_height);
 	}
 	gs_matrix_pop();
 	gs_enable_framebuffer_srgb(previous);
