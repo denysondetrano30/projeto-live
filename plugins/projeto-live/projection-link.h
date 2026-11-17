@@ -60,6 +60,7 @@ void pl_projection_set_ndi(bool on);
 
 /* Implementada em mirror-source.c: 0 = sem fonte "Telão", 1 = NDI (ou procurando), 2 = modo antigo. */
 int pl_mirror_mode(void);
+void pl_mirror_rename_old(void);
 
 /* Resposta da pergunta "Permitir?" (chamada pela interface). */
 void pl_projection_answer(unsigned int ticket, bool allow);

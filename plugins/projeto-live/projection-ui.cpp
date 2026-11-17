@@ -69,6 +69,9 @@ void frontendEvent(enum obs_frontend_event event, void *)
 	if (event == OBS_FRONTEND_EVENT_EXIT && statusTimer) {
 		statusTimer->stop();
 	}
+	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED) {
+		pl_mirror_rename_old();
+	}
 }
 
 } // namespace

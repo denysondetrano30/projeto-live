@@ -210,8 +210,8 @@ static obs_properties_t *caption_properties(void *unused)
 {
 	(void)unused;
 	obs_properties_t *props = obs_properties_create();
-	obs_properties_add_text(props, "info", obs_module_text("Caption.Info"), OBS_TEXT_INFO);
-	obs_properties_add_font(props, "font", obs_module_text("Caption.Font"));
+	obs_property_t *font = obs_properties_add_font(props, "font", obs_module_text("Caption.Font"));
+	obs_property_set_long_description(font, obs_module_text("Caption.Info"));
 	obs_properties_add_color(props, "color", obs_module_text("Caption.Color"));
 	obs_properties_add_bool(props, "uppercase", obs_module_text("Caption.Uppercase"));
 

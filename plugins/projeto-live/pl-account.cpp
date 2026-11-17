@@ -817,12 +817,10 @@ private:
 
 	void buildOut()
 	{
-		auto *intro = new QLabel(msg("Account.Intro"), this);
-		intro->setWordWrap(true);
-		rows->addWidget(intro);
 		auto *form = new QFormLayout();
 		mail = new QLineEdit(this);
 		mail->setPlaceholderText("email@igreja.com");
+		mail->setToolTip(msg("Account.Intro"));
 		password = new QLineEdit(this);
 		password->setEchoMode(QLineEdit::Password);
 		form->addRow(msg("Account.Email"), mail);
@@ -878,10 +876,7 @@ private:
 		cultoCombo = combo;
 		connect(combo, &QComboBox::currentIndexChanged, this, [this]() { cultoPicked(); });
 		rows->addWidget(combo);
-		auto *note = new QLabel(msg("Account.CultoNote"), this);
-		note->setWordWrap(true);
-		note->setStyleSheet("color: palette(mid);");
-		rows->addWidget(note);
+		combo->setToolTip(msg("Account.CultoNote"));
 		auto *row = new QHBoxLayout();
 		auto *out = new QPushButton(msg("Account.SignOut"), this);
 		auto *close = new QPushButton(msg("Account.Close"), this);

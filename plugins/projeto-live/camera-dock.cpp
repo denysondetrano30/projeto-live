@@ -821,9 +821,9 @@ public:
 		top->setContentsMargins(0, 0, 0, 0);
 		top->setSpacing(6);
 
-		hint = new QLabel(msg("Cameras.Hint"), this);
-		hint->setEnabled(false);
-		top->addWidget(hint, 1);
+		/* A explicação fica só na dica do mouse (tela limpa). */
+		setToolTip(msg("Cameras.Hint"));
+		top->addStretch(1);
 
 		sizeBox = new QComboBox(this);
 		sizeBox->addItem(msg("Cameras.Size.Small"));
@@ -973,8 +973,7 @@ private:
 			obs_source_release(scene);
 		}
 
-		empty->setVisible(cards.empty());
-		hint->setVisible(!cards.empty());
+		empty->setVisible(false);
 	}
 
 	static int loadSize()

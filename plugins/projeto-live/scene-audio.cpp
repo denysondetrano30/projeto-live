@@ -235,12 +235,10 @@ public:
 		resize(640, 420);
 
 		auto *outer = new QVBoxLayout(this);
-		auto *help = new QLabel(QString::fromUtf8(obs_module_text("SceneAudio.Help")), this);
-		help->setWordWrap(true);
-		outer->addWidget(help);
 
 		auto *area = new QScrollArea(this);
 		area->setWidgetResizable(true);
+		area->setToolTip(QString::fromUtf8(obs_module_text("SceneAudio.Help")));
 		auto *holder = new QWidget(area);
 		auto *grid = new QGridLayout(holder);
 		grid->setHorizontalSpacing(18);

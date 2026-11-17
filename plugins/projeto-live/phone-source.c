@@ -831,9 +831,11 @@ static obs_properties_t *phone_properties(void *data)
 	obs_property_list_add_string(connection, obs_module_text("Connection.Wifi"), MODE_WIFI);
 	obs_property_list_add_string(connection, obs_module_text("Connection.Usb"), MODE_USB);
 	obs_property_set_modified_callback(connection, connection_modified);
-
-	obs_properties_add_text(props, S_USB_HELP, obs_module_text("UsbHelp"), OBS_TEXT_INFO);
-	obs_properties_add_text(props, S_HOW, obs_module_text("HowToPair"), OBS_TEXT_INFO);
+	/* As explicações (como parear, como ligar o cabo) ficam na dica do mouse. */
+	struct dstr tip = {0};
+	dstr_printf(&tip, "%s\n\n%s", obs_module_text("HowToPair"), obs_module_text("UsbHelp"));
+	obs_property_set_long_description(connection, tip.array);
+	dstr_free(&tip);
 	if (ps) {
 		obs_properties_add_text(props, S_ADDRESSES, ps->addresses_text, OBS_TEXT_INFO);
 	}

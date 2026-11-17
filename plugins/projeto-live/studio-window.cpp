@@ -31,6 +31,8 @@
 #endif
 
 #include <util/platform.h>
+#include <graphics/matrix4.h>
+#include <graphics/vec3.h>
 
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
@@ -787,6 +789,17 @@ public:
 		program = new Monitor(this, msg("Studio.Program"), "#e5352b", drawProgram, this);
 		middle->addWidget(program, 1);
 
+		/* Botão direito: os mesmos menus da janela original do OBS. */
+		preview->view->setContextMenuPolicy(Qt::CustomContextMenu);
+		connect(preview->view, &QWidget::customContextMenuRequested, this,
+			[this](const QPoint &pos) { previewMenu(pos); });
+		program->view->setContextMenuPolicy(Qt::CustomContextMenu);
+		connect(program->view, &QWidget::customContextMenuRequested, this, []() {
+			if (QWidget *main = obsWindow()) {
+				QMetaObject::invokeMethod(main, "ProgramViewContextMenuRequested", Qt::QueuedConnection);
+			}
+		});
+
 		/* O vertical, em pé, ao lado do Programa (some quando está desligado em Painéis). */
 		verticalHolder = new QWidget(this);
 		auto *verticalLayout = new QVBoxLayout(verticalHolder);
@@ -818,9 +831,6 @@ public:
 		connect(recordButton, &QPushButton::clicked, this, []() { toggleRecord(); });
 		footer->addWidget(recordButton);
 		footer->addStretch(1);
-		auto *studioNote = new QLabel(msg("Studio.StudioNote"), this);
-		studioNote->setEnabled(false);
-		footer->addWidget(studioNote);
 		auto *settings = new QPushButton(msg("Studio.Settings"), this);
 		settings->setMinimumHeight(34);
 		connect(settings, &QPushButton::clicked, this, []() { openSettings(); });
@@ -959,6 +969,52 @@ private:
 		if (action) {
 			action->trigger();
 		}
+	}
+
+	/* Seleciona (no OBS) a fonte que está debaixo do mouse e abre o menu da prévia do OBS, que age
+	 * sobre a fonte selecionada (Transformar, Modo de mescla, Filtros...). Fora de qualquer fonte,
+	 * nada fica selecionado e o OBS mostra o menu da cena (Adicionar fonte...). */
+	void previewMenu(const QPoint &pos)
+	{
+		QWidget *main = obsWindow();
+		if (!main) {
+			return;
+		}
+		obs_source_t *sceneSource = workingScene();
+		QWidget *view = preview->view;
+		double sw = sceneSource ? obs_source_get_width(sceneSource) : 0;
+		double sh = sceneSource ? obs_source_get_height(sceneSource) : 0;
+		if (obs_scene_from_source(sceneSource) && sw > 0 && sh > 0 && view->width() > 0 && view->height() > 0) {
+			double scale = std::min(view->width() / sw, view->height() / sh);
+			double x0 = (view->width() - sw * scale) / 2.0;
+			double y0 = (view->height() - sh * scale) / 2.0;
+			struct vec3 point;
+			vec3_set(&point, (float)((pos.x() - x0) / scale), (float)((pos.y() - y0) / scale), 0.0f);
+
+			ItemList items = sceneItems(sceneSource);
+			obs_sceneitem_t *hit = nullptr;
+			/* A frente fica no fim da lista do OBS. */
+			for (auto it = items.rbegin(); it != items.rend() && !hit; ++it) {
+				if (!obs_sceneitem_visible(*it)) {
+					continue;
+				}
+				struct matrix4 box, inverse;
+				obs_sceneitem_get_box_transform(*it, &box);
+				matrix4_inv(&inverse, &box);
+				struct vec3 local;
+				vec3_transform(&local, &point, &inverse);
+				if (local.x >= 0.0f && local.x <= 1.0f && local.y >= 0.0f && local.y <= 1.0f) {
+					hit = *it;
+				}
+			}
+			for (obs_sceneitem_t *item : items) {
+				obs_sceneitem_select(item, item == hit);
+			}
+			releaseItems(items);
+		}
+		obs_source_release(sceneSource);
+		/* Na fila: o OBS atualiza a seleção dele antes de montar o menu. */
+		QMetaObject::invokeMethod(main, "on_preview_customContextMenuRequested", Qt::QueuedConnection);
 	}
 
 	static void drawPreview(void *data, uint32_t cx, uint32_t cy)

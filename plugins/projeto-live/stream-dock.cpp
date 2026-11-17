@@ -154,10 +154,9 @@ public:
 		form->addRow(QString(), showKey);
 		layout->addLayout(form);
 
+		/* A explicação de onde achar a chave fica na dica do mouse, no campo da chave. */
 		help = new QLabel(this);
-		help->setWordWrap(true);
-		help->setTextFormat(Qt::PlainText);
-		layout->addWidget(help);
+		help->hide();
 
 		/* Qualidade: a mesma da principal ou própria (codificador e Mbps). */
 		auto *qualityBox = new QGroupBox(moduleText("Stream.Quality"), this);
@@ -198,9 +197,7 @@ public:
 			size->hide();
 		}
 
-		auto *qualityHelp = new QLabel(moduleText("Stream.Quality.Help"), qualityBox);
-		qualityHelp->setWordWrap(true);
-		qualityLayout->addWidget(qualityHelp);
+		qualityBox->setToolTip(moduleText("Stream.Quality.Help"));
 		layout->addWidget(qualityBox);
 		connect(ownQuality, &QRadioButton::toggled, this, [this](bool) { updateQuality(); });
 
@@ -289,6 +286,8 @@ private:
 	{
 		QByteArray id = platform->currentData().toString().toUtf8();
 		help->setText(moduleText(findPlatform(id.constData()).helpKey));
+		key->setToolTip(help->text());
+		server->setToolTip(help->text());
 	}
 
 	void tryAccept()
@@ -457,9 +456,7 @@ public:
 		layout->setContentsMargins(0, 8, 0, 0);
 		reload();
 
-		auto *help = new QLabel(moduleText("Multistream.Help"), this);
-		help->setWordWrap(true);
-		layout->addWidget(help);
+		setToolTip(moduleText("Multistream.Help"));
 
 		horizontal = new DestinationsBox(this, moduleText("Multistream.Horizontal"), false, dests, changed);
 		vertical = new DestinationsBox(this, moduleText("Multistream.Vertical"), true, dests, changed);

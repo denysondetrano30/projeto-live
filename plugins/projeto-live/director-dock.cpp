@@ -178,9 +178,7 @@ private:
 		form->addWidget(headset, 1, 1);
 		form->addWidget(new QLabel(moduleText("Intercom.Volume"), devicesBox), 2, 0);
 		form->addWidget(volume, 2, 1);
-		auto *help = new QLabel(moduleText("Intercom.DevicesHelp"), devicesBox);
-		help->setWordWrap(true);
-		form->addWidget(help, 3, 0, 1, 2);
+		devicesBox->setToolTip(moduleText("Intercom.DevicesHelp"));
 		form->setColumnStretch(1, 1);
 		devicesBox->setVisible(false);
 		layout->addWidget(devicesBox);
@@ -289,7 +287,7 @@ private:
 			text = "<span style='color:#e5484d'>" + QString::fromUtf8(state.error).toHtmlEscaped() +
 			       "</span>";
 		} else if (!state.any_phone) {
-			text = "<span style='color:#8a8a8a'>" + moduleText("Intercom.NoPhones") + "</span>";
+			text = QString();
 		} else {
 			if (state.talk_all) {
 				text = "<b>" + moduleText("Intercom.YouTalking") + "</b>";
@@ -355,7 +353,7 @@ private:
 			}
 		}
 
-		empty->setVisible(rows.empty());
+		empty->setVisible(false);
 		for (auto &row : rows) {
 			updateRow(row.get());
 		}

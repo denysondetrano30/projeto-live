@@ -718,7 +718,7 @@ static obs_properties_t *mirror_properties(void *unused)
 {
 	(void)unused;
 	obs_properties_t *props = obs_properties_create();
-	obs_properties_add_text(props, "info", obs_module_text("Mirror.Info"), OBS_TEXT_INFO);
+	obs_properties_add_text(props, "info", obs_module_text("Mirror.Legal"), OBS_TEXT_INFO);
 	return props;
 }
 
@@ -825,6 +825,34 @@ static void mirror_enum_sources(void *data, obs_source_enum_proc_t enum_callback
 		enum_callback(mirror->self, old, param);
 		obs_source_release(old);
 	}
+}
+
+/* Fontes criadas com o nome antigo ("Telão (projeção)") passam a se chamar como hoje ("Projeção"). */
+static bool rename_old_one(void *param, obs_source_t *source)
+{
+	(void)param;
+	const char *id = obs_source_get_unversioned_id(source);
+	if (!id || strcmp(id, "projeto_live_mirror") != 0) {
+		return true;
+	}
+	const char *name = obs_source_get_name(source);
+	if (!name || (strcmp(name, "Telão (projeção)") != 0 && strcmp(name, "Screen (projection)") != 0)) {
+		return true;
+	}
+	const char *wanted = obs_module_text("Mirror.Name");
+	obs_source_t *taken = obs_get_source_by_name(wanted);
+	if (taken) {
+		obs_source_release(taken);
+		return true;
+	}
+	blog(LOG_INFO, "[projeto-live] fonte \"%s\" agora se chama \"%s\"", name, wanted);
+	obs_source_set_name(source, wanted);
+	return true;
+}
+
+void pl_mirror_rename_old(void)
+{
+	obs_enum_sources(rename_old_one, NULL);
 }
 
 struct obs_source_info pl_mirror_source = {

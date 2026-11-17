@@ -1201,10 +1201,7 @@ public:
 		}
 		layout->addWidget(choice);
 
-		auto *help = new QLabel(moduleText("Vertical.Swap.Help"), this);
-		help->setWordWrap(true);
-		help->setStyleSheet("color: #8a8a8a;");
-		layout->addWidget(help);
+		choice->setToolTip(moduleText("Vertical.Swap.Help"));
 
 		auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
 		connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
@@ -1346,6 +1343,7 @@ public:
 			QString name = QString::fromUtf8(obs_source_get_name(sceneSource));
 			name.remove(QStringLiteral(" (vertical)"));
 			title->setText(moduleText("Vertical.Sources.Title").arg(name.toHtmlEscaped()));
+			title->setToolTip(moduleText("Vertical.Sources.Tip"));
 
 			/* O OBS lista de baixo para cima; o painel mostra o que fica por cima primeiro. */
 			std::vector<obs_sceneitem_t *> items;
