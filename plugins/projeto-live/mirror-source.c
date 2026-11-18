@@ -796,9 +796,14 @@ static void draw_ndi(void)
 		x0 = (texture_width - cx) / 2;
 	}
 	push_fit(cx, texture_height);
+	/* Com fundo transparente (janela Transmissão da projeção) o NDI vem com alfa "comum": mistura certa
+	 * nas bordas da letra. */
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
 	while (gs_effect_loop(effect, "Draw")) {
 		gs_draw_sprite_subregion(frame_texture, 0, x0, 0, cx, texture_height);
 	}
+	gs_blend_state_pop();
 	gs_matrix_pop();
 	gs_enable_framebuffer_srgb(previous);
 }
@@ -1107,9 +1112,12 @@ static void vertical_render(void *data, gs_effect_t *effect)
 		gs_matrix_translate3f(((float)VERTICAL_WIDTH - (float)vtexture_width * scale) / 2.0f,
 				      ((float)VERTICAL_HEIGHT - (float)vtexture_height * scale) / 2.0f, 0.0f);
 		gs_matrix_scale3f(scale, scale, 1.0f);
+		gs_blend_state_push();
+		gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
 		while (gs_effect_loop(base, "Draw")) {
 			gs_draw_sprite(vtexture, 0, vtexture_width, vtexture_height);
 		}
+		gs_blend_state_pop();
 		gs_matrix_pop();
 		gs_enable_framebuffer_srgb(previous);
 		return;
