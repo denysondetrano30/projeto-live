@@ -31,6 +31,11 @@ QWidget *pl_vertical_program_create(QWidget *parent);
 QWidget *pl_vertical_sources_create(QWidget *parent);
 /* A Prévia vertical (a gêmea da cena na Prévia; é nela que se mexe com o mouse). */
 QWidget *pl_vertical_preview_create(QWidget *parent);
+/* A Prévia horizontal da janela do Projeto Live: mexe nas fontes da Prévia com o mouse, como no OBS
+ * (clicar escolhe, arrastar move, os quadradinhos aumentam e diminuem, Alt corta). */
+QWidget *pl_horizontal_preview_create(QWidget *parent);
+void pl_horizontal_preview_sync(QWidget *view);
+void pl_horizontal_preview_release(QWidget *view);
 /* O "+" e a engrenagem de cima da janela do Projeto Live agindo nas Fontes verticais. */
 class QPoint;
 void pl_vertical_sources_add(QWidget *sources, const QPoint &where);

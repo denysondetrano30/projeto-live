@@ -102,6 +102,33 @@ obs_source_t *editingScene()
 	return twin ? twin : pl_vertical_current();
 }
 
+/* A Prévia horizontal (nossa janela): a cena em que se mexe e a cópia dela para a thread de vídeo. */
+std::mutex horizontalMutex;
+obs_weak_source_t *horizontalScene = nullptr;
+
+/* Nova referência: a cena da Prévia, ou a do ar sem modo estúdio (só na thread da interface). */
+obs_source_t *horizontalWorking()
+{
+	obs_source_t *scene = obs_frontend_get_current_preview_scene();
+	return scene ? scene : obs_frontend_get_current_scene();
+}
+
+void updateHorizontalScene()
+{
+	obs_source_t *scene = horizontalWorking();
+	std::lock_guard<std::mutex> lock(horizontalMutex);
+	obs_weak_source_release(horizontalScene);
+	horizontalScene = scene ? obs_source_get_weak_source(scene) : nullptr;
+	obs_source_release(scene);
+}
+
+void clearHorizontalScene()
+{
+	std::lock_guard<std::mutex> lock(horizontalMutex);
+	obs_weak_source_release(horizontalScene);
+	horizontalScene = nullptr;
+}
+
 /* Chamado pelo relógio, na thread da interface: segue a Prévia. true se ela mudou. */
 bool updatePreviewTwin()
 {
@@ -164,6 +191,53 @@ obs_sceneitem_t *selectedItemIn(obs_source_t *scene)
 		obs_sceneitem_addref(item);
 	}
 	return item;
+}
+
+/* No horizontal a fonte escolhida é a selecionada no OBS (a mesma do menu e da lista do OBS). */
+obs_sceneitem_t *selectedFor(obs_source_t *scene, bool horizontal)
+{
+	if (!horizontal) {
+		return selectedItemIn(scene);
+	}
+	obs_scene_t *sceneData = obs_scene_from_source(scene);
+	obs_sceneitem_t *found = nullptr;
+	if (sceneData) {
+		obs_scene_enum_items(
+			sceneData,
+			[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
+				if (obs_sceneitem_selected(item)) {
+					*static_cast<obs_sceneitem_t **>(param) = item;
+				}
+				return true;
+			},
+			&found);
+	}
+	if (found) {
+		obs_sceneitem_addref(found);
+	}
+	return found;
+}
+
+void selectFor(obs_source_t *scene, int64_t id, bool horizontal)
+{
+	if (!horizontal) {
+		setSelection(scene, id);
+		return;
+	}
+	obs_scene_t *sceneData = scene ? obs_scene_from_source(scene) : nullptr;
+	if (!sceneData) {
+		return;
+	}
+	obs_scene_enum_items(
+		sceneData,
+		[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
+			bool wanted = obs_sceneitem_get_id(item) == *static_cast<int64_t *>(param);
+			if (obs_sceneitem_selected(item) != wanted) {
+				obs_sceneitem_select(item, wanted);
+			}
+			return true;
+		},
+		&id);
 }
 
 struct Box {
@@ -323,8 +397,9 @@ void handlePoints(const Box &box, float x[8], float y[8])
  * Medidas em px da fonte escolhida até as bordas da tela, como no preview do OBS: o texto é feito
  * com fontes de texto privadas (uma por lado), criadas e atualizadas na thread de vídeo.
  */
-obs_source_t *spacingLabels[4] = {};
-int spacingPx[4] = {-1, -1, -1, -1};
+/* 0-3: telas verticais; 4-7: Prévia horizontal (cada uma com as suas, senão o texto trocaria a cada quadro). */
+obs_source_t *spacingLabels[8] = {};
+int spacingPx[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
 
 obs_source_t *createLabel(int index)
 {
@@ -358,7 +433,7 @@ obs_source_t *createLabel(int index)
 
 void releaseLabels()
 {
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < 8; i++) {
 		obs_source_release(spacingLabels[i]);
 		spacingLabels[i] = nullptr;
 		spacingPx[i] = -1;
@@ -420,9 +495,10 @@ void drawSpacing(int index, bool horizontal, float x1, float y1, float x2, float
 }
 
 /* Moldura vermelha e quadradinhos da fonte escolhida. */
-void drawSelection(obs_source_t *current, float pixelsPerUnit)
+void drawSelection(obs_source_t *current, float pixelsPerUnit, bool horizontal = false, float width = PL_VERTICAL_WIDTH,
+		   float height = PL_VERTICAL_HEIGHT)
 {
-	obs_sceneitem_t *item = current ? selectedItemIn(current) : nullptr;
+	obs_sceneitem_t *item = current ? selectedFor(current, horizontal) : nullptr;
 	if (!item) {
 		return;
 	}
@@ -457,14 +533,13 @@ void drawSelection(obs_source_t *current, float pixelsPerUnit)
 		}
 	}
 
-	const float width = PL_VERTICAL_WIDTH;
-	const float height = PL_VERTICAL_HEIGHT;
 	float midX = (box.left + box.right) / 2.0f;
 	float midY = (box.top + box.bottom) / 2.0f;
-	drawSpacing(0, false, midX, 0.0f, midX, box.top, pixelsPerUnit);
-	drawSpacing(1, false, midX, box.bottom, midX, height, pixelsPerUnit);
-	drawSpacing(2, true, 0.0f, midY, box.left, midY, pixelsPerUnit);
-	drawSpacing(3, true, box.right, midY, width, midY, pixelsPerUnit);
+	int first = horizontal ? 4 : 0;
+	drawSpacing(first, false, midX, 0.0f, midX, box.top, pixelsPerUnit);
+	drawSpacing(first + 1, false, midX, box.bottom, midX, height, pixelsPerUnit);
+	drawSpacing(first + 2, true, 0.0f, midY, box.left, midY, pixelsPerUnit);
+	drawSpacing(first + 3, true, box.right, midY, width, midY, pixelsPerUnit);
 }
 
 /* Põe a fonte no meio da tela vertical (na horizontal, na vertical ou nos dois), sem mudar o tamanho. */
@@ -724,9 +799,42 @@ void drawVertical(void *data, uint32_t cx, uint32_t cy)
 	obs_canvas_release(canvas);
 }
 
+/* A Prévia horizontal da janela do Projeto Live: a cena da Prévia e a moldura da fonte escolhida. */
+void drawHorizontal(void *, uint32_t cx, uint32_t cy)
+{
+	obs_source_t *scene = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(horizontalMutex);
+		scene = obs_weak_source_get_source(horizontalScene);
+	}
+	if (!scene) {
+		return;
+	}
+	float base_w = (float)obs_source_get_width(scene);
+	float base_h = (float)obs_source_get_height(scene);
+	if (base_w > 0.0f && base_h > 0.0f && cx && cy) {
+		float scale = std::min((float)cx / base_w, (float)cy / base_h);
+		int width = std::max((int)std::lround(base_w * scale), 1);
+		int height = std::max((int)std::lround(base_h * scale), 1);
+		gs_projection_push();
+		gs_viewport_push();
+		gs_set_viewport(((int)cx - width) / 2, ((int)cy - height) / 2, width, height);
+		gs_ortho(0.0f, base_w, 0.0f, base_h, -100.0f, 100.0f);
+		obs_source_video_render(scene);
+		drawSelection(scene, scale, true, base_w, base_h);
+		gs_viewport_pop();
+		gs_projection_pop();
+	}
+	obs_source_release(scene);
+}
+
 class VerticalDisplay : public QWidget {
 public:
-	explicit VerticalDisplay(QWidget *parent, bool preview = false) : QWidget(parent), previewMode(preview)
+	/* horizontal: a Prévia horizontal da janela do Projeto Live (mexe na cena da Prévia, como no OBS). */
+	explicit VerticalDisplay(QWidget *parent, bool preview = false, bool horizontal = false)
+		: QWidget(parent),
+		  previewMode(preview),
+		  horizontalMode(horizontal)
 	{
 		setAttribute(Qt::WA_PaintOnScreen);
 		setAttribute(Qt::WA_StaticContents);
@@ -734,7 +842,11 @@ public:
 		setAttribute(Qt::WA_OpaquePaintEvent);
 		setAttribute(Qt::WA_DontCreateNativeAncestors);
 		setAttribute(Qt::WA_NativeWindow);
-		setMinimumSize(90, 160);
+		if (horizontal) {
+			setMinimumSize(160, 90);
+		} else {
+			setMinimumSize(90, 160);
+		}
 		setMouseTracking(true);
 
 		if (QWindow *window = windowHandle()) {
@@ -752,10 +864,40 @@ public:
 
 	QPaintEngine *paintEngine() const override { return nullptr; }
 
+	/* Confere se a tela do OBS tem o tamanho da janela (ao maximizar, ela pode ficar com o antigo). */
+	void syncSize()
+	{
+		if (!display || !isVisible()) {
+			return;
+		}
+		uint32_t cx = 0;
+		uint32_t cy = 0;
+		obs_display_size(display, &cx, &cy);
+		QSize size = pixelSize();
+		if (cx != (uint32_t)std::max(size.width(), 1) || cy != (uint32_t)std::max(size.height(), 1)) {
+			resizeDisplay();
+		}
+	}
+
+	/* Solta a tela do OBS já (antes de o OBS fechar a parte gráfica). */
+	void destroyDisplay()
+	{
+		if (display) {
+			obs_display_remove_draw_callback(display, drawCallback(), drawData());
+			obs_display_destroy(display);
+			display = nullptr;
+		}
+	}
+
 protected:
 	void mousePressEvent(QMouseEvent *event) override
 	{
 		if (!editable()) {
+			return;
+		}
+		/* No horizontal o botão direito abre o menu do OBS (quem cuida é a janela do Projeto Live). */
+		if (event->button() == Qt::RightButton && horizontalMode) {
+			event->ignore();
 			return;
 		}
 		if (event->button() == Qt::RightButton) {
@@ -767,12 +909,12 @@ protected:
 		}
 		float x, y;
 		toCanvas(event->position(), x, y);
-		obs_source_t *current = editingScene();
+		obs_source_t *current = sceneRef();
 		obs_scene_t *scene = obs_scene_from_source(current);
 		mode = Mode::None;
 
 		/* Primeiro: um quadradinho da fonte já escolhida? */
-		obs_sceneitem_t *item = current ? selectedItemIn(current) : nullptr;
+		obs_sceneitem_t *item = current ? selectedFor(current, horizontalMode) : nullptr;
 		int handle = item ? handleAt(visibleBox(item), x, y) : -1;
 		if (item && handle < 0) {
 			obs_sceneitem_release(item);
@@ -784,7 +926,7 @@ protected:
 		}
 
 		if (item && !obs_sceneitem_locked(item)) {
-			setSelection(current, obs_sceneitem_get_id(item));
+			selectFor(current, obs_sceneitem_get_id(item), horizontalMode);
 			normalizeItem(item);
 			startBox = visibleBox(item);
 			startMouseX = x;
@@ -795,7 +937,11 @@ protected:
 			activeHandle = handle;
 			mode = handle < 0 ? Mode::Move : Mode::Handle;
 		} else {
-			setSelection(item ? current : nullptr, item ? obs_sceneitem_get_id(item) : 0);
+			if (horizontalMode) {
+				selectFor(current, item ? obs_sceneitem_get_id(item) : 0, true);
+			} else {
+				setSelection(item ? current : nullptr, item ? obs_sceneitem_get_id(item) : 0);
+			}
 		}
 		obs_sceneitem_release(item);
 
@@ -811,8 +957,8 @@ protected:
 		}
 		float x, y;
 		toCanvas(event->position(), x, y);
-		obs_source_t *current = editingScene();
-		obs_sceneitem_t *item = current ? selectedItemIn(current) : nullptr;
+		obs_source_t *current = sceneRef();
+		obs_sceneitem_t *item = current ? selectedFor(current, horizontalMode) : nullptr;
 		obs_source_release(current);
 
 		if (!item) {
@@ -884,7 +1030,7 @@ private:
 	/* Na Prévia sempre; no Programa só quando o que está no ar é a própria prévia. */
 	bool editable() const
 	{
-		if (previewMode) {
+		if (previewMode || horizontalMode) {
 			return true;
 		}
 		obs_source_t *onAir = pl_vertical_current();
@@ -912,12 +1058,28 @@ private:
 		obs_source_release(current);
 	}
 
-	/* Quanto da tela vertical cabe em cada pixel da janela, e onde ela começa. */
+	/* A cena em que se mexe (nova referência). */
+	obs_source_t *sceneRef() const { return horizontalMode ? horizontalWorking() : editingScene(); }
+
+	/* Tamanho da tela em que se mexe: 1080x1920 no vertical, o tamanho da cena no horizontal. */
+	float canvasW() const { return horizontalMode ? horizontalSize(true) : (float)PL_VERTICAL_WIDTH; }
+	float canvasH() const { return horizontalMode ? horizontalSize(false) : (float)PL_VERTICAL_HEIGHT; }
+
+	static float horizontalSize(bool wide)
+	{
+		obs_video_info ovi;
+		if (obs_get_video_info(&ovi) && ovi.base_width && ovi.base_height) {
+			return (float)(wide ? ovi.base_width : ovi.base_height);
+		}
+		return wide ? 1920.0f : 1080.0f;
+	}
+
+	/* Quanto da tela cabe em cada pixel da janela, e onde ela começa. */
 	void viewMap(float &scale, float &offsetX, float &offsetY) const
 	{
 		QSize size = pixelSize();
-		float baseW = PL_VERTICAL_WIDTH;
-		float baseH = PL_VERTICAL_HEIGHT;
+		float baseW = canvasW();
+		float baseH = canvasH();
 		scale = std::min((float)size.width() / baseW, (float)size.height() / baseH);
 		if (scale <= 0.0f) {
 			scale = 1.0f;
@@ -1015,23 +1177,23 @@ private:
 		obs_sceneitem_crop crop = startCrop;
 		vec2 pos = startPos;
 		if (right) {
-			float edge = snapEdge(startBox.right + dx, (float)PL_VERTICAL_WIDTH);
+			float edge = snapEdge(startBox.right + dx, canvasW());
 			float cut = (float)startCrop.right - (edge - startBox.right) / sx;
 			crop.right = (int)std::lround(std::clamp(cut, 0.0f, fullW - (float)startCrop.left - minimum));
 		}
 		if (left) {
-			float edge = snapEdge(startBox.left + dx, (float)PL_VERTICAL_WIDTH);
+			float edge = snapEdge(startBox.left + dx, canvasW());
 			float cut = (float)startCrop.left + (edge - startBox.left) / sx;
 			crop.left = (int)std::lround(std::clamp(cut, 0.0f, fullW - (float)startCrop.right - minimum));
 			pos.x = startPos.x + (float)(crop.left - startCrop.left) * sx;
 		}
 		if (bottom) {
-			float edge = snapEdge(startBox.bottom + dy, (float)PL_VERTICAL_HEIGHT);
+			float edge = snapEdge(startBox.bottom + dy, canvasH());
 			float cut = (float)startCrop.bottom - (edge - startBox.bottom) / sy;
 			crop.bottom = (int)std::lround(std::clamp(cut, 0.0f, fullH - (float)startCrop.top - minimum));
 		}
 		if (top) {
-			float edge = snapEdge(startBox.top + dy, (float)PL_VERTICAL_HEIGHT);
+			float edge = snapEdge(startBox.top + dy, canvasH());
 			float cut = (float)startCrop.top + (edge - startBox.top) / sy;
 			crop.top = (int)std::lround(std::clamp(cut, 0.0f, fullH - (float)startCrop.bottom - minimum));
 			pos.y = startPos.y + (float)(crop.top - startCrop.top) * sy;
@@ -1063,8 +1225,8 @@ private:
 			}
 			return best;
 		};
-		dx = snap(startBox.left, startBox.width(), dx, (float)PL_VERTICAL_WIDTH);
-		dy = snap(startBox.top, startBox.height(), dy, (float)PL_VERTICAL_HEIGHT);
+		dx = snap(startBox.left, startBox.width(), dx, canvasW());
+		dy = snap(startBox.top, startBox.height(), dy, canvasH());
 
 		vec2 pos;
 		vec2_set(&pos, startPos.x + dx, startPos.y + dy);
@@ -1094,13 +1256,13 @@ private:
 			left = right ? anchorX : anchorX - w0 * factor;
 			top = bottom ? anchorY : anchorY - h0 * factor;
 		} else if (h == 5 || h == 7) {
-			float edge = snapEdge(x, (float)PL_VERTICAL_WIDTH);
+			float edge = snapEdge(x, canvasW());
 			float width = h == 5 ? edge - startBox.left : startBox.right - edge;
 			factor = std::max(width / w0, minimum);
 			left = h == 5 ? startBox.left : startBox.right - w0 * factor;
 			top = (startBox.top + startBox.bottom) / 2.0f - h0 * factor / 2.0f;
 		} else {
-			float edge = snapEdge(y, (float)PL_VERTICAL_HEIGHT);
+			float edge = snapEdge(y, canvasH());
 			float height = h == 6 ? edge - startBox.top : startBox.bottom - edge;
 			factor = std::max(height / h0, minimum);
 			top = h == 6 ? startBox.top : startBox.bottom - h0 * factor;
@@ -1152,7 +1314,7 @@ private:
 #endif
 		display = obs_display_create(&info, 0xFF202020);
 		if (display) {
-			obs_display_add_draw_callback(display, drawVertical, drawData());
+			obs_display_add_draw_callback(display, drawCallback(), drawData());
 		}
 	}
 
@@ -1165,18 +1327,12 @@ private:
 		}
 	}
 
-	void destroyDisplay()
-	{
-		if (display) {
-			obs_display_remove_draw_callback(display, drawVertical, drawData());
-			obs_display_destroy(display);
-			display = nullptr;
-		}
-	}
-
+	using DrawFn = void (*)(void *, uint32_t, uint32_t);
+	DrawFn drawCallback() const { return horizontalMode ? drawHorizontal : drawVertical; }
 	void *drawData() const { return previewMode ? (void *)this : nullptr; }
 
 	bool previewMode = false;
+	bool horizontalMode = false;
 	obs_display_t *display = nullptr;
 	Mode mode = Mode::None;
 	Box startBox = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -1920,6 +2076,7 @@ uint64_t seenVersion = (uint64_t)-1;
 
 void refreshDocks()
 {
+	updateHorizontalScene();
 	bool moved = updatePreviewTwin();
 	if (embedded) {
 		embedded->refresh();
@@ -1952,6 +2109,11 @@ void frontendEvent(enum obs_frontend_event event, void *)
 	if (event == OBS_FRONTEND_EVENT_EXIT || event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP) {
 		setSelection(nullptr, 0);
 		clearPreviewTwin();
+		clearHorizontalScene();
+	}
+	if (event == OBS_FRONTEND_EVENT_PREVIEW_SCENE_CHANGED || event == OBS_FRONTEND_EVENT_SCENE_CHANGED ||
+	    event == OBS_FRONTEND_EVENT_STUDIO_MODE_ENABLED || event == OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED) {
+		updateHorizontalScene();
 	}
 	if (event == OBS_FRONTEND_EVENT_EXIT) {
 		if (timer) {
@@ -2031,6 +2193,26 @@ QWidget *pl_vertical_preview_create(QWidget *parent)
 				    extraPrograms.end());
 	});
 	return created;
+}
+
+QWidget *pl_horizontal_preview_create(QWidget *parent)
+{
+	updateHorizontalScene();
+	return new VerticalDisplay(parent, false, true);
+}
+
+void pl_horizontal_preview_sync(QWidget *view)
+{
+	if (auto *display = dynamic_cast<VerticalDisplay *>(view)) {
+		display->syncSize();
+	}
+}
+
+void pl_horizontal_preview_release(QWidget *view)
+{
+	if (auto *display = dynamic_cast<VerticalDisplay *>(view)) {
+		display->destroyDisplay();
+	}
 }
 
 void pl_vertical_sources_add(QWidget *sources, const QPoint &where)

@@ -329,6 +329,15 @@ void endFit()
 class Monitor : public QFrame {
 public:
 	Monitor(QWidget *parent, const QString &title, const char *color, PLScreen::DrawFn fn, void *owner)
+		: Monitor(parent, title, color, nullptr, fn, owner)
+	{
+	}
+
+	/* Com uma tela feita por fora (a Prévia, onde se mexe com o mouse). Ela nasce já dentro da
+	 * moldura: trocar de pai uma janela nativa troca a janela e a tela do OBS se perde. */
+	using MakeFn = QWidget *(*)(QWidget *parent);
+	Monitor(QWidget *parent, const QString &title, const char *color, MakeFn custom,
+		PLScreen::DrawFn fn = nullptr, void *owner = nullptr)
 		: QFrame(parent)
 	{
 		auto *outer = new QVBoxLayout(this);
@@ -353,7 +362,12 @@ public:
 			QString("QFrame#plMonitor { border: 2px solid %1; border-radius: 6px; }").arg(color));
 		auto *inner = new QVBoxLayout(frame);
 		inner->setContentsMargins(2, 2, 2, 2);
-		view = new PLScreen(frame, fn, owner);
+		if (custom) {
+			view = custom(frame);
+		} else {
+			screen = new PLScreen(frame, fn, owner);
+			view = screen;
+		}
 		inner->addWidget(view);
 		outer->addWidget(frame, 1);
 	}
@@ -365,7 +379,8 @@ public:
 		}
 	}
 
-	PLScreen *view = nullptr;
+	QWidget *view = nullptr;
+	PLScreen *screen = nullptr; /* nullptr quando a tela veio pronta */
 
 private:
 	QLabel *sceneName = nullptr;
@@ -768,7 +783,8 @@ public:
 		auto *middle = new QHBoxLayout();
 		middle->setSpacing(12);
 
-		preview = new Monitor(this, msg("Studio.Preview"), "#2fa84f", drawPreview, this);
+		/* A Prévia aceita o mouse: escolher, mover, aumentar e diminuir pelos quadradinhos, Alt corta. */
+		preview = new Monitor(this, msg("Studio.Preview"), "#2fa84f", pl_horizontal_preview_create);
 		middle->addWidget(preview, 1);
 
 		/* A Prévia vertical, em pé, ao lado da Prévia: é nela que se ajusta o vertical. */
@@ -876,10 +892,10 @@ public:
 	void releaseScreens()
 	{
 		if (preview) {
-			preview->view->destroyDisplay();
+			pl_horizontal_preview_release(preview->view);
 		}
 		if (program) {
-			program->view->destroyDisplay();
+			program->screen->destroyDisplay();
 		}
 	}
 
@@ -900,8 +916,8 @@ protected:
 private:
 	void refresh()
 	{
-		preview->view->syncSize();
-		program->view->syncSize();
+		pl_horizontal_preview_sync(preview->view);
+		program->screen->syncSize();
 		sources->refresh();
 		updateFooter();
 		bool vertical = pl_vertical_program_wanted();
