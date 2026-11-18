@@ -58,6 +58,9 @@ void pl_projection_set_mirror(int port);
 /* Pede (ou para de pedir) o telão por NDI. */
 void pl_projection_set_ndi(bool on);
 
+/* Pede (ou para de pedir) também o telão em pé (1080x1920) por NDI, para a fonte "Projeção vertical". */
+void pl_projection_set_ndi_vertical(bool on);
+
 /* Implementada em mirror-source.c: 0 = sem fonte "Telão", 1 = NDI (ou procurando), 2 = modo antigo. */
 int pl_mirror_mode(void);
 void pl_mirror_rename_old(void);

@@ -33,6 +33,7 @@ OBS_MODULE_USE_DEFAULT_LOCALE("projeto-live", "en-US")
 extern struct obs_source_info projeto_live_phone_source;
 extern struct obs_source_info pl_caption_source;
 extern struct obs_source_info pl_mirror_source;
+extern struct obs_source_info pl_mirror_vertical_source;
 
 MODULE_EXPORT const char *obs_module_description(void)
 {
@@ -47,6 +48,7 @@ bool obs_module_load(void)
 	obs_register_source(&projeto_live_phone_source);
 	obs_register_source(&pl_caption_source);
 	obs_register_source(&pl_mirror_source);
+	obs_register_source(&pl_mirror_vertical_source);
 	pl_director_dock_load();
 	pl_camera_dock_load();
 	pl_stats_dock_load();

@@ -89,6 +89,7 @@ static bool forget_requested;
 
 static int mirror_port;
 static bool mirror_ndi;
+static bool mirror_ndi_vertical;
 static uint64_t mirror_version;
 static char caption_text[CAPTION_MAX];
 static uint64_t caption_version;
@@ -507,6 +508,19 @@ void pl_projection_set_ndi(bool on)
 	pthread_mutex_unlock(&mutex);
 }
 
+void pl_projection_set_ndi_vertical(bool on)
+{
+	if (!thread_created) {
+		return;
+	}
+	pthread_mutex_lock(&mutex);
+	if (mirror_ndi_vertical != on) {
+		mirror_ndi_vertical = on;
+		mirror_version++;
+	}
+	pthread_mutex_unlock(&mutex);
+}
+
 static int current_mirror(uint64_t *version)
 {
 	pthread_mutex_lock(&mutex);
@@ -610,13 +624,18 @@ static bool welcome(struct peer *peer, const char *key)
 }
 
 /* "NDI on|off" e "MIRROR <porta>" ou "MIRROR off": como a projeção deve mandar o telão (fonte
- * "Telão (projeção)"). Projeção antiga ignora o "NDI". */
+ * "Telão (projeção)"). "NDIV on|off": mande também o telão em pé (fonte "Projeção vertical").
+ * Projeção antiga ignora o "NDI" e o "NDIV". */
 static bool send_mirror(struct peer *peer)
 {
 	pthread_mutex_lock(&mutex);
 	bool ndi = mirror_ndi;
+	bool ndi_vertical = mirror_ndi_vertical;
 	pthread_mutex_unlock(&mutex);
 	if (!send_line(peer, ndi ? "NDI on" : "NDI off")) {
+		return false;
+	}
+	if (!send_line(peer, ndi_vertical ? "NDIV on" : "NDIV off")) {
 		return false;
 	}
 	int port = current_mirror(NULL);

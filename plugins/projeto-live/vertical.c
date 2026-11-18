@@ -143,6 +143,122 @@ static obs_source_t *vertical_pair(obs_source_t *source)
 	return obs_source_get_ref(source);
 }
 
+/* ------------------------------------------------------------------------- */
+/* Projeção: no vertical, o telão em pé (18/11)                               */
+
+#define MIRROR_ID "projeto_live_mirror"
+#define MIRROR_VERTICAL_ID "projeto_live_mirror_vertical"
+#define AUTO_VERTICAL_KEY "pl_vertical_auto"
+
+struct find_by_id {
+	const char *id;
+	obs_source_t *found;
+};
+
+static bool find_by_id_cb(void *param, obs_source_t *source)
+{
+	struct find_by_id *find = param;
+	const char *id = obs_source_get_unversioned_id(source);
+	if (id && strcmp(id, find->id) == 0) {
+		find->found = obs_source_get_ref(source);
+		return false;
+	}
+	return true;
+}
+
+/* Segura a "Projeção vertical" enquanto a tela vertical existe (até entrar nas gêmeas, ninguém mais segura). */
+static obs_source_t *kept_vertical;
+
+/* A fonte "Projeção vertical" (nova referência): a que já existe ou uma nova. */
+static obs_source_t *vertical_mirror(void)
+{
+	struct find_by_id find = {MIRROR_VERTICAL_ID, NULL};
+	obs_enum_sources(find_by_id_cb, &find);
+	if (find.found) {
+		return find.found;
+	}
+	const char *wanted = obs_module_text("Mirror.VerticalName");
+	char name[256];
+	snprintf(name, sizeof(name), "%s", wanted);
+	for (int n = 2; n < 100; n++) {
+		obs_source_t *taken = obs_get_source_by_name(name);
+		if (!taken) {
+			break;
+		}
+		obs_source_release(taken);
+		snprintf(name, sizeof(name), "%s %d", wanted, n);
+	}
+	blog(LOG_INFO, "[projeto-live] vertical: fonte '%s' criada", name);
+	obs_source_t *created = obs_source_create(MIRROR_VERTICAL_ID, name, NULL, NULL);
+	if (created) {
+		obs_source_release(kept_vertical);
+		kept_vertical = obs_source_get_ref(created);
+	}
+	return created;
+}
+
+/*
+ * Fonte "Projeção" (o telão): no vertical vai a "Projeção vertical" (o telão em pé que a projeção
+ * manda). Uma vez por fonte: se a pessoa trocar depois (Trocar fonte), fica a escolha dela.
+ * Só marca; quem já tinha gêmeas chama repair_twins. Devolve true se casou agora.
+ */
+static bool mark_mirror_pair(obs_source_t *source)
+{
+	const char *id = source ? obs_source_get_unversioned_id(source) : NULL;
+	if (!id || strcmp(id, MIRROR_ID) != 0 || private_bool(source, AUTO_VERTICAL_KEY)) {
+		return false;
+	}
+	obs_source_t *vertical = vertical_mirror();
+	obs_data_t *settings = obs_source_get_private_settings(source);
+	obs_data_set_bool(settings, AUTO_VERTICAL_KEY, true);
+	bool set = false;
+	const char *pair = obs_data_get_string(settings, PAIR_KEY);
+	if (vertical && !obs_data_get_bool(settings, HIDE_KEY) && (!pair || !*pair)) {
+		obs_data_set_string(settings, PAIR_KEY, obs_source_get_uuid(vertical));
+		set = true;
+		blog(LOG_INFO, "[projeto-live] vertical: '%s' usa '%s' no vertical", obs_source_get_name(source),
+		     obs_source_get_name(vertical));
+	}
+	obs_data_release(settings);
+	obs_source_release(vertical);
+	return set;
+}
+
+static void repair_twins(obs_source_t *source, obs_source_t *old_pair);
+
+struct mirror_list {
+	DARRAY(obs_source_t *) sources;
+};
+
+static bool collect_mirrors_cb(void *param, obs_source_t *source)
+{
+	struct mirror_list *list = param;
+	const char *id = obs_source_get_unversioned_id(source);
+	if (id && strcmp(id, MIRROR_ID) == 0 && !private_bool(source, AUTO_VERTICAL_KEY)) {
+		obs_source_t *ref = obs_source_get_ref(source);
+		da_push_back(list->sources, &ref);
+	}
+	return true;
+}
+
+/* Telões que já estavam nas cenas (antes desta versão): passam a usar a "Projeção vertical". */
+static void pair_old_mirrors(void)
+{
+	struct mirror_list list;
+	da_init(list.sources);
+	obs_enum_sources(collect_mirrors_cb, &list);
+	for (size_t i = 0; i < list.sources.num; i++) {
+		obs_source_t *source = list.sources.array[i];
+		obs_source_t *old_pair = vertical_pair(source);
+		if (mark_mirror_pair(source)) {
+			repair_twins(source, old_pair);
+		}
+		obs_source_release(old_pair);
+		obs_source_release(source);
+	}
+	da_free(list.sources);
+}
+
 static bool is_camera(obs_source_t *source)
 {
 	static const char *cameras[] = {
@@ -326,6 +442,7 @@ static void add_twin_item(obs_source_t *twin, obs_sceneitem_t *horizontal_item, 
 		obs_sceneitem_group_enum_items(horizontal_item, group_fill_cb, &fill);
 		return;
 	}
+	mark_mirror_pair(obs_sceneitem_get_source(horizontal_item));
 	obs_source_t *pair = vertical_pair(obs_sceneitem_get_source(horizontal_item));
 	if (!pair) {
 		return;
@@ -802,6 +919,8 @@ static void sync_twins(void)
 		return;
 	}
 
+	pair_old_mirrors();
+
 	struct obs_frontend_source_list scenes = {0};
 	obs_frontend_get_scenes(&scenes);
 
@@ -1146,6 +1265,8 @@ static void release_canvas(void)
 	canvas = NULL;
 	pthread_mutex_unlock(&canvas_mutex);
 	obs_canvas_release(old);
+	obs_source_release(kept_vertical);
+	kept_vertical = NULL;
 	pl_vertical_touch();
 }
 

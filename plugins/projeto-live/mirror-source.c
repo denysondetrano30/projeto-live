@@ -14,6 +14,11 @@
  *    TCP 9030 com uma "Fonte de mídia" do próprio OBS (ffmpeg_source), como antes. Quando o NDI volta,
  *    o modo antigo é desligado sozinho.
  *
+ * "Projeção vertical" (18/11): o telão em pé (1080x1920), que a projeção manda por NDI com o nome
+ * "Projeto Live - Telão vertical" quando o OBS pede "NDIV on". A tela vertical usa essa fonte sozinha
+ * no lugar do "Telão" (vertical.c). Sem esse sinal (projeção antiga, sem NDI), ela mostra o telão
+ * deitado encaixado no meio, como antes.
+ *
  * O som é repassado para cada "Telão", que aparece no mixer com volume próprio. A imagem é encaixada
  * numa área fixa de 1920x1080 (o tamanho do telão não muda o layout da cena).
  *
@@ -485,8 +490,8 @@ static bool machine_matches(const char *ndi_name, const char *names)
 	return false;
 }
 
-/* Escolhe a fonte do telão: de preferência a do computador da projeção conectada. */
-static bool pick_source(void *find, char *name, size_t name_size, char *url, size_t url_size)
+/* Escolhe a fonte do telão (deitado ou em pé): de preferência a do computador da projeção conectada. */
+static bool pick_source(void *find, bool vertical, char *name, size_t name_size, char *url, size_t url_size)
 {
 	uint32_t count = 0;
 	const ndi_source_t *sources = ndi.find_get_current_sources(find, &count);
@@ -496,6 +501,10 @@ static bool pick_source(void *find, char *name, size_t name_size, char *url, siz
 	for (uint32_t i = 0; i < count; i++) {
 		const char *n = sources[i].p_ndi_name;
 		if (!n || !strstr(n, NDI_NAME_TAG)) {
+			continue;
+		}
+		/* "Projeto Live - Telão vertical" é o telão em pé (18/11). */
+		if ((strstr(n, " vertical)") != NULL) != vertical) {
 			continue;
 		}
 		if (machine_matches(n, names)) {
@@ -561,7 +570,7 @@ static void *ndi_thread_main(void *unused)
 				continue;
 			}
 			ndi.find_wait_for_sources(find, 500);
-			if (ndi_stop || !pick_source(find, name, sizeof(name), url, sizeof(url))) {
+			if (ndi_stop || !pick_source(find, false, name, sizeof(name), url, sizeof(url))) {
 				continue;
 			}
 			ndi_recv_create_v3_t settings = {0};
@@ -826,6 +835,303 @@ static void mirror_enum_sources(void *data, obs_source_enum_proc_t enum_callback
 		obs_source_release(old);
 	}
 }
+
+/* ------------------------------------------------------------------------- */
+/* "Projeção vertical": o telão em pé (sem som; o som vem do "Telão")          */
+
+#define VERTICAL_WIDTH 1080
+#define VERTICAL_HEIGHT 1920
+
+static int vertical_count; /* protegido por mirrors_mutex */
+
+static pthread_mutex_t vframe_mutex = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t *vframe_data;
+static size_t vframe_capacity;
+static uint32_t vframe_width;
+static uint32_t vframe_height;
+static bool vframe_bgrx;
+static uint64_t vframe_seq;
+static volatile uint64_t vlast_video_ns;
+
+/* Só na linha de desenho. */
+static gs_texture_t *vtexture;
+static uint64_t vtexture_seq;
+static uint32_t vtexture_width;
+static uint32_t vtexture_height;
+static bool vtexture_bgrx;
+
+static pthread_t vthread;
+static bool vthread_running;
+static volatile bool vstop;
+
+static void vstore_frame(const ndi_video_frame_v2_t *video)
+{
+	if (video->xres <= 0 || video->yres <= 0 || !video->p_data ||
+	    (video->fourcc != NDI_FOURCC_BGRA && video->fourcc != NDI_FOURCC_BGRX)) {
+		return;
+	}
+	uint32_t width = (uint32_t)video->xres;
+	uint32_t height = (uint32_t)video->yres;
+	size_t row = (size_t)width * 4;
+	size_t size = row * height;
+	pthread_mutex_lock(&vframe_mutex);
+	if (vframe_capacity < size) {
+		vframe_data = brealloc(vframe_data, size);
+		vframe_capacity = size;
+	}
+	int stride = video->line_stride_in_bytes ? video->line_stride_in_bytes : (int)row;
+	if ((size_t)stride == row) {
+		memcpy(vframe_data, video->p_data, size);
+	} else {
+		for (uint32_t y = 0; y < height; y++) {
+			memcpy(vframe_data + row * y, video->p_data + (size_t)stride * y, row);
+		}
+	}
+	vframe_width = width;
+	vframe_height = height;
+	vframe_bgrx = video->fourcc == NDI_FOURCC_BGRX;
+	vframe_seq++;
+	pthread_mutex_unlock(&vframe_mutex);
+	vlast_video_ns = os_gettime_ns();
+}
+
+static void *vertical_thread_main(void *unused)
+{
+	(void)unused;
+	os_set_thread_name("projeto-live: telão vertical NDI");
+	ndi_find_create_t find_settings = {true, NULL, NULL};
+	void *find = ndi.find_create_v2(&find_settings);
+	void *recv = NULL;
+	uint64_t recv_since = 0;
+	char name[256];
+	char url[256];
+
+	while (!vstop) {
+		if (!recv) {
+			if (!find) {
+				os_sleep_ms(500);
+				find = ndi.find_create_v2(&find_settings);
+				continue;
+			}
+			ndi.find_wait_for_sources(find, 500);
+			if (vstop || !pick_source(find, true, name, sizeof(name), url, sizeof(url))) {
+				continue;
+			}
+			ndi_recv_create_v3_t settings = {0};
+			settings.source_to_connect_to.p_ndi_name = name;
+			settings.source_to_connect_to.p_url_address = url[0] ? url : NULL;
+			settings.color_format = NDI_COLOR_BGRX_BGRA;
+			settings.bandwidth = NDI_BANDWIDTH_HIGHEST;
+			settings.allow_video_fields = false;
+			settings.p_ndi_recv_name = "Projeto Live (OBS, vertical)";
+			recv = ndi.recv_create_v3(&settings);
+			recv_since = os_gettime_ns();
+			blog(LOG_INFO, "[projeto-live] telão vertical: conectando no NDI \"%s\" %s", name, recv ? "" : "(falhou)");
+			if (!recv) {
+				os_sleep_ms(1000);
+			}
+			continue;
+		}
+
+		ndi_video_frame_v2_t video;
+		ndi_audio_frame_v3_t audio;
+		int type = ndi.recv_capture_v3(recv, &video, &audio, NULL, 100);
+		if (type == NDI_FRAME_VIDEO) {
+			vstore_frame(&video);
+			ndi.recv_free_video_v2(recv, &video);
+		} else if (type == NDI_FRAME_AUDIO) {
+			ndi.recv_free_audio_v3(recv, &audio);
+		}
+
+		uint64_t now = os_gettime_ns();
+		uint64_t last = vlast_video_ns;
+		uint64_t since = last > recv_since ? last : recv_since;
+		if (now - since > NDI_RECONNECT_NS) {
+			blog(LOG_INFO, "[projeto-live] telão vertical: NDI parado; procurando de novo");
+			ndi.recv_destroy(recv);
+			recv = NULL;
+		}
+	}
+
+	if (recv) {
+		ndi.recv_destroy(recv);
+	}
+	if (find) {
+		ndi.find_destroy(find);
+	}
+	return NULL;
+}
+
+static void vertical_start(void)
+{
+	vlast_video_ns = 0;
+	if (!load_ndi()) {
+		return;
+	}
+	pl_projection_set_ndi_vertical(true);
+	vstop = false;
+	vthread_running = pthread_create(&vthread, NULL, vertical_thread_main, NULL) == 0;
+	if (!vthread_running) {
+		pl_projection_set_ndi_vertical(false);
+	}
+}
+
+static void vertical_stop(void)
+{
+	if (vthread_running) {
+		vstop = true;
+		pthread_join(vthread, NULL);
+		vthread_running = false;
+	}
+	pl_projection_set_ndi_vertical(false);
+
+	obs_enter_graphics();
+	if (vtexture) {
+		gs_texture_destroy(vtexture);
+		vtexture = NULL;
+	}
+	obs_leave_graphics();
+	vtexture_seq = 0;
+
+	pthread_mutex_lock(&vframe_mutex);
+	bfree(vframe_data);
+	vframe_data = NULL;
+	vframe_capacity = 0;
+	vframe_width = vframe_height = 0;
+	vframe_seq = 0;
+	pthread_mutex_unlock(&vframe_mutex);
+	vlast_video_ns = 0;
+}
+
+static const char *vertical_name(void *unused)
+{
+	(void)unused;
+	return obs_module_text("Mirror.VerticalName");
+}
+
+static void *vertical_create(obs_data_t *settings, obs_source_t *source)
+{
+	(void)settings;
+	pthread_mutex_lock(&mirrors_mutex);
+	bool first = vertical_count++ == 0;
+	pthread_mutex_unlock(&mirrors_mutex);
+	if (first) {
+		vertical_start();
+	}
+	return source;
+}
+
+static void vertical_destroy(void *data)
+{
+	(void)data;
+	pthread_mutex_lock(&mirrors_mutex);
+	bool last = --vertical_count == 0;
+	pthread_mutex_unlock(&mirrors_mutex);
+	if (last) {
+		vertical_stop();
+	}
+}
+
+static uint32_t vertical_width(void *data)
+{
+	(void)data;
+	return VERTICAL_WIDTH;
+}
+
+static uint32_t vertical_height(void *data)
+{
+	(void)data;
+	return VERTICAL_HEIGHT;
+}
+
+static bool vertical_update_texture(void)
+{
+	pthread_mutex_lock(&vframe_mutex);
+	if (vframe_seq && vframe_seq != vtexture_seq && vframe_data) {
+		if (!vtexture || vtexture_width != vframe_width || vtexture_height != vframe_height ||
+		    vtexture_bgrx != vframe_bgrx) {
+			if (vtexture) {
+				gs_texture_destroy(vtexture);
+			}
+			vtexture = gs_texture_create(vframe_width, vframe_height, vframe_bgrx ? GS_BGRX : GS_BGRA, 1, NULL,
+						     GS_DYNAMIC);
+			vtexture_width = vframe_width;
+			vtexture_height = vframe_height;
+			vtexture_bgrx = vframe_bgrx;
+		}
+		if (vtexture) {
+			gs_texture_set_image(vtexture, vframe_data, vframe_width * 4, false);
+		}
+		vtexture_seq = vframe_seq;
+	}
+	pthread_mutex_unlock(&vframe_mutex);
+	return vtexture != NULL;
+}
+
+static void mirror_render(void *data, gs_effect_t *effect);
+
+static void vertical_render(void *data, gs_effect_t *effect)
+{
+	(void)data;
+	uint64_t last = vlast_video_ns;
+	bool fresh = last && os_gettime_ns() - last < NDI_RECONNECT_NS;
+	if (vertical_update_texture() && fresh) {
+		/* O telão em pé, encaixado nos 1080x1920 sem distorcer. */
+		gs_effect_t *base = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+		const bool previous = gs_framebuffer_srgb_enabled();
+		gs_enable_framebuffer_srgb(true);
+		gs_effect_set_texture_srgb(gs_effect_get_param_by_name(base, "image"), vtexture);
+		float sx = (float)VERTICAL_WIDTH / (float)vtexture_width;
+		float sy = (float)VERTICAL_HEIGHT / (float)vtexture_height;
+		float scale = sx < sy ? sx : sy;
+		gs_matrix_push();
+		gs_matrix_translate3f(((float)VERTICAL_WIDTH - (float)vtexture_width * scale) / 2.0f,
+				      ((float)VERTICAL_HEIGHT - (float)vtexture_height * scale) / 2.0f, 0.0f);
+		gs_matrix_scale3f(scale, scale, 1.0f);
+		while (gs_effect_loop(base, "Draw")) {
+			gs_draw_sprite(vtexture, 0, vtexture_width, vtexture_height);
+		}
+		gs_matrix_pop();
+		gs_enable_framebuffer_srgb(previous);
+		return;
+	}
+	/* Sem o telão em pé (projeção antiga, sem NDI): o deitado, encaixado no meio, como era antes. */
+	pthread_mutex_lock(&mirrors_mutex);
+	bool have_mirror = mirror_count > 0;
+	pthread_mutex_unlock(&mirrors_mutex);
+	if (!have_mirror) {
+		return;
+	}
+	float scale = (float)VERTICAL_WIDTH / (float)MIRROR_WIDTH;
+	gs_matrix_push();
+	gs_matrix_translate3f(0.0f, ((float)VERTICAL_HEIGHT - (float)MIRROR_HEIGHT * scale) / 2.0f, 0.0f);
+	gs_matrix_scale3f(scale, scale, 1.0f);
+	mirror_render(NULL, effect);
+	gs_matrix_pop();
+}
+
+static obs_properties_t *vertical_properties(void *unused)
+{
+	(void)unused;
+	obs_properties_t *props = obs_properties_create();
+	obs_properties_add_text(props, "info", obs_module_text("Mirror.Legal"), OBS_TEXT_INFO);
+	return props;
+}
+
+struct obs_source_info pl_mirror_vertical_source = {
+	.id = "projeto_live_mirror_vertical",
+	.type = OBS_SOURCE_TYPE_INPUT,
+	/* Não aparece em "Adicionar fonte": o OBS cria e usa sozinho (vertical.c). */
+	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_CAP_OBSOLETE,
+	.get_name = vertical_name,
+	.create = vertical_create,
+	.destroy = vertical_destroy,
+	.get_properties = vertical_properties,
+	.video_render = vertical_render,
+	.get_width = vertical_width,
+	.get_height = vertical_height,
+	.icon_type = OBS_ICON_TYPE_MEDIA,
+};
 
 /* Fontes criadas com o nome antigo ("Telão (projeção)") passam a se chamar como hoje ("Projeção"). */
 static bool rename_old_one(void *param, obs_source_t *source)
