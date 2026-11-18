@@ -954,7 +954,8 @@ void OBSBasic::OBSInit()
 	InitPrimitives();
 
 	sceneDuplicationMode = config_get_bool(App()->GetUserConfig(), "BasicWindow", "SceneDuplicationMode");
-	swapScenesMode = config_get_bool(App()->GetUserConfig(), "BasicWindow", "SwapScenesMode");
+	/* Projeto Live: a troca Prévia/Programa depois da transição fica sempre ligada (sem opção). */
+	swapScenesMode = true;
 	editPropertiesMode = config_get_bool(App()->GetUserConfig(), "BasicWindow", "EditPropertiesMode");
 
 	if (!opt_studio_mode) {

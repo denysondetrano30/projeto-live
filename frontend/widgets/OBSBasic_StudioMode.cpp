@@ -128,10 +128,6 @@ void OBSBasic::CreateProgramOptions()
 			}
 		};
 
-		auto toggleSwapScenesMode = [this]() {
-			swapScenesMode = !swapScenesMode;
-		};
-
 		auto toggleSceneDuplication = [this]() {
 			sceneDuplicationMode = !sceneDuplicationMode;
 
@@ -159,13 +155,6 @@ void OBSBasic::CreateProgramOptions()
 		action->setChecked(editPropertiesMode);
 		action->setEnabled(sceneDuplicationMode);
 		connect(action, &QAction::triggered, this, toggleEditProperties);
-		connect(action, &QAction::hovered, action, showToolTip);
-
-		action = menu.addAction(QTStr("QuickTransitions.SwapScenes"));
-		action->setToolTip(QTStr("QuickTransitions.SwapScenesTT"));
-		action->setCheckable(true);
-		action->setChecked(swapScenesMode);
-		connect(action, &QAction::triggered, this, toggleSwapScenesMode);
 		connect(action, &QAction::hovered, action, showToolTip);
 
 		menu.exec(QCursor::pos());
