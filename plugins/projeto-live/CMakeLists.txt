@@ -63,6 +63,8 @@ target_sources(
     stream-dock.cpp
     studio-window.cpp
     studio-window.h
+    transitions-dialog.cpp
+    transitions-dialog.h
     stream-dock.h
     usb-relay.c
     usb-relay.h

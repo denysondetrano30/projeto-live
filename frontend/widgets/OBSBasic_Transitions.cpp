@@ -514,6 +514,48 @@ void OBSBasic::AddTransition(const char *id)
 	}
 }
 
+/* Projeto Live: the plugin's transitions window adds, renames and removes through OBS so the lists,
+ * quick transitions and per-scene overrides stay right. */
+void OBSBasic::PLAddTransition(const QString &id)
+{
+	size_t idx = 0;
+	const char *type;
+	std::string wanted = id.toStdString();
+
+	/* Use the registered (static) id string: AddTransition may call itself again with it. */
+	while (obs_enum_transition_types(idx++, &type)) {
+		if (wanted == type) {
+			AddTransition(type);
+			return;
+		}
+	}
+}
+
+void OBSBasic::PLRenameTransition(const QString &uuid)
+{
+	auto transition = transitions.find(uuid.toStdString());
+	if (transition != transitions.end()) {
+		RenameTransition(transition->second);
+	}
+}
+
+void OBSBasic::PLRemoveTransition(const QString &uuid)
+{
+	std::string wanted = uuid.toStdString();
+	if (transitions.find(wanted) == transitions.end()) {
+		return;
+	}
+	std::string previous = currentTransitionUuid;
+	if (previous != wanted) {
+		UpdateCurrentTransition(wanted, true);
+	}
+	on_transitionRemove_clicked();
+	/* Back to the one that was in use (if it was another one, or the removal was cancelled). */
+	if (previous != wanted && transitions.find(previous) != transitions.end()) {
+		UpdateCurrentTransition(previous, true);
+	}
+}
+
 void OBSBasic::on_transitionAdd_clicked()
 {
 	bool foundConfigurableTransitions = false;

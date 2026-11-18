@@ -82,6 +82,7 @@
 #include <vector>
 
 #include "phone-source.h"
+#include "transitions-dialog.h"
 
 namespace {
 
@@ -395,7 +396,7 @@ public:
 		setFixedWidth(cardWidth + 6);
 	}
 
-	/* Um clique: manda para a prévia (só funciona com o modo estúdio ligado). */
+	/* Um clique: manda para a prévia; no modo normal (sem prévia) já põe no ar, com a transição. */
 	void sendToPreview()
 	{
 		obs_source_t *scene = source();
@@ -404,6 +405,8 @@ public:
 		}
 		if (obs_frontend_preview_program_mode_active()) {
 			obs_frontend_set_current_preview_scene(scene);
+		} else {
+			obs_frontend_set_current_scene(scene);
 		}
 		obs_source_release(scene);
 	}
@@ -1179,6 +1182,7 @@ void showCardMenu(Card *card, const QPoint &where)
 	QMenu menu;
 	QAction *addAction = menu.addAction(msg("Entries.AddSource"));
 	QAction *organizeAction = menu.addAction(msg("Entries.Organize"));
+	pl_entry_transition_menu(&menu, scene);
 	menu.addSeparator();
 	QAction *renameAction = menu.addAction(msg("Entries.Rename"));
 	QAction *deleteAction = menu.addAction(msg("Entries.Delete"));

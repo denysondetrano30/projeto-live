@@ -1574,6 +1574,11 @@ public slots:
 
 	void SetTransitionDuration(int duration);
 
+	/* Projeto Live: the plugin's transitions window calls these by name. */
+	void PLAddTransition(const QString &id);
+	void PLRenameTransition(const QString &uuid);
+	void PLRemoveTransition(const QString &uuid);
+
 private slots:
 	void AddTransition(const char *id);
 	void RenameTransition(OBSSource transition);

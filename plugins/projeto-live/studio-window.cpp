@@ -82,6 +82,7 @@
 #include "pl-account.h"
 #include "source-row.hpp"
 #include "stats-dock.h"
+#include "transitions-dialog.h"
 #include "vertical-dock.h"
 
 namespace {
@@ -345,21 +346,19 @@ public:
 		outer->setSpacing(4);
 
 		auto *head = new QHBoxLayout();
-		auto *label = new QLabel(title, this);
+		label = new QLabel(title, this);
 		QFont bold = label->font();
 		bold.setBold(true);
 		label->setFont(bold);
-		label->setStyleSheet(QString("color: %1;").arg(color));
 		head->addWidget(label);
 		head->addStretch(1);
 		sceneName = new QLabel(this);
 		head->addWidget(sceneName);
 		outer->addLayout(head);
 
-		auto *frame = new QFrame(this);
+		frame = new QFrame(this);
 		frame->setObjectName("plMonitor");
-		frame->setStyleSheet(
-			QString("QFrame#plMonitor { border: 2px solid %1; border-radius: 6px; }").arg(color));
+		setLook(title, color);
 		auto *inner = new QVBoxLayout(frame);
 		inner->setContentsMargins(2, 2, 2, 2);
 		if (custom) {
@@ -370,6 +369,19 @@ public:
 		}
 		inner->addWidget(view);
 		outer->addWidget(frame, 1);
+	}
+
+	/* Título e cor da moldura (a Prévia vira "NO AR" vermelha no modo normal). */
+	void setLook(const QString &title, const char *color)
+	{
+		if (look == title) {
+			return;
+		}
+		look = title;
+		label->setText(title);
+		label->setStyleSheet(QString("color: %1;").arg(color));
+		frame->setStyleSheet(
+			QString("QFrame#plMonitor { border: 2px solid %1; border-radius: 6px; }").arg(color));
 	}
 
 	void setSceneName(const QString &text)
@@ -384,6 +396,9 @@ public:
 
 private:
 	QLabel *sceneName = nullptr;
+	QLabel *label = nullptr;
+	QFrame *frame = nullptr;
+	QString look;
 };
 
 /* ------------------------------------------------------------------------- */
@@ -796,26 +811,43 @@ public:
 
 		auto *center = new QVBoxLayout();
 		center->addStretch(1);
-		auto *cut = new QPushButton(msg("Studio.Cut"), this);
-		cut->setMinimumSize(110, 48);
-		QFont cutFont = cut->font();
+		cutButton = new QPushButton(msg("Studio.Cut"), this);
+		cutButton->setMinimumSize(110, 48);
+		QFont cutFont = cutButton->font();
 		cutFont.setBold(true);
-		cut->setFont(cutFont);
-		cut->setStyleSheet("QPushButton { background: #e5352b; color: white; border-radius: 6px; }"
+		cutButton->setFont(cutFont);
+		cutButton->setStyleSheet("QPushButton { background: #e5352b; color: white; border-radius: 6px; }"
 				   "QPushButton:hover { background: #f0473d; }"
 				   "QPushButton:pressed { background: #c22a22; }");
-		cut->setToolTip(msg("Studio.CutHint"));
-		connect(cut, &QPushButton::clicked, this, []() { cutNow(); });
-		center->addWidget(cut);
-		auto *transition = new QPushButton(msg("Studio.Transition"), this);
-		transition->setMinimumSize(110, 34);
-		transition->setToolTip(msg("Studio.TransitionHint"));
-		connect(transition, &QPushButton::clicked, this, []() { transitionNow(); });
-		center->addWidget(transition);
+		cutButton->setToolTip(msg("Studio.CutHint"));
+		connect(cutButton, &QPushButton::clicked, this, []() { cutNow(); });
+		center->addWidget(cutButton);
+		transitionButton = new QPushButton(msg("Studio.Transition"), this);
+		transitionButton->setMinimumSize(110, 34);
+		transitionButton->setToolTip(msg("Studio.TransitionHint"));
+		connect(transitionButton, &QPushButton::clicked, this, []() { transitionNow(); });
+		center->addWidget(transitionButton);
 		transitionInfo = new QLabel(this);
 		transitionInfo->setAlignment(Qt::AlignCenter);
 		transitionInfo->setEnabled(false);
 		center->addWidget(transitionInfo);
+
+		/* Modo estúdio liga e desliga aqui; a engrenagem abre a janelinha das transições. */
+		auto *modeRow = new QHBoxLayout();
+		modeRow->setSpacing(4);
+		studioButton = new QPushButton(msg("Studio.StudioMode"), this);
+		studioButton->setCheckable(true);
+		studioButton->setToolTip(msg("Studio.StudioModeHint"));
+		studioButton->setStyleSheet("QPushButton { padding: 3px 8px; border-radius: 4px; }"
+					    "QPushButton:checked { background: #2fa84f; color: white; }");
+		connect(studioButton, &QPushButton::clicked, this,
+			[](bool on) { obs_frontend_set_preview_program_mode(on); });
+		modeRow->addWidget(studioButton, 1);
+		auto *transitionGear = plIconButton(this, "icon-gear", ":/settings/images/settings/general.svg",
+						    msg("Studio.TransitionSettings"));
+		connect(transitionGear, &QToolButton::clicked, this, [this]() { pl_transitions_dialog_show(this); });
+		modeRow->addWidget(transitionGear);
+		center->addLayout(modeRow);
 		center->addStretch(1);
 		middle->addLayout(center);
 
@@ -924,8 +956,25 @@ private:
 		if (verticalHolder->isHidden() == vertical) {
 			verticalHolder->setVisible(vertical);
 		}
-		if (verticalPreviewHolder->isHidden() == vertical) {
-			verticalPreviewHolder->setVisible(vertical);
+		/* Modo normal: uma tela só (a do ar, onde se mexe), sem CORTAR e Transição. */
+		bool studio = obs_frontend_preview_program_mode_active();
+		if (studioButton->isChecked() != studio) {
+			QSignalBlocker block(studioButton);
+			studioButton->setChecked(studio);
+		}
+		if (program->isHidden() == studio) {
+			program->setVisible(studio);
+			cutButton->setVisible(studio);
+			transitionButton->setVisible(studio);
+		}
+		if (studio) {
+			preview->setLook(msg("Studio.Preview"), "#2fa84f");
+		} else {
+			preview->setLook(msg("Studio.Program"), "#e5352b");
+		}
+		bool verticalPreview = vertical && studio;
+		if (verticalPreviewHolder->isHidden() == verticalPreview) {
+			verticalPreviewHolder->setVisible(verticalPreview);
 		}
 
 		obs_source_t *previewSource = obs_frontend_get_current_preview_scene();
@@ -937,8 +986,8 @@ private:
 			previewScene = previewSource ? obs_source_get_weak_source(previewSource) : nullptr;
 		}
 
-		preview->setSceneName(previewSource ? QString::fromUtf8(obs_source_get_name(previewSource))
-						    : QString());
+		obs_source_t *shownFirst = previewSource ? previewSource : programSource;
+		preview->setSceneName(shownFirst ? QString::fromUtf8(obs_source_get_name(shownFirst)) : QString());
 		program->setSceneName(programSource ? QString::fromUtf8(obs_source_get_name(programSource))
 						    : QString());
 		obs_source_release(previewSource);
@@ -1086,6 +1135,9 @@ private:
 
 	Monitor *preview = nullptr;
 	Monitor *program = nullptr;
+	QPushButton *cutButton = nullptr;
+	QPushButton *transitionButton = nullptr;
+	QPushButton *studioButton = nullptr;
 	QLabel *transitionInfo = nullptr;
 	SourcesPanel *sources = nullptr;
 	QWidget *verticalHolder = nullptr;
