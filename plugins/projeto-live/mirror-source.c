@@ -852,6 +852,8 @@ static uint32_t vframe_height;
 static bool vframe_bgrx;
 static uint64_t vframe_seq;
 static volatile uint64_t vlast_video_ns;
+/* Conectado no NDI em pé e já chegou imagem (a tela parada pode ficar sem quadros novos). */
+static volatile bool vconnected;
 
 /* Só na linha de desenho. */
 static gs_texture_t *vtexture;
@@ -926,6 +928,7 @@ static void *vertical_thread_main(void *unused)
 			settings.p_ndi_recv_name = "Projeto Live (OBS, vertical)";
 			recv = ndi.recv_create_v3(&settings);
 			recv_since = os_gettime_ns();
+			vlast_video_ns = 0;
 			blog(LOG_INFO, "[projeto-live] telão vertical: conectando no NDI \"%s\" %s", name, recv ? "" : "(falhou)");
 			if (!recv) {
 				os_sleep_ms(1000);
@@ -938,6 +941,7 @@ static void *vertical_thread_main(void *unused)
 		int type = ndi.recv_capture_v3(recv, &video, &audio, NULL, 100);
 		if (type == NDI_FRAME_VIDEO) {
 			vstore_frame(&video);
+			vconnected = true;
 			ndi.recv_free_video_v2(recv, &video);
 		} else if (type == NDI_FRAME_AUDIO) {
 			ndi.recv_free_audio_v3(recv, &audio);
@@ -947,15 +951,32 @@ static void *vertical_thread_main(void *unused)
 		uint64_t last = vlast_video_ns;
 		uint64_t since = last > recv_since ? last : recv_since;
 		if (now - since > NDI_RECONNECT_NS) {
-			blog(LOG_INFO, "[projeto-live] telão vertical: NDI parado; procurando de novo");
-			ndi.recv_destroy(recv);
-			recv = NULL;
+			/* Sem quadro novo: com a tela parada a projeção pode não mandar nada. Se a fonte continua na
+			 * rede, fica conectado (e com a última imagem); se sumiu, procura de novo. */
+			bool still_there = false;
+			if (find) {
+				uint32_t count = 0;
+				const ndi_source_t *sources = ndi.find_get_current_sources(find, &count);
+				for (uint32_t i = 0; i < count && !still_there; i++) {
+					still_there = sources[i].p_ndi_name && strcmp(sources[i].p_ndi_name, name) == 0;
+				}
+			}
+			if (still_there) {
+				recv_since = now;
+				vlast_video_ns = 0;
+			} else {
+				blog(LOG_INFO, "[projeto-live] telão vertical: NDI sumiu; procurando de novo");
+				ndi.recv_destroy(recv);
+				recv = NULL;
+				vconnected = false;
+			}
 		}
 	}
 
 	if (recv) {
 		ndi.recv_destroy(recv);
 	}
+	vconnected = false;
 	if (find) {
 		ndi.find_destroy(find);
 	}
@@ -1073,9 +1094,7 @@ static void mirror_render(void *data, gs_effect_t *effect);
 static void vertical_render(void *data, gs_effect_t *effect)
 {
 	(void)data;
-	uint64_t last = vlast_video_ns;
-	bool fresh = last && os_gettime_ns() - last < NDI_RECONNECT_NS;
-	if (vertical_update_texture() && fresh) {
+	if (vertical_update_texture() && vconnected) {
 		/* O telão em pé, encaixado nos 1080x1920 sem distorcer. */
 		gs_effect_t *base = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 		const bool previous = gs_framebuffer_srgb_enabled();
