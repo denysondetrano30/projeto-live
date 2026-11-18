@@ -148,7 +148,8 @@ static obs_source_t *vertical_pair(obs_source_t *source)
 
 #define MIRROR_ID "projeto_live_mirror"
 #define MIRROR_VERTICAL_ID "projeto_live_mirror_vertical"
-#define AUTO_VERTICAL_KEY "pl_vertical_auto"
+/* "2" (18/11): no 1º teste a troca foi desfeita à mão; casa de novo uma vez */
+#define AUTO_VERTICAL_KEY "pl_vertical_auto2"
 
 struct find_by_id {
 	const char *id;
