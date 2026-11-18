@@ -214,7 +214,14 @@ static bool mark_mirror_pair(obs_source_t *source)
 	obs_data_set_bool(settings, AUTO_VERTICAL_KEY, true);
 	bool set = false;
 	const char *pair = obs_data_get_string(settings, PAIR_KEY);
-	if (vertical && !obs_data_get_bool(settings, HIDE_KEY) && (!pair || !*pair)) {
+	obs_source_t *paired = (pair && *pair) ? obs_get_source_by_uuid(pair) : NULL;
+	const char *paired_id = paired ? obs_source_get_unversioned_id(paired) : NULL;
+	/* Casa se estava "a mesma fonte", "nada" ou casada com uma fonte que não existe mais (1º teste);
+	 * casada com outra fonte de verdade fica como a pessoa escolheu. */
+	bool other_choice = paired && paired_id && strcmp(paired_id, MIRROR_VERTICAL_ID) != 0;
+	obs_source_release(paired);
+	if (vertical && !other_choice) {
+		obs_data_set_bool(settings, HIDE_KEY, false);
 		obs_data_set_string(settings, PAIR_KEY, obs_source_get_uuid(vertical));
 		set = true;
 		blog(LOG_INFO, "[projeto-live] vertical: '%s' usa '%s' no vertical", obs_source_get_name(source),
