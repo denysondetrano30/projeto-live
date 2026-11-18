@@ -108,7 +108,31 @@ jobs:
         working-directory: projecao-src
         shell: bash
         run: |
+          # 18/11: o site do innoextract (constexpr.org), que o NDI da projeção baixa ao instalar, saiu do ar.
+          # Quando ele for pedido, o download vai para a cópia do mesmo arquivo no GitHub.
+          cat > "$RUNNER_TEMP/pl-mirror.cjs" <<'JS'
+          const https = require("https")
+          const original = https.request
+          https.request = function (...args) {
+              const fix = (o) => {
+                  if (o && typeof o === "object" && !(o instanceof URL) && o.hostname === "constexpr.org") {
+                      o.hostname = "github.com"
+                      o.host = "github.com"
+                      o.path = "/dscharrer/innoextract/releases/download/1.9/innoextract-1.9-windows.zip"
+                      if (o.headers) o.headers.host = "github.com"
+                  }
+                  return o
+              }
+              if (args[0] instanceof URL && args[0].hostname === "constexpr.org") args[0] = new URL("https://github.com/dscharrer/innoextract/releases/download/1.9/innoextract-1.9-windows.zip")
+              else if (typeof args[0] === "string" && args[0].includes("constexpr.org")) args[0] = "https://github.com/dscharrer/innoextract/releases/download/1.9/innoextract-1.9-windows.zip"
+              else fix(args[0])
+              if (args[1] && typeof args[1] === "object" && typeof args[1] !== "function") fix(args[1])
+              return original.apply(this, args)
+          }
+          JS
+          export NODE_OPTIONS="--require $(cygpath -m "$RUNNER_TEMP/pl-mirror.cjs")"
           npm ci
+          unset NODE_OPTIONS
           npm run build
           npx electron-builder --config config/building/electron-builder.local.yaml --win dir --x64 --publish never
           test -f dist/win-unpacked/FreeShow.exe
