@@ -45,6 +45,9 @@
 #include <QDialog>
 #include <QIcon>
 #include <QPainter>
+#include <QPen>
+#include <QRect>
+#include <QRectF>
 #include <QPixmap>
 #include <QVariant>
 #include <QContextMenuEvent>
@@ -93,6 +96,7 @@
 #include "somun-style.h"
 #include "stats-dock.h"
 #include "talk-key.h"
+#include "team-panel.h"
 #include "transitions-dialog.h"
 #include "vertical-dock.h"
 #include "watch-window.h"
@@ -103,8 +107,6 @@ const char *const MODE_FILE = "modo.json";
 const char *const MODE_LIVE = "projeto-live";
 const char *const MODE_OBS = "obs";
 
-/* Largura máxima das duas telas em pé (Prévia vertical e No ar vertical) na tela Operar. */
-const int VERTICAL_WIDTH = 170;
 
 QString msg(const char *key)
 {
@@ -341,8 +343,84 @@ void endFit()
 
 /* ------------------------------------------------------------------------- */
 
-/* Uma das duas telas grandes (Prévia ou Programa), com a moldura colorida e o título. */
-class Monitor : public QFrame {
+/* A moldura que abraça a imagem: a tela fica sempre na proporção da saída do OBS, centralizada,
+ * e a borda colorida é desenhada só em volta dela (sem tarjas cinzas em cima e embaixo). */
+class AspectFrame : public QWidget {
+public:
+	explicit AspectFrame(QWidget *parent) : QWidget(parent) {}
+
+	void setChild(QWidget *widget)
+	{
+		child = widget;
+		relayout();
+	}
+
+	void setBorder(const char *color)
+	{
+		border = QColor(color);
+		update();
+	}
+
+	/* A saída do OBS pode mudar de tamanho: confere de tempos em tempos (barato). */
+	void refit()
+	{
+		if (std::abs(currentAspect() - aspect) > 0.001) {
+			relayout();
+		}
+	}
+
+protected:
+	void resizeEvent(QResizeEvent *event) override
+	{
+		QWidget::resizeEvent(event);
+		relayout();
+	}
+
+	void paintEvent(QPaintEvent *) override
+	{
+		QPainter painter(this);
+		painter.setRenderHint(QPainter::Antialiasing);
+		painter.setPen(QPen(border, 2));
+		painter.setBrush(Qt::NoBrush);
+		painter.drawRoundedRect(QRectF(box).adjusted(1, 1, -1, -1), 6, 6);
+	}
+
+private:
+	static double currentAspect()
+	{
+		struct obs_video_info ovi;
+		if (obs_get_video_info(&ovi) && ovi.base_width && ovi.base_height) {
+			return (double)ovi.base_width / (double)ovi.base_height;
+		}
+		return 16.0 / 9.0;
+	}
+
+	void relayout()
+	{
+		aspect = currentAspect();
+		int w = width();
+		int h = height();
+		int bw = w;
+		int bh = (int)std::lround(w / aspect);
+		if (bh > h) {
+			bh = h;
+			bw = (int)std::lround(h * aspect);
+		}
+		box = QRect((w - bw) / 2, (h - bh) / 2, std::max(bw, 1), std::max(bh, 1));
+		if (child) {
+			child->setGeometry(box.adjusted(3, 3, -3, -3));
+		}
+		update();
+	}
+
+	QWidget *child = nullptr;
+	QColor border = QColor(SOMUN_LINE2);
+	QRect box;
+	double aspect = 16.0 / 9.0;
+};
+
+/* Uma das duas telas grandes (Prévia ou No ar), com a moldura colorida e o título. */
+class Monitor : public QWidget {
 public:
 	Monitor(QWidget *parent, const QString &title, const char *color, PLScreen::DrawFn fn, void *owner)
 		: Monitor(parent, title, color, nullptr, fn, owner)
@@ -354,7 +432,7 @@ public:
 	using MakeFn = QWidget *(*)(QWidget *parent);
 	Monitor(QWidget *parent, const QString &title, const char *color, MakeFn custom,
 		PLScreen::DrawFn fn = nullptr, void *owner = nullptr)
-		: QFrame(parent)
+		: QWidget(parent)
 	{
 		auto *outer = new QVBoxLayout(this);
 		outer->setContentsMargins(0, 0, 0, 0);
@@ -368,35 +446,33 @@ public:
 		head->addWidget(label);
 		head->addStretch(1);
 		sceneName = new QLabel(this);
+		sceneName->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY));
 		head->addWidget(sceneName);
 		outer->addLayout(head);
 
-		frame = new QFrame(this);
-		frame->setObjectName("plMonitor");
-		setLook(title, color);
-		auto *inner = new QVBoxLayout(frame);
-		inner->setContentsMargins(2, 2, 2, 2);
+		frame = new AspectFrame(this);
 		if (custom) {
 			view = custom(frame);
 		} else {
 			screen = new PLScreen(frame, fn, owner);
 			view = screen;
 		}
-		inner->addWidget(view);
+		frame->setChild(view);
+		setLook(title, color);
 		outer->addWidget(frame, 1);
 	}
 
-	/* Título e cor da moldura (a Prévia vira "NO AR" vermelha no modo normal). */
+	/* Título e cor da moldura (a Prévia vira "No ar" vermelha no modo normal). */
 	void setLook(const QString &title, const char *color)
 	{
+		frame->refit();
 		if (look == title) {
 			return;
 		}
 		look = title;
 		label->setText(title);
 		label->setStyleSheet(QString("color: %1;").arg(color));
-		frame->setStyleSheet(
-			QString("QFrame#plMonitor { border: 2px solid %1; border-radius: 6px; }").arg(color));
+		frame->setBorder(color);
 	}
 
 	void setSceneName(const QString &text)
@@ -412,7 +488,7 @@ public:
 private:
 	QLabel *sceneName = nullptr;
 	QLabel *label = nullptr;
-	QFrame *frame = nullptr;
+	AspectFrame *frame = nullptr;
 	QString look;
 };
 
@@ -745,6 +821,161 @@ private:
 };
 
 /* ------------------------------------------------------------------------- */
+/* Coisas que a tela Operar e o Acompanhar (monitor 2) usam igual            */
+
+void openSourcesDialog(); /* abre a janelinha "Fontes desta entrada" (mais embaixo) */
+
+/* O item "Fontes desta entrada..." que entra no alto do menu do OBS na Prévia. */
+QAction *sourcesMenuAction = nullptr;
+
+/* Seleciona (no OBS) a fonte que está debaixo do mouse e abre o menu da prévia do OBS, que age
+ * sobre a fonte selecionada (Transformar, Modo de mescla, Filtros...). Fora de qualquer fonte,
+ * nada fica selecionado e o OBS mostra o menu da cena (Adicionar fonte...). */
+void previewMenuAt(QWidget *view, const QPoint &pos)
+{
+	QWidget *main = obsWindow();
+	if (!main) {
+		return;
+	}
+	obs_source_t *sceneSource = workingScene();
+	double sw = sceneSource ? obs_source_get_width(sceneSource) : 0;
+	double sh = sceneSource ? obs_source_get_height(sceneSource) : 0;
+	if (obs_scene_from_source(sceneSource) && sw > 0 && sh > 0 && view->width() > 0 && view->height() > 0) {
+		double scale = std::min(view->width() / sw, view->height() / sh);
+		double x0 = (view->width() - sw * scale) / 2.0;
+		double y0 = (view->height() - sh * scale) / 2.0;
+		struct vec3 point;
+		vec3_set(&point, (float)((pos.x() - x0) / scale), (float)((pos.y() - y0) / scale), 0.0f);
+
+		ItemList items = sceneItems(sceneSource);
+		obs_sceneitem_t *hit = nullptr;
+		/* A frente fica no fim da lista do OBS. */
+		for (auto it = items.rbegin(); it != items.rend() && !hit; ++it) {
+			if (!obs_sceneitem_visible(*it)) {
+				continue;
+			}
+			struct matrix4 box, inverse;
+			obs_sceneitem_get_box_transform(*it, &box);
+			matrix4_inv(&inverse, &box);
+			struct vec3 local;
+			vec3_transform(&local, &point, &inverse);
+			if (local.x >= 0.0f && local.x <= 1.0f && local.y >= 0.0f && local.y <= 1.0f) {
+				hit = *it;
+			}
+		}
+		for (obs_sceneitem_t *item : items) {
+			obs_sceneitem_select(item, item == hit);
+		}
+		releaseItems(items);
+	}
+	obs_source_release(sceneSource);
+	/* O menu do OBS ganha, só desta vez, o "Fontes desta entrada..." no alto (veja
+	 * OBSBasic::CreateSourcePopupMenu, que lê estas duas propriedades). */
+	if (!sourcesMenuAction) {
+		sourcesMenuAction = new QAction(msg("Entries.Sources"), main);
+		QObject::connect(sourcesMenuAction, &QAction::triggered, main, []() { openSourcesDialog(); });
+		QObject::connect(sourcesMenuAction, &QObject::destroyed, []() { sourcesMenuAction = nullptr; });
+	}
+	main->setProperty("plPreviewExtra", QVariant::fromValue<QObject *>(sourcesMenuAction));
+	main->setProperty("plPreviewExtraOnce", true);
+	/* Na fila: o OBS atualiza a seleção dele antes de montar o menu. */
+	QMetaObject::invokeMethod(main, "on_preview_customContextMenuRequested", Qt::QueuedConnection);
+}
+
+/* A saída do OBS: o que vai para a live, com a transição acontecendo. */
+void drawProgramOutput(void *, uint32_t cx, uint32_t cy)
+{
+	struct obs_video_info ovi;
+	if (!obs_get_video_info(&ovi)) {
+		return;
+	}
+	if (beginFit(ovi.base_width, ovi.base_height, cx, cy)) {
+		obs_render_main_texture();
+		endFit();
+	}
+}
+
+/* Botão direito na Prévia e no No ar: os mesmos menus da janela original do OBS. */
+void attachScreenMenus(QObject *owner, QWidget *previewView, QWidget *programView)
+{
+	previewView->setContextMenuPolicy(Qt::CustomContextMenu);
+	QObject::connect(previewView, &QWidget::customContextMenuRequested, owner,
+			 [previewView](const QPoint &pos) { previewMenuAt(previewView, pos); });
+	programView->setContextMenuPolicy(Qt::CustomContextMenu);
+	QObject::connect(programView, &QWidget::customContextMenuRequested, owner, []() {
+		if (QWidget *main = obsWindow()) {
+			QMetaObject::invokeMethod(main, "ProgramViewContextMenuRequested", Qt::QueuedConnection);
+		}
+	});
+}
+
+/* A Prévia e o No ar lado a lado, sozinhos (o topo do Acompanhar, no monitor 2). No modo normal
+ * (sem modo estúdio) fica só a tela do ar, onde se mexe. */
+class ScreensPair : public QWidget {
+public:
+	explicit ScreensPair(QWidget *parent) : QWidget(parent)
+	{
+		auto *row = new QHBoxLayout(this);
+		row->setContentsMargins(0, 0, 0, 0);
+		row->setSpacing(12);
+		preview = new Monitor(this, msg("Studio.Preview"), SOMUN_WHITE, pl_horizontal_preview_create);
+		row->addWidget(preview, 1);
+		program = new Monitor(this, msg("Studio.Program"), SOMUN_RED, drawProgramOutput, nullptr);
+		row->addWidget(program, 1);
+		attachScreenMenus(this, preview->view, program->view);
+
+		auto *timer = new QTimer(this);
+		timer->setInterval(200);
+		connect(timer, &QTimer::timeout, this, [this]() { refresh(); });
+		timer->start();
+		refresh();
+	}
+
+	~ScreensPair() override { release(); }
+
+	void release()
+	{
+		if (preview) {
+			pl_horizontal_preview_release(preview->view);
+		}
+		if (program && program->screen) {
+			program->screen->destroyDisplay();
+		}
+	}
+
+private:
+	void refresh()
+	{
+		if (!isVisible()) {
+			return;
+		}
+		pl_horizontal_preview_sync(preview->view);
+		program->screen->syncSize();
+		bool studio = obs_frontend_preview_program_mode_active();
+		if (program->isHidden() == studio) {
+			program->setVisible(studio);
+		}
+		if (studio) {
+			preview->setLook(msg("Studio.Preview"), SOMUN_WHITE);
+		} else {
+			preview->setLook(msg("Studio.Program"), SOMUN_RED);
+		}
+		program->setLook(msg("Studio.Program"), SOMUN_RED);
+		obs_source_t *previewSource = obs_frontend_get_current_preview_scene();
+		obs_source_t *programSource = obs_frontend_get_current_scene();
+		obs_source_t *shownFirst = previewSource ? previewSource : programSource;
+		preview->setSceneName(shownFirst ? QString::fromUtf8(obs_source_get_name(shownFirst)) : QString());
+		program->setSceneName(programSource ? QString::fromUtf8(obs_source_get_name(programSource))
+						    : QString());
+		obs_source_release(previewSource);
+		obs_source_release(programSource);
+	}
+
+	Monitor *preview = nullptr;
+	Monitor *program = nullptr;
+};
+
+/* ------------------------------------------------------------------------- */
 
 class StudioWindow : public QWidget {
 public:
@@ -801,14 +1032,15 @@ public:
 		/* Prévia | cortar e transição | No ar */
 		auto *middle = new QHBoxLayout();
 		middle->setSpacing(12);
+		/* Sem Prévia e No ar (eles foram para o monitor 2), o que sobra fica no meio. */
+		middle->addStretch(0);
 
 		/* A Prévia aceita o mouse: escolher, mover, aumentar e diminuir pelos quadradinhos, Alt corta. */
 		preview = new Monitor(this, msg("Studio.Preview"), SOMUN_WHITE, pl_horizontal_preview_create);
 		middle->addWidget(preview, 1);
 
-		/* A Prévia vertical, em pé e pequena, ao lado da Prévia: é nela que se ajusta o vertical. */
+		/* A Prévia vertical, em pé, ao lado da Prévia: é nela que se ajusta o vertical. */
 		verticalPreviewHolder = new QWidget(this);
-		verticalPreviewHolder->setProperty("plMaxWidth", VERTICAL_WIDTH);
 		auto *verticalPreviewLayout = new QVBoxLayout(verticalPreviewHolder);
 		verticalPreviewLayout->setContentsMargins(0, 0, 0, 0);
 		verticalPreviewLayout->addWidget(pl_vertical_preview_create(verticalPreviewHolder));
@@ -845,27 +1077,19 @@ public:
 		center->addStretch(1);
 		middle->addLayout(center);
 
-		program = new Monitor(this, msg("Studio.Program"), SOMUN_RED, drawProgram, this);
-		middle->addWidget(program, 1);
+		program = new Monitor(this, msg("Studio.Program"), SOMUN_RED, drawProgramOutput, nullptr);
 
 		/* Botão direito: os mesmos menus da janela original do OBS. */
-		preview->view->setContextMenuPolicy(Qt::CustomContextMenu);
-		connect(preview->view, &QWidget::customContextMenuRequested, this,
-			[this](const QPoint &pos) { previewMenu(pos); });
-		program->view->setContextMenuPolicy(Qt::CustomContextMenu);
-		connect(program->view, &QWidget::customContextMenuRequested, this, []() {
-			if (QWidget *main = obsWindow()) {
-				QMetaObject::invokeMethod(main, "ProgramViewContextMenuRequested", Qt::QueuedConnection);
-			}
-		});
+		attachScreenMenus(this, preview->view, program->view);
+		middle->addWidget(program, 1);
 
-		/* O vertical do ar, em pé e pequeno, ao lado do No ar (some quando está desligado em Painéis). */
+		/* O vertical do ar, em pé, ao lado do No ar (some quando está desligado em Painéis). */
 		verticalHolder = new QWidget(this);
-		verticalHolder->setProperty("plMaxWidth", VERTICAL_WIDTH);
 		auto *verticalLayout = new QVBoxLayout(verticalHolder);
 		verticalLayout->setContentsMargins(0, 0, 0, 0);
 		verticalLayout->addWidget(pl_vertical_program_create(verticalHolder));
 		middle->addWidget(verticalHolder);
+		middle->addStretch(0);
 
 		right->addLayout(middle, 5);
 
@@ -881,28 +1105,27 @@ public:
 
 		body->addLayout(right, 1);
 
-		/* Coluna da direita: Equipe (o intercom e as câmeras do Diretor) e a Situação completa. */
+		/* Coluna da direita: Equipe (lista pequena: nome, bolinha de quem fala, clique = recado,
+		 * segurar = falar só com a pessoa) e a Situação completa. */
 		auto *side = new QVBoxLayout();
 		side->setSpacing(10);
 		auto *team = new QFrame(this);
 		team->setObjectName("somunPanel");
 		auto *teamLayout = new QVBoxLayout(team);
-		teamLayout->setContentsMargins(8, 8, 8, 8);
-		auto *teamTitle = new QLabel(msg("Studio.Team"), team);
-		teamTitle->setObjectName("somunPanelTitle");
-		teamLayout->addWidget(teamTitle);
-		teamLayout->addWidget(pl_director_dock_create(team), 1);
-		side->addWidget(team, 3);
+		teamLayout->setContentsMargins(10, 8, 10, 8);
+		teamLayout->addWidget(pl_team_panel_create(team));
+		side->addWidget(team);
 		auto *status = new QFrame(this);
 		status->setObjectName("somunPanel");
 		auto *statusLayout = new QVBoxLayout(status);
 		statusLayout->setContentsMargins(10, 8, 10, 10);
-		statusLayout->addWidget(pl_stats_column_create(status), 1);
-		side->addWidget(status, 2);
+		statusLayout->addWidget(pl_stats_column_create(status));
+		side->addWidget(status);
+		side->addStretch(1);
 		auto *sideHolder = new QWidget(this);
 		sideHolder->setLayout(side);
 		side->setContentsMargins(0, 0, 0, 0);
-		sideHolder->setFixedWidth(330);
+		sideHolder->setFixedWidth(260);
 		body->addWidget(sideHolder);
 
 		outer->addLayout(body, 1);
@@ -1043,10 +1266,17 @@ private:
 		if (verticalHolder->isHidden() == vertical) {
 			verticalHolder->setVisible(vertical);
 		}
-		/* Modo normal: uma tela só (a do ar, onde se mexe), sem cortar e transição. */
+		/* Modo normal: uma tela só (a do ar, onde se mexe), sem cortar e transição. Com o
+		 * Acompanhar no monitor 2, a Prévia e o No ar ficam só lá (aqui sobra espaço para o resto). */
 		bool studio = obs_frontend_preview_program_mode_active();
-		if (program->isHidden() == studio) {
-			program->setVisible(studio);
+		bool programShown = studio && !watching;
+		if (program->isHidden() == programShown) {
+			program->setVisible(programShown);
+		}
+		if (preview->isHidden() == !watching) {
+			preview->setVisible(!watching);
+		}
+		if (cutButton->isHidden() == studio) {
 			cutButton->setVisible(studio);
 			transitionButton->setVisible(studio);
 			transitionInfo->setVisible(studio);
@@ -1217,53 +1447,7 @@ private:
 	 * nada fica selecionado e o OBS mostra o menu da cena (Adicionar fonte...). */
 	void previewMenu(const QPoint &pos)
 	{
-		QWidget *main = obsWindow();
-		if (!main) {
-			return;
-		}
-		obs_source_t *sceneSource = workingScene();
-		QWidget *view = preview->view;
-		double sw = sceneSource ? obs_source_get_width(sceneSource) : 0;
-		double sh = sceneSource ? obs_source_get_height(sceneSource) : 0;
-		if (obs_scene_from_source(sceneSource) && sw > 0 && sh > 0 && view->width() > 0 && view->height() > 0) {
-			double scale = std::min(view->width() / sw, view->height() / sh);
-			double x0 = (view->width() - sw * scale) / 2.0;
-			double y0 = (view->height() - sh * scale) / 2.0;
-			struct vec3 point;
-			vec3_set(&point, (float)((pos.x() - x0) / scale), (float)((pos.y() - y0) / scale), 0.0f);
-
-			ItemList items = sceneItems(sceneSource);
-			obs_sceneitem_t *hit = nullptr;
-			/* A frente fica no fim da lista do OBS. */
-			for (auto it = items.rbegin(); it != items.rend() && !hit; ++it) {
-				if (!obs_sceneitem_visible(*it)) {
-					continue;
-				}
-				struct matrix4 box, inverse;
-				obs_sceneitem_get_box_transform(*it, &box);
-				matrix4_inv(&inverse, &box);
-				struct vec3 local;
-				vec3_transform(&local, &point, &inverse);
-				if (local.x >= 0.0f && local.x <= 1.0f && local.y >= 0.0f && local.y <= 1.0f) {
-					hit = *it;
-				}
-			}
-			for (obs_sceneitem_t *item : items) {
-				obs_sceneitem_select(item, item == hit);
-			}
-			releaseItems(items);
-		}
-		obs_source_release(sceneSource);
-		/* O menu do OBS ganha, só desta vez, o "Fontes desta entrada..." no alto (veja
-		 * OBSBasic::CreateSourcePopupMenu, que lê estas duas propriedades). */
-		if (!sourcesAction) {
-			sourcesAction = new QAction(msg("Entries.Sources"), this);
-			connect(sourcesAction, &QAction::triggered, this, [this]() { showSources(); });
-		}
-		main->setProperty("plPreviewExtra", QVariant::fromValue<QObject *>(sourcesAction));
-		main->setProperty("plPreviewExtraOnce", true);
-		/* Na fila: o OBS atualiza a seleção dele antes de montar o menu. */
-		QMetaObject::invokeMethod(main, "on_preview_customContextMenuRequested", Qt::QueuedConnection);
+		previewMenuAt(preview->view, pos);
 	}
 
 	static void drawPreview(void *data, uint32_t cx, uint32_t cy)
@@ -1320,6 +1504,13 @@ private:
 };
 
 QPointer<StudioWindow> studioWindow;
+
+void openSourcesDialog()
+{
+	if (studioWindow) {
+		studioWindow->showSources();
+	}
+}
 bool started = false;
 
 void StudioWindow::enterObs()
@@ -1443,4 +1634,9 @@ void pl_studio_window_unload(void)
 		delete studioWindow.data();
 	}
 	pl_watch_release();
+}
+
+QWidget *pl_studio_screens_create(QWidget *parent)
+{
+	return new ScreensPair(parent);
 }

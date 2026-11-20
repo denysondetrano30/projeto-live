@@ -1,7 +1,8 @@
 /*
  * somun live: a tela "Acompanhar", no monitor 2.
  *
- * Só imagem: as entradas em grade, grandes, cada uma com o nome e o estado (no ar, prévia ou travou).
+ * Só imagem, como um multiview: em cima a Prévia (onde se mexe com o mouse) e o No ar grandes;
+ * embaixo as entradas em grade, cada uma com o nome e o estado (no ar, prévia ou travou).
  * No alto, só o botão "Cor" (o modo Cor chega na próxima parte). Equipe e Situação ficam na tela
  * Operar, no monitor 1, para as câmeras ganharem espaço aqui.
  *
@@ -38,6 +39,7 @@
 
 #include "camera-dock.h"
 #include "somun-style.h"
+#include "studio-window.h"
 
 namespace {
 
@@ -108,8 +110,12 @@ public:
 		top->addWidget(colorButton);
 		outer->addLayout(top);
 
+		/* Em cima, a Prévia e o No ar grandes; embaixo, as entradas em grade (um multiview). */
+		screens = pl_studio_screens_create(this);
+		outer->addWidget(screens, 5);
+
 		grid = pl_camera_grid_create(this);
-		outer->addWidget(grid, 1);
+		outer->addWidget(grid, 4);
 	}
 
 	/* Vai para a tela (monitor) pedida e ocupa ela inteira. */
@@ -152,6 +158,7 @@ protected:
 
 private:
 	QPushButton *colorButton = nullptr;
+	QWidget *screens = nullptr;
 	QWidget *grid = nullptr;
 	QScreen *shownOn = nullptr;
 };

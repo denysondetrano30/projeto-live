@@ -38,6 +38,7 @@
 #include <QDoubleSpinBox>
 #include <QEvent>
 #include <QFileDialog>
+#include <QBoxLayout>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGroupBox>
@@ -48,11 +49,14 @@
 #include <QListWidget>
 #include <QMainWindow>
 #include <QMessageBox>
+#include <QPointer>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScrollArea>
+#include <QSlider>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QStringList>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -65,6 +69,8 @@
 #include <string>
 #include <vector>
 
+#include "intercom-audio.h"
+#include "intercom.h"
 #include "multistream.h"
 #include "vertical-record.h"
 #include "vertical.h"
@@ -605,6 +611,93 @@ private:
 	QSpinBox *transitionMs = nullptr;
 };
 
+/* Configurações › Áudio › Intercom: o fone, o microfone e o volume do diretor (antes ficavam no
+ * painel Equipe; a Equipe da tela Operar ficou só com a lista de nomes). */
+class IntercomSection : public QGroupBox {
+public:
+	IntercomSection(QWidget *parent, std::function<void()> onChange)
+		: QGroupBox(moduleText("Intercom.SettingsTitle"), parent),
+		  changed(onChange)
+	{
+		auto *form = new QFormLayout(this);
+		microphone = new QComboBox(this);
+		headset = new QComboBox(this);
+		volume = new QSlider(Qt::Horizontal, this);
+		volume->setRange(0, 200);
+		form->addRow(moduleText("Intercom.Microphone"), microphone);
+		form->addRow(moduleText("Intercom.Headset"), headset);
+		form->addRow(moduleText("Intercom.Volume"), volume);
+		setToolTip(moduleText("Intercom.DevicesHelp"));
+
+		char capture[256];
+		char playback[256];
+		float level = 1.0f;
+		pl_intercom_get_devices(capture, sizeof(capture), playback, sizeof(playback), &level);
+		fill(microphone, true, capture);
+		fill(headset, false, playback);
+		volume->setValue((int)(level * 100.0f + 0.5f));
+
+		connect(microphone, &QComboBox::activated, this, [this](int) { changed(); });
+		connect(headset, &QComboBox::activated, this, [this](int) { changed(); });
+		connect(volume, &QSlider::valueChanged, this, [this](int) { changed(); });
+	}
+
+	void commit()
+	{
+		QByteArray capture = microphone->currentData().toString().toUtf8();
+		QByteArray playback = headset->currentData().toString().toUtf8();
+		pl_intercom_set_devices(capture.constData(), playback.constData(), (float)volume->value() / 100.0f);
+	}
+
+private:
+	static void addName(void *param, const char *name, bool)
+	{
+		static_cast<QStringList *>(param)->append(QString::fromUtf8(name));
+	}
+
+	/* Lista os aparelhos de som e marca o escolhido ("" = padrão do sistema). */
+	static void fill(QComboBox *combo, bool capture, const char *current)
+	{
+		QStringList names;
+		pl_audio_enum_devices(capture, addName, &names);
+		combo->addItem(moduleText("Intercom.SystemDefault"), QString());
+		for (const QString &name : names) {
+			combo->addItem(name, name);
+		}
+		QString chosen = QString::fromUtf8(current);
+		int index = 0;
+		if (!chosen.isEmpty()) {
+			index = combo->findData(chosen);
+			if (index < 0) {
+				/* Escolhido antes, mas desligado agora: continua na lista para não se perder. */
+				combo->addItem(chosen + " (?)", chosen);
+				index = combo->count() - 1;
+			}
+		}
+		combo->setCurrentIndex(index);
+	}
+
+	std::function<void()> changed;
+	QComboBox *microphone = nullptr;
+	QComboBox *headset = nullptr;
+	QSlider *volume = nullptr;
+};
+
+/* Põe a seção Intercom na aba Áudio, logo depois dos dispositivos de áudio globais. */
+IntercomSection *addIntercomSection(QDialog *dialog, std::function<void()> onChange)
+{
+	auto *devices = dialog->findChild<QWidget *>("audioDevicesGroupBox");
+	QWidget *holder = devices ? devices->parentWidget() : nullptr;
+	auto *layout = holder ? qobject_cast<QBoxLayout *>(holder->layout()) : nullptr;
+	if (!layout) {
+		blog(LOG_WARNING, "[projeto-live] não achei a aba Áudio das Configurações");
+		return nullptr;
+	}
+	auto *section = new IntercomSection(holder, onChange);
+	layout->insertWidget(layout->indexOf(devices) + 1, section);
+	return section;
+}
+
 /* Põe as partes do Projeto Live nas abas Transmissão e Saída quando as Configurações abrem. */
 class SettingsInjector : public QObject {
 public:
@@ -682,13 +775,18 @@ private:
 		auto *record = new RecordSection(outputPage, enableApply);
 		outputPage->layout()->addWidget(record);
 
+		QPointer<IntercomSection> intercom(addIntercomSection(dialog, enableApply));
+
 		QObject::connect(buttons, &QDialogButtonBox::clicked, destinations,
-				 [buttons, destinations, record](QAbstractButton *button) {
+				 [buttons, destinations, record, intercom](QAbstractButton *button) {
 					 QDialogButtonBox::ButtonRole role = buttons->buttonRole(button);
 					 if (role == QDialogButtonBox::ApplyRole ||
 					     role == QDialogButtonBox::AcceptRole) {
 						 destinations->commit();
 						 record->commit();
+						 if (intercom) {
+							 intercom->commit();
+						 }
 					 }
 				 });
 	}

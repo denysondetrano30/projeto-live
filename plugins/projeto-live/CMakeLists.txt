@@ -67,6 +67,8 @@ target_sources(
     studio-window.h
     talk-key.cpp
     talk-key.h
+    team-panel.cpp
+    team-panel.h
     transitions-dialog.cpp
     transitions-dialog.h
     stream-dock.h
