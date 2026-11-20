@@ -39,4 +39,7 @@ void pl_entries_set_sources_opener(void (*opener)());
 
 /* Põe a entrada na prévia e abre as fontes dela (a janelinha, ou o painel Fontes do OBS). */
 void pl_entries_show_sources(struct obs_source *scene);
+
+/* "Vai limpa": esta entrada ignora o que está "No programa" (o telão já vem marcado). */
+bool pl_entry_goes_clean(struct obs_source *scene);
 #endif

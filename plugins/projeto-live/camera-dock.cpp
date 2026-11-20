@@ -289,6 +289,7 @@ class Card;
 
 /* Decide o que o botão direito de uma entrada (ou do espaço vazio) mostra. */
 void showCardMenu(Card *card, const QPoint &where);
+void showHiddenMenu(const QPoint &where);
 void showEmptyMenu(const QPoint &where);
 void newEntry();
 
@@ -327,6 +328,58 @@ private:
 	obs_weak_source_t *weak = nullptr;
 	obs_display_t *display = nullptr;
 };
+
+/* ------------------------------------------------------------------------- */
+/* Marcas de cada entrada (botão direito): encolhida, escondida e "vai limpa". Ficam guardadas na  */
+/* própria cena, então vão junto com o projeto do OBS e valem nas duas telas.                     */
+
+const char *const KEY_SHRUNK = "pl_encolhida";
+const char *const KEY_HIDDEN = "pl_escondida";
+const char *const KEY_CLEAN = "pl_vai_limpa";
+
+bool entryFlag(obs_source_t *scene, const char *key)
+{
+	obs_data_t *data = obs_source_get_private_settings(scene);
+	bool on = data && obs_data_get_bool(data, key);
+	obs_data_release(data);
+	return on;
+}
+
+void setEntryFlag(obs_source_t *scene, const char *key, bool on)
+{
+	obs_data_t *data = obs_source_get_private_settings(scene);
+	if (data) {
+		obs_data_set_bool(data, key, on);
+		obs_data_release(data);
+	}
+}
+
+/* A entrada tem o telão (a Projeção) dentro? */
+bool hasProjection(obs_source_t *scene)
+{
+	ItemList items = sceneItems(scene);
+	bool found = false;
+	for (obs_sceneitem_t *item : items) {
+		const char *id = obs_source_get_unversioned_id(obs_sceneitem_get_source(item));
+		if (id && (strcmp(id, "projeto_live_mirror") == 0 || strcmp(id, "projeto_live_mirror_vertical") == 0)) {
+			found = true;
+			break;
+		}
+	}
+	releaseItems(items);
+	return found;
+}
+
+/* "Vai limpa": ignora o que está "No programa". Sem escolha da pessoa, o telão já vem marcado
+ * (versículo e aviso já vêm desenhados de dentro dele). */
+bool entryGoesClean(obs_source_t *scene)
+{
+	obs_data_t *data = obs_source_get_private_settings(scene);
+	bool chosen = data && obs_data_has_user_value(data, KEY_CLEAN);
+	bool on = chosen ? obs_data_get_bool(data, KEY_CLEAN) : hasProjection(scene);
+	obs_data_release(data);
+	return on;
+}
 
 /* ------------------------------------------------------------------------- */
 
@@ -369,6 +422,13 @@ public:
 		name->setTextInteractionFlags(Qt::NoTextInteraction);
 		row->addWidget(name, 1);
 
+		/* Marca "vai limpa" (ignora o que está No programa): uma palavrinha cinza. */
+		cleanTag = new QLabel(msg("Entries.CleanTag"), this);
+		cleanTag->setStyleSheet("color: #8C8C8C;");
+		cleanTag->setToolTip(msg("Entries.CleanHint"));
+		cleanTag->setVisible(false);
+		row->addWidget(cleanTag);
+
 		detail = new QLabel(this);
 		detail->setEnabled(false);
 		row->addWidget(detail);
@@ -408,20 +468,18 @@ public:
 		setFixedWidth(compact ? COMPACT_WIDTH : tileWidth + 6);
 	}
 
-	/* Encolhida: vira uma tirinha só com a luzinha e o nome (a imagem para de desenhar). */
+	/* O painel inteiro encolhido (todas em tirinha). */
 	void setCompact(bool on)
 	{
-		if (compact == on) {
-			return;
-		}
-		compact = on;
-		thumb->setVisible(!on);
-		detail->setVisible(!on);
-		if (on) {
-			level->setVisible(false);
-		}
-		setFixedWidth(on ? COMPACT_WIDTH : tileWidth + 6);
+		dockCompact = on;
+		applyCompact();
 	}
+
+	/* Escondida pela pessoa (botão direito > Esconder): o painel tira da fileira. */
+	bool isHiddenByUser() const { return hiddenByUser; }
+
+	/* Encolhida (por ela ou pelo painel inteiro)? */
+	bool isCompact() const { return compact; }
 
 	/* Na grade do Acompanhar: nome e estado em letra maior, para ler de longe. */
 	void setBig(bool on)
@@ -472,6 +530,15 @@ public:
 		}
 
 		name->setText(QString::fromUtf8(obs_source_get_name(src)));
+
+		/* As marcas do botão direito (podem ter mudado em outra cópia do painel). */
+		shrunkByUser = entryFlag(src, KEY_SHRUNK);
+		hiddenByUser = entryFlag(src, KEY_HIDDEN);
+		applyCompact();
+		bool clean = entryGoesClean(src);
+		if (cleanTag->isHidden() == (clean && !compact)) {
+			cleanTag->setVisible(clean && !compact);
+		}
 
 		Tally tally = Tally::Off;
 		if (obs_source_active(src)) {
@@ -527,6 +594,23 @@ protected:
 	}
 
 private:
+	/* Tirinha (sem imagem) quando ela encolheu esta entrada ou o painel inteiro está encolhido. */
+	void applyCompact()
+	{
+		bool on = dockCompact || shrunkByUser;
+		if (compact == on) {
+			return;
+		}
+		compact = on;
+		thumb->setVisible(!on);
+		detail->setVisible(!on);
+		if (on) {
+			level->setVisible(false);
+			cleanTag->setVisible(false);
+		}
+		setFixedWidth(on ? COMPACT_WIDTH : tileWidth + 6);
+	}
+
 	/* Cores do somun: vermelho no ar, branco na prévia, vermelho também quando travou (o aviso mais
 	 * importante: descobrir antes de cortar para ela). */
 	void applyColors(Tally tally, Signal signal)
@@ -627,12 +711,16 @@ private:
 	QLabel *badge = nullptr;
 	QLabel *name = nullptr;
 	QLabel *detail = nullptr;
+	QLabel *cleanTag = nullptr;
 	Level *level = nullptr;
 	obs_volmeter_t *meter = nullptr;
 	std::atomic<float> peak{SILENCE_DB};
 	int shown = 0;
 	int tileWidth = CARD_WIDTHS[1];
 	bool compact = false;
+	bool dockCompact = false;
+	bool shrunkByUser = false;
+	bool hiddenByUser = false;
 
 public:
 	void releaseMeter()
@@ -857,6 +945,47 @@ protected:
 	}
 };
 
+/* O cartão "⋯ outras entradas (N)": as entradas escondidas. Um clique mostra a lista para trazer de
+ * volta. Só aparece se houver alguma escondida. */
+class OtherCard : public QFrame {
+public:
+	explicit OtherCard(QWidget *parent) : QFrame(parent)
+	{
+		setObjectName("plOtherCard");
+		setCursor(Qt::PointingHandCursor);
+		setToolTip(msg("Entries.OthersHint"));
+		setStyleSheet("QFrame#plOtherCard { border: 1px dashed #3A3A3A; border-radius: 6px; }");
+		auto *layout = new QVBoxLayout(this);
+		layout->setContentsMargins(6, 4, 6, 4);
+		label = new QLabel(this);
+		label->setAlignment(Qt::AlignCenter);
+		label->setStyleSheet("color: #A8A8A8;");
+		layout->addWidget(label);
+		setFixedSize(COMPACT_WIDTH + 20, 30);
+		setVisible(false);
+	}
+
+	void setCount(int count)
+	{
+		QString text = msg("Entries.Others").arg(count);
+		if (label->text() != text) {
+			label->setText(text);
+		}
+	}
+
+protected:
+	void mouseReleaseEvent(QMouseEvent *event) override
+	{
+		if (event->button() == Qt::LeftButton && rect().contains(event->pos())) {
+			showHiddenMenu(mapToGlobal(QPoint(0, height())));
+		}
+		QFrame::mouseReleaseEvent(event);
+	}
+
+private:
+	QLabel *label = nullptr;
+};
+
 class CameraDock;
 std::vector<CameraDock *> instances;
 
@@ -924,6 +1053,8 @@ public:
 		connect(holder, &QWidget::customContextMenuRequested, this,
 			[this](const QPoint &pos) { showEmptyMenu(holder->mapToGlobal(pos)); });
 		flow = new FlowLayout(holder);
+		otherCard = new OtherCard(holder);
+		flow->addWidget(otherCard);
 		addCard = new AddCard(holder);
 		addCard->setSize(sizeBox->currentIndex());
 		flow->addWidget(addCard);
@@ -943,6 +1074,7 @@ public:
 			for (Card *card : cards) {
 				card->refresh();
 			}
+			syncHidden();
 		});
 		timer->start();
 
@@ -1008,15 +1140,58 @@ private:
 		}
 	}
 
-	/* Grade: escolhe quantas colunas deixam cada entrada o maior possível sem rolar. */
+	/* Escondidas saem da fileira (e contam no "⋯ outras entradas"); encolhidas viram tirinha. Quando
+	 * isso muda, a grade do monitor 2 recalcula o tamanho das que sobraram grandes. */
+	void syncHidden()
+	{
+		int hidden = 0;
+		QString signature;
+		for (Card *card : cards) {
+			bool show = !card->isHiddenByUser();
+			if (card->isHidden() == show) {
+				card->setVisible(show);
+			}
+			if (!show) {
+				hidden++;
+			}
+			signature += show ? (card->isCompact() ? 'c' : 'v') : 'h';
+		}
+		otherCard->setCount(hidden);
+		bool showOthers = hidden > 0 && !compact;
+		if (otherCard->isHidden() == showOthers) {
+			otherCard->setVisible(showOthers);
+		}
+		if (signature != shownSignature) {
+			shownSignature = signature;
+			holder->updateGeometry();
+			if (grid) {
+				gridWidth = 0;
+				fitGrid();
+			}
+		}
+	}
+
+	/* Grade: escolhe quantas colunas deixam cada entrada o maior possível sem rolar. As tirinhas
+	 * (encolhidas e o "⋯ outras entradas") ficam numa linha embaixo. */
 	void fitGrid()
 	{
-		int n = (int)cards.size();
+		int n = 0;
+		bool strips = !otherCard->isHidden();
+		for (Card *card : cards) {
+			if (card->isHiddenByUser()) {
+				continue;
+			}
+			if (card->isCompact()) {
+				strips = true;
+			} else {
+				n++;
+			}
+		}
 		if (n == 0) {
 			return;
 		}
 		int width = area->width() - 4;
-		int height = area->height() - 4;
+		int height = area->height() - 4 - (strips ? 40 : 0);
 		/* Embaixo de cada imagem: nome e estado, mais a moldura. */
 		const int below = 40;
 		int best = 0;
@@ -1110,8 +1285,10 @@ private:
 			moved = true;
 		}
 
-		/* O "+ Entrada" fica sempre por último. */
+		/* O "⋯ outras entradas" e o "+ Entrada" ficam sempre por último. */
 		if (moved) {
+			flow->removeWidget(otherCard);
+			flow->addWidget(otherCard);
 			flow->removeWidget(addCard);
 			flow->addWidget(addCard);
 		}
@@ -1166,6 +1343,8 @@ private:
 	QLabel *hint = nullptr;
 	QLabel *empty = nullptr;
 	AddCard *addCard = nullptr;
+	OtherCard *otherCard = nullptr;
+	QString shownSignature;
 	QComboBox *sizeBox = nullptr;
 	QScrollArea *area = nullptr;
 	QWidget *holder = nullptr;
@@ -1343,6 +1522,16 @@ void showCardMenu(Card *card, const QPoint &where)
 	QAction *organizeAction = menu.addAction(msg(sourcesOpener ? "Entries.Sources" : "Entries.Organize"));
 	pl_entry_transition_menu(&menu, scene);
 	menu.addSeparator();
+	/* Parte B: encolher (tirinha), esconder (sai da fileira) e "vai limpa" (ignora o No programa). */
+	bool shrunk = entryFlag(scene, KEY_SHRUNK);
+	QAction *shrinkAction = menu.addAction(msg(shrunk ? "Entries.Grow" : "Entries.Shrink"));
+	QAction *hideAction = menu.addAction(msg("Entries.Hide"));
+	QAction *cleanAction = menu.addAction(msg("Entries.Clean"));
+	cleanAction->setCheckable(true);
+	cleanAction->setChecked(entryGoesClean(scene));
+	cleanAction->setToolTip(msg("Entries.CleanHint"));
+	menu.setToolTipsVisible(true);
+	menu.addSeparator();
 	QAction *renameAction = menu.addAction(msg("Entries.Rename"));
 	QAction *deleteAction = menu.addAction(msg("Entries.Delete"));
 
@@ -1351,6 +1540,12 @@ void showCardMenu(Card *card, const QPoint &where)
 		openAddSource(scene);
 	} else if (chosen == organizeAction) {
 		organizeEntry(scene);
+	} else if (chosen == shrinkAction) {
+		setEntryFlag(scene, KEY_SHRUNK, !shrunk);
+	} else if (chosen == hideAction) {
+		setEntryFlag(scene, KEY_HIDDEN, true);
+	} else if (chosen == cleanAction) {
+		setEntryFlag(scene, KEY_CLEAN, cleanAction->isChecked());
 	} else if (chosen == renameAction) {
 		renameEntry(scene);
 	} else if (chosen == deleteAction) {
@@ -1360,7 +1555,44 @@ void showCardMenu(Card *card, const QPoint &where)
 	obs_source_release(scene);
 }
 
+/* "⋯ outras entradas": a lista das escondidas; escolher uma traz de volta para a fileira. */
+void showHiddenMenu(const QPoint &where)
+{
+	std::vector<obs_source_t *> hidden;
+	struct obs_frontend_source_list scenes = {};
+	obs_frontend_get_scenes(&scenes);
+	for (size_t i = 0; i < scenes.sources.num; i++) {
+		obs_source_t *scene = scenes.sources.array[i];
+		if (entryFlag(scene, KEY_HIDDEN)) {
+			hidden.push_back(obs_source_get_ref(scene));
+		}
+	}
+	obs_frontend_source_list_free(&scenes);
+
+	QMenu menu;
+	QAction *title = menu.addAction(msg("Entries.OthersTitle"));
+	title->setEnabled(false);
+	std::vector<QAction *> actions;
+	for (obs_source_t *scene : hidden) {
+		actions.push_back(menu.addAction(QString::fromUtf8(obs_source_get_name(scene))));
+	}
+	QAction *chosen = menu.exec(where);
+	for (size_t i = 0; i < actions.size(); i++) {
+		if (chosen == actions[i]) {
+			setEntryFlag(hidden[i], KEY_HIDDEN, false);
+		}
+	}
+	for (obs_source_t *scene : hidden) {
+		obs_source_release(scene);
+	}
+}
+
 } // namespace
+
+bool pl_entry_goes_clean(obs_source_t *scene)
+{
+	return scene && entryGoesClean(scene);
+}
 
 void pl_camera_dock_load(void)
 {
