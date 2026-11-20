@@ -985,10 +985,22 @@ public:
 		row->setSpacing(12);
 		preview = new Monitor(this, msg("Studio.Preview"), SOMUN_WHITE, pl_horizontal_preview_create);
 		row->addWidget(preview, 1);
+		/* A Prévia em pé ao lado da Prévia (onde se ajusta o vertical com o mouse). */
+		verticalPreview = new QWidget(this);
+		auto *verticalPreviewLayout = new QVBoxLayout(verticalPreview);
+		verticalPreviewLayout->setContentsMargins(0, 0, 0, 0);
+		verticalPreviewLayout->addWidget(pl_vertical_preview_create(verticalPreview));
+		row->addWidget(verticalPreview);
 		cutColumn = new CutColumn(this);
 		row->addWidget(cutColumn);
 		program = new Monitor(this, msg("Studio.Program"), SOMUN_RED, drawProgramOutput, nullptr);
 		row->addWidget(program, 1);
+		/* O No ar em pé ao lado do No ar. */
+		verticalProgram = new QWidget(this);
+		auto *verticalProgramLayout = new QVBoxLayout(verticalProgram);
+		verticalProgramLayout->setContentsMargins(0, 0, 0, 0);
+		verticalProgramLayout->addWidget(pl_vertical_program_create(verticalProgram));
+		row->addWidget(verticalProgram);
 		attachScreenMenus(this, preview->view, program->view);
 
 		auto *timer = new QTimer(this);
@@ -1023,6 +1035,15 @@ private:
 			program->setVisible(studio);
 			cutColumn->setVisible(studio);
 		}
+		/* Telas em pé: o No ar em pé quando o vertical está ligado; a Prévia em pé só no modo estúdio. */
+		bool vertical = pl_vertical_program_wanted();
+		if (verticalProgram->isHidden() == vertical) {
+			verticalProgram->setVisible(vertical);
+		}
+		bool verticalPreviewShown = vertical && studio;
+		if (verticalPreview->isHidden() == verticalPreviewShown) {
+			verticalPreview->setVisible(verticalPreviewShown);
+		}
 		if (studio) {
 			cutColumn->refresh();
 			preview->setLook(msg("Studio.Preview"), SOMUN_WHITE);
@@ -1041,8 +1062,10 @@ private:
 	}
 
 	Monitor *preview = nullptr;
+	QWidget *verticalPreview = nullptr;
 	CutColumn *cutColumn = nullptr;
 	Monitor *program = nullptr;
+	QWidget *verticalProgram = nullptr;
 };
 
 /* ------------------------------------------------------------------------- */
@@ -1340,8 +1363,10 @@ private:
 		pl_talk_key_set_active(isVisible());
 
 		bool vertical = pl_vertical_program_wanted();
-		if (verticalHolder->isHidden() == vertical) {
-			verticalHolder->setVisible(vertical);
+		/* Com o Acompanhar, as telas em pé vão para o monitor 2 (cada uma ao lado da sua). */
+		bool verticalHere = vertical && !watching;
+		if (verticalHolder->isHidden() == verticalHere) {
+			verticalHolder->setVisible(verticalHere);
 		}
 		/* Modo normal: uma tela só (a do ar, onde se mexe), sem cortar e transição. Com o
 		 * Acompanhar no monitor 2, a Prévia e o No ar ficam só lá (aqui sobra espaço para o resto). */
@@ -1372,7 +1397,7 @@ private:
 		} else {
 			preview->setLook(msg("Studio.Program"), SOMUN_RED);
 		}
-		bool verticalPreview = vertical && studio;
+		bool verticalPreview = verticalHere && studio;
 		if (verticalPreviewHolder->isHidden() == verticalPreview) {
 			verticalPreviewHolder->setVisible(verticalPreview);
 		}
