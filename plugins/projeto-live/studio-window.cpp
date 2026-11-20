@@ -428,7 +428,7 @@ public:
 
 	/* Com uma tela feita por fora (a Prévia, onde se mexe com o mouse). Ela nasce já dentro da
 	 * moldura: trocar de pai uma janela nativa troca a janela e a tela do OBS se perde. */
-	using MakeFn = QWidget *(*)(QWidget *parent);
+	using MakeFn = QWidget *(*)(QWidget * parent);
 	Monitor(QWidget *parent, const QString &title, const char *color, MakeFn custom, PLScreen::DrawFn fn = nullptr,
 		void *owner = nullptr)
 		: QWidget(parent)
