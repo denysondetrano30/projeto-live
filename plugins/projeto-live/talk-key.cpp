@@ -203,6 +203,9 @@ public:
 
 	int chosen = -1;
 
+private:
+	QLabel *current = nullptr;
+
 protected:
 	void keyPressEvent(QKeyEvent *event) override
 	{
