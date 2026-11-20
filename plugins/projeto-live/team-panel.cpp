@@ -128,7 +128,8 @@ bool sendTo(obs_weak_source_t *weak, const QString &text)
 class TeamMessageBox : public QFrame {
 public:
 	TeamMessageBox(QWidget *anchor, obs_weak_source_t *source, const QString &name)
-		: QFrame(anchor, Qt::Popup), weak(source)
+		: QFrame(anchor, Qt::Popup),
+		  weak(source)
 	{
 		/* A caixinha guarda a própria referência (a linha pode sumir antes dela). */
 		obs_weak_source_addref(weak);
@@ -250,8 +251,8 @@ private:
 			shortcutsLayout->addWidget(button);
 		}
 		auto *add = new QPushButton(msg("Team.AddShortcut"), shortcutsBox);
-		add->setStyleSheet(QString("QPushButton { text-align: left; color: %1; border-style: dashed; }")
-					   .arg(SOMUN_GRAY2));
+		add->setStyleSheet(
+			QString("QPushButton { text-align: left; color: %1; border-style: dashed; }").arg(SOMUN_GRAY2));
 		connect(add, &QPushButton::clicked, this, [this]() { addShortcut(); });
 		shortcutsLayout->addWidget(add);
 		adjustSize();

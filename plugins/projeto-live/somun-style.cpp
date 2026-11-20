@@ -55,8 +55,7 @@ QString somun_window_style()
 {
 	QString font = somun_font_family();
 	/* Só as nossas janelas: o tema do OBS continua valendo no Modo OBS. */
-	return QString(
-		       "QWidget#somunWindow { background: %1; }"
+	return QString("QWidget#somunWindow { background: %1; }"
 		       "QWidget#somunWindow, QWidget#somunWindow QWidget { font-family: '%2'; color: %3; }"
 		       "QWidget#somunWindow QLabel { background: transparent; }"
 		       "QWidget#somunWindow QPushButton, QWidget#somunWindow QToolButton {"

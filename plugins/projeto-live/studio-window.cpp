@@ -107,7 +107,6 @@ const char *const MODE_FILE = "modo.json";
 const char *const MODE_LIVE = "projeto-live";
 const char *const MODE_OBS = "obs";
 
-
 QString msg(const char *key)
 {
 	return QString::fromUtf8(obs_module_text(key));
@@ -430,8 +429,8 @@ public:
 	/* Com uma tela feita por fora (a Prévia, onde se mexe com o mouse). Ela nasce já dentro da
 	 * moldura: trocar de pai uma janela nativa troca a janela e a tela do OBS se perde. */
 	using MakeFn = QWidget *(*)(QWidget *parent);
-	Monitor(QWidget *parent, const QString &title, const char *color, MakeFn custom,
-		PLScreen::DrawFn fn = nullptr, void *owner = nullptr)
+	Monitor(QWidget *parent, const QString &title, const char *color, MakeFn custom, PLScreen::DrawFn fn = nullptr,
+		void *owner = nullptr)
 		: QWidget(parent)
 	{
 		auto *outer = new QVBoxLayout(this);
@@ -539,7 +538,8 @@ public:
 	explicit SourcesPanel(QWidget *parent) : QFrame(parent)
 	{
 		setObjectName("plSources");
-		setStyleSheet("QFrame#plSources { border: 1px solid #33333d; border-radius: 6px; }");
+		setStyleSheet(
+			"QFrame#plSources { background: #1C1C1C; border: 1px solid #2A2A2A; border-radius: 8px; }");
 		auto *layout = new QVBoxLayout(this);
 		layout->setContentsMargins(8, 6, 8, 8);
 		layout->setSpacing(4);
@@ -909,7 +909,72 @@ void attachScreenMenus(QObject *owner, QWidget *previewView, QWidget *programVie
 	});
 }
 
-/* A Prévia e o No ar lado a lado, sozinhos (o topo do Acompanhar, no monitor 2). No modo normal
+void cutFromAnywhere();        /* cortar (mais embaixo, junto da tela Operar) */
+void transitionFromAnywhere(); /* trocar com a transição escolhida */
+
+/* O "cortar" e a transição, como numa mesa de corte: cortar (branco), o nome da transição (faz a
+ * troca com ela; botão direito abre a janelinha das transições) e a duração embaixo. */
+class CutColumn : public QWidget {
+public:
+	explicit CutColumn(QWidget *parent) : QWidget(parent)
+	{
+		auto *center = new QVBoxLayout(this);
+		center->setContentsMargins(0, 0, 0, 0);
+		center->setSpacing(6);
+		center->addStretch(1);
+		cut = new QPushButton(msg("Studio.Cut"), this);
+		cut->setMinimumSize(120, 52);
+		cut->setFocusPolicy(Qt::NoFocus);
+		somun_make_primary(cut);
+		QFont cutFont = cut->font();
+		cutFont.setPointSizeF(cutFont.pointSizeF() + 2.0);
+		cut->setFont(cutFont);
+		cut->setToolTip(msg("Studio.CutHint"));
+		connect(cut, &QPushButton::clicked, this, []() { cutFromAnywhere(); });
+		center->addWidget(cut);
+		transition = new QPushButton(msg("Studio.Transition"), this);
+		transition->setMinimumSize(120, 34);
+		transition->setFocusPolicy(Qt::NoFocus);
+		transition->setToolTip(msg("Studio.TransitionHint"));
+		transition->setContextMenuPolicy(Qt::CustomContextMenu);
+		connect(transition, &QPushButton::clicked, this, []() { transitionFromAnywhere(); });
+		connect(transition, &QWidget::customContextMenuRequested, this,
+			[this]() { pl_transitions_dialog_show(window()); });
+		center->addWidget(transition);
+		info = new QLabel(this);
+		info->setAlignment(Qt::AlignCenter);
+		info->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY));
+		center->addWidget(info);
+		center->addStretch(1);
+	}
+
+	/* Nome e duração da transição de agora. */
+	void refresh()
+	{
+		obs_source_t *current = obs_frontend_get_current_transition();
+		QString name = msg("Studio.Transition");
+		QString ms;
+		if (current) {
+			name = QString::fromUtf8(obs_source_get_name(current));
+			ms = QString("%1 ms").arg(obs_frontend_get_transition_duration());
+			obs_source_release(current);
+		}
+		if (transition->text() != name) {
+			transition->setText(name);
+		}
+		if (info->text() != ms) {
+			info->setText(ms);
+		}
+	}
+
+private:
+	QPushButton *cut = nullptr;
+	QPushButton *transition = nullptr;
+	QLabel *info = nullptr;
+};
+
+/* O topo do Acompanhar (monitor 2): Prévia | cortar e transição | No ar, como numa mesa de corte.
+ * Assim o corte inteiro acontece aqui (clica na entrada → vê na Prévia → corta). No modo normal
  * (sem modo estúdio) fica só a tela do ar, onde se mexe. */
 class ScreensPair : public QWidget {
 public:
@@ -920,6 +985,8 @@ public:
 		row->setSpacing(12);
 		preview = new Monitor(this, msg("Studio.Preview"), SOMUN_WHITE, pl_horizontal_preview_create);
 		row->addWidget(preview, 1);
+		cutColumn = new CutColumn(this);
+		row->addWidget(cutColumn);
 		program = new Monitor(this, msg("Studio.Program"), SOMUN_RED, drawProgramOutput, nullptr);
 		row->addWidget(program, 1);
 		attachScreenMenus(this, preview->view, program->view);
@@ -954,8 +1021,10 @@ private:
 		bool studio = obs_frontend_preview_program_mode_active();
 		if (program->isHidden() == studio) {
 			program->setVisible(studio);
+			cutColumn->setVisible(studio);
 		}
 		if (studio) {
+			cutColumn->refresh();
 			preview->setLook(msg("Studio.Preview"), SOMUN_WHITE);
 		} else {
 			preview->setLook(msg("Studio.Program"), SOMUN_RED);
@@ -972,6 +1041,7 @@ private:
 	}
 
 	Monitor *preview = nullptr;
+	CutColumn *cutColumn = nullptr;
 	Monitor *program = nullptr;
 };
 
@@ -1025,6 +1095,13 @@ public:
 
 		auto *body = new QHBoxLayout();
 		body->setSpacing(12);
+
+		/* Coluna das Fontes (as peças da entrada que está na Prévia): aparece na mesa quando a Prévia e o
+		 * No ar estão no monitor 2. Com um monitor só ela fica no botão direito ("Fontes desta entrada..."). */
+		sourcesColumn = new SourcesPanel(this);
+		sourcesColumn->setFixedWidth(280);
+		sourcesColumn->setVisible(false);
+		body->addWidget(sourcesColumn);
 
 		auto *right = new QVBoxLayout();
 		right->setSpacing(10);
@@ -1276,10 +1353,19 @@ private:
 		if (preview->isHidden() == !watching) {
 			preview->setVisible(!watching);
 		}
-		if (cutButton->isHidden() == studio) {
-			cutButton->setVisible(studio);
-			transitionButton->setVisible(studio);
-			transitionInfo->setVisible(studio);
+		/* Com o Acompanhar, o cortar e a transição ficam só no monitor 2 (entre a Prévia e o No ar). */
+		bool cutHere = studio && !watching;
+		if (cutButton->isHidden() == cutHere) {
+			cutButton->setVisible(cutHere);
+			transitionButton->setVisible(cutHere);
+			transitionInfo->setVisible(cutHere);
+		}
+		/* As Fontes voltam para a mesa quando sobra espaço (Prévia e No ar foram para o monitor 2). */
+		if (sourcesColumn->isHidden() == watching) {
+			sourcesColumn->setVisible(watching);
+		}
+		if (watching) {
+			sourcesColumn->refresh();
 		}
 		if (studio) {
 			preview->setLook(msg("Studio.Preview"), SOMUN_WHITE);
@@ -1375,12 +1461,13 @@ private:
 			if (streaming) {
 				streamButton->setIcon(redDot());
 				streamButton->setToolTip(msg("Studio.StreamStopHint"));
-				streamButton->setStyleSheet(QString("QPushButton { background: %1; color: %2; border: 1px"
-								    " solid %3; border-radius: 6px; padding: 4px 12px;"
-								    " font-weight: 600; }")
-								    .arg(QString(SOMUN_PANEL2))
-								    .arg(QString(SOMUN_TEXT))
-								    .arg(QString(SOMUN_RED)));
+				streamButton->setStyleSheet(
+					QString("QPushButton { background: %1; color: %2; border: 1px"
+						" solid %3; border-radius: 6px; padding: 4px 12px;"
+						" font-weight: 600; }")
+						.arg(QString(SOMUN_PANEL2))
+						.arg(QString(SOMUN_TEXT))
+						.arg(QString(SOMUN_RED)));
 			} else {
 				streamButton->setIcon(QIcon());
 				streamButton->setToolTip(QString());
@@ -1394,7 +1481,8 @@ private:
 			obs_output_t *output = obs_frontend_get_recording_output();
 			QString clock = outputClock(output);
 			obs_output_release(output);
-			recordText = clock.isEmpty() ? msg("Studio.Recording") : msg("Studio.RecordingClock").arg(clock);
+			recordText = clock.isEmpty() ? msg("Studio.Recording")
+						     : msg("Studio.RecordingClock").arg(clock);
 		} else {
 			recordText = msg("Studio.RecordStart");
 		}
@@ -1404,9 +1492,9 @@ private:
 		if (recordShown != (int)recording) {
 			recordShown = (int)recording;
 			recordButton->setToolTip(recording ? msg("Studio.RecordStopHint") : QString());
-			recordButton->setStyleSheet(recording ? QString("QPushButton { border: 1px solid %1; }")
-									.arg(QString(SOMUN_WHITE))
-							      : QString());
+			recordButton->setStyleSheet(
+				recording ? QString("QPushButton { border: 1px solid %1; }").arg(QString(SOMUN_WHITE))
+					  : QString());
 		}
 	}
 
@@ -1445,10 +1533,7 @@ private:
 	/* Seleciona (no OBS) a fonte que está debaixo do mouse e abre o menu da prévia do OBS, que age
 	 * sobre a fonte selecionada (Transformar, Modo de mescla, Filtros...). Fora de qualquer fonte,
 	 * nada fica selecionado e o OBS mostra o menu da cena (Adicionar fonte...). */
-	void previewMenu(const QPoint &pos)
-	{
-		previewMenuAt(preview->view, pos);
-	}
+	void previewMenu(const QPoint &pos) { previewMenuAt(preview->view, pos); }
 
 	static void drawPreview(void *data, uint32_t cx, uint32_t cy)
 	{
@@ -1491,6 +1576,7 @@ private:
 	QDialog *sourcesDialog = nullptr;
 	QAction *sourcesAction = nullptr;
 	SourcesPanel *sources = nullptr;
+	SourcesPanel *sourcesColumn = nullptr;
 	int streamShownLive = -1;
 	int recordShown = -1;
 	QWidget *verticalHolder = nullptr;
@@ -1510,6 +1596,16 @@ void openSourcesDialog()
 	if (studioWindow) {
 		studioWindow->showSources();
 	}
+}
+
+void cutFromAnywhere()
+{
+	StudioWindow::cutNow();
+}
+
+void transitionFromAnywhere()
+{
+	StudioWindow::transitionNow();
 }
 bool started = false;
 
