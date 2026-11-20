@@ -1357,9 +1357,12 @@ private:
 		}
 		updateTop();
 
-		/* Monitor 2: com o Acompanhar aparecendo, as entradas daqui viram tirinhas. */
+		/* Monitor 2: o Acompanhar aparece quando há dois monitores e ele está ligado. */
 		bool watching = pl_watch_update(this);
-		pl_camera_dock_set_compact(entries, watching);
+		/* Com o Acompanhar, as entradas ficam só no monitor 2 (as duas telas não repetem nada). */
+		if (entries->isHidden() == !watching) {
+			entries->setVisible(!watching);
+		}
 		pl_talk_key_set_active(isVisible());
 
 		bool vertical = pl_vertical_program_wanted();
