@@ -57,12 +57,16 @@ target_sources(
     layout.h
     scene-audio.cpp
     scene-audio.h
+    somun-style.cpp
+    somun-style.h
     source-row.hpp
     stats-dock.cpp
     stats-dock.h
     stream-dock.cpp
     studio-window.cpp
     studio-window.h
+    talk-key.cpp
+    talk-key.h
     transitions-dialog.cpp
     transitions-dialog.h
     stream-dock.h
@@ -74,6 +78,8 @@ target_sources(
     vertical-record.h
     vertical.c
     vertical.h
+    watch-window.cpp
+    watch-window.h
 )
 
 target_link_libraries(

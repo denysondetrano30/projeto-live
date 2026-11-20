@@ -2,10 +2,13 @@
  * Projeto Live: a janela própria do Projeto Live.
  *
  * Dois modos, um clique:
- * - modo Projeto Live: esta janela, com a cara do produto. Em cima, a faixa Situação; à esquerda, as
- *   fontes da entrada da prévia e o Diretor; no meio, Prévia e Programa lado a lado com CORTAR e
- *   Transição; embaixo, Entradas e Som; no rodapé, Transmitir, Gravar e Configurações. A janela do
- *   OBS fica escondida. Os painéis são cópias dos mesmos painéis do OBS (mesmo código);
+ * - modo somun live: esta janela, a tela "Operar" do monitor 1, com a cara do somun. No topo, o
+ *   logo "live.", o culto, Gravar/Gravando, Transmitir/No ar · tempo e o "⋯" (Acompanhar, tecla de
+ *   falar, transições, modo estúdio, configurações, Modo OBS e os menus do OBS); no meio, Prévia
+ *   (moldura branca), cortar e a transição, No ar (moldura vermelha) e as duas telas em pé
+ *   pequenas; embaixo, Entradas e Som; à direita, Equipe e Situação completa. As fontes da entrada
+ *   abrem numa janelinha pelo botão direito. No monitor 2 fica o "Acompanhar" (watch-window.cpp).
+ *   A janela do OBS fica escondida. Os painéis são cópias dos mesmos painéis do OBS (mesmo código);
  * - modo OBS: a janela original do OBS, como sempre foi. Esta fica escondida.
  *
  * O OBS lembra o último modo usado (modo.json) e abre nele.
@@ -38,6 +41,12 @@
 #include <QAbstractItemView>
 #include <QAction>
 #include <QCloseEvent>
+#include <QColor>
+#include <QDialog>
+#include <QIcon>
+#include <QPainter>
+#include <QPixmap>
+#include <QVariant>
 #include <QContextMenuEvent>
 #include <QListWidget>
 #include <QMainWindow>
@@ -81,15 +90,21 @@
 #include "director-dock.h"
 #include "pl-account.h"
 #include "source-row.hpp"
+#include "somun-style.h"
 #include "stats-dock.h"
+#include "talk-key.h"
 #include "transitions-dialog.h"
 #include "vertical-dock.h"
+#include "watch-window.h"
 
 namespace {
 
 const char *const MODE_FILE = "modo.json";
 const char *const MODE_LIVE = "projeto-live";
 const char *const MODE_OBS = "obs";
+
+/* Largura máxima das duas telas em pé (Prévia vertical e No ar vertical) na tela Operar. */
+const int VERTICAL_WIDTH = 170;
 
 QString msg(const char *key)
 {
@@ -279,7 +294,7 @@ private:
 		info.window.id = (uint32_t)windowHandle()->winId();
 		info.window.display = obs_get_nix_platform_display();
 #endif
-		display = obs_display_create(&info, 0xFF101014);
+		display = obs_display_create(&info, 0xFF141414);
 		if (display) {
 			obs_display_add_draw_callback(display, draw, this);
 		}
@@ -741,117 +756,96 @@ public:
 		}
 		resize(1400, 860);
 
+		/* A cara do somun (cores e fonte Outfit) só nesta janela; o Modo OBS segue com o tema dele. */
+		setObjectName("somunWindow");
+		setAttribute(Qt::WA_StyledBackground, true);
+		setStyleSheet(somun_window_style());
+
 		auto *outer = new QVBoxLayout(this);
-		outer->setContentsMargins(10, 6, 10, 8);
-		outer->setSpacing(8);
+		outer->setContentsMargins(12, 8, 12, 10);
+		outer->setSpacing(10);
 
-		/* Os menus do OBS (Arquivo, Editar, Visualizar...): os mesmos, não uma cópia. */
-		auto *bar = new QMenuBar(this);
-		/* Dentro da janela também no Mac (lá o OBS já usa a barra de cima da tela). */
-		bar->setNativeMenuBar(false);
-		if (auto *main = qobject_cast<QMainWindow *>(obsWindow())) {
-			for (QAction *action : main->menuBar()->actions()) {
-				bar->addAction(action);
-			}
-		}
-		outer->setMenuBar(bar);
-
-		/* Faixa de cima: nome do produto, a faixa Situação e o botão de voltar ao OBS. */
+		/* Topo: logo, culto, Gravando, No ar · tempo e "⋯" (o resto do OBS mora no "⋯"). */
 		auto *top = new QHBoxLayout();
-		auto *brand = new QLabel(msg("Studio.Brand"), this);
-		QFont brandFont = brand->font();
-		brandFont.setBold(true);
-		brandFont.setLetterSpacing(QFont::AbsoluteSpacing, 1.5);
-		brand->setFont(brandFont);
-		top->addWidget(brand);
-		top->addSpacing(12);
-		top->addWidget(pl_stats_dock_create(this), 1);
+		top->setSpacing(10);
+		top->addWidget(somun_brand_label(this, "live", 24));
+		top->addSpacing(8);
 		if (QWidget *badge = pl_account_badge_create(this)) {
 			top->addWidget(badge);
 		}
-		auto *toObs = new QPushButton(msg("Studio.ToObs"), this);
-		toObs->setToolTip(msg("Studio.ToObsHint"));
-		connect(toObs, &QPushButton::clicked, this, []() { enterObs(); });
-		top->addWidget(toObs);
+		top->addStretch(1);
+		recordButton = new QPushButton(this);
+		recordButton->setMinimumHeight(32);
+		recordButton->setFocusPolicy(Qt::NoFocus);
+		connect(recordButton, &QPushButton::clicked, this, []() { toggleRecord(); });
+		top->addWidget(recordButton);
+		streamButton = new QPushButton(this);
+		streamButton->setMinimumHeight(32);
+		streamButton->setFocusPolicy(Qt::NoFocus);
+		connect(streamButton, &QPushButton::clicked, this, [this]() { toggleStream(); });
+		top->addWidget(streamButton);
+		moreButton = new QPushButton(QString::fromUtf8("⋯"), this);
+		moreButton->setMinimumSize(40, 32);
+		moreButton->setFocusPolicy(Qt::NoFocus);
+		moreButton->setToolTip(msg("Studio.More"));
+		connect(moreButton, &QPushButton::clicked, this, [this]() { showMoreMenu(); });
+		top->addWidget(moreButton);
 		outer->addLayout(top);
 
 		auto *body = new QHBoxLayout();
-		body->setSpacing(10);
-
-		/* Coluna da esquerda: as fontes da entrada da prévia e o Diretor. */
-		auto *left = new QVBoxLayout();
-		left->setSpacing(10);
-		sources = new SourcesPanel(this);
-		left->addWidget(sources, 2);
-		auto *director = pl_director_dock_create(this);
-		left->addWidget(director, 3);
-		auto *leftHolder = new QWidget(this);
-		leftHolder->setLayout(left);
-		left->setContentsMargins(0, 0, 0, 0);
-		leftHolder->setFixedWidth(330);
-		body->addWidget(leftHolder);
+		body->setSpacing(12);
 
 		auto *right = new QVBoxLayout();
-		right->setSpacing(8);
+		right->setSpacing(10);
 
-		/* Prévia | CORTAR e Transição | Programa */
+		/* Prévia | cortar e transição | No ar */
 		auto *middle = new QHBoxLayout();
 		middle->setSpacing(12);
 
 		/* A Prévia aceita o mouse: escolher, mover, aumentar e diminuir pelos quadradinhos, Alt corta. */
-		preview = new Monitor(this, msg("Studio.Preview"), "#2fa84f", pl_horizontal_preview_create);
+		preview = new Monitor(this, msg("Studio.Preview"), SOMUN_WHITE, pl_horizontal_preview_create);
 		middle->addWidget(preview, 1);
 
-		/* A Prévia vertical, em pé, ao lado da Prévia: é nela que se ajusta o vertical. */
+		/* A Prévia vertical, em pé e pequena, ao lado da Prévia: é nela que se ajusta o vertical. */
 		verticalPreviewHolder = new QWidget(this);
+		verticalPreviewHolder->setProperty("plMaxWidth", VERTICAL_WIDTH);
 		auto *verticalPreviewLayout = new QVBoxLayout(verticalPreviewHolder);
 		verticalPreviewLayout->setContentsMargins(0, 0, 0, 0);
 		verticalPreviewLayout->addWidget(pl_vertical_preview_create(verticalPreviewHolder));
 		middle->addWidget(verticalPreviewHolder);
 
 		auto *center = new QVBoxLayout();
+		center->setSpacing(6);
 		center->addStretch(1);
 		cutButton = new QPushButton(msg("Studio.Cut"), this);
-		cutButton->setMinimumSize(110, 48);
+		cutButton->setMinimumSize(120, 52);
+		cutButton->setFocusPolicy(Qt::NoFocus);
+		somun_make_primary(cutButton);
 		QFont cutFont = cutButton->font();
-		cutFont.setBold(true);
+		cutFont.setPointSizeF(cutFont.pointSizeF() + 2.0);
 		cutButton->setFont(cutFont);
-		cutButton->setStyleSheet("QPushButton { background: #e5352b; color: white; border-radius: 6px; }"
-				   "QPushButton:hover { background: #f0473d; }"
-				   "QPushButton:pressed { background: #c22a22; }");
 		cutButton->setToolTip(msg("Studio.CutHint"));
 		connect(cutButton, &QPushButton::clicked, this, []() { cutNow(); });
 		center->addWidget(cutButton);
+		/* A transição: o nome dela é o botão (faz a troca com a transição); o botão direito abre a
+		 * janelinha das transições. */
 		transitionButton = new QPushButton(msg("Studio.Transition"), this);
-		transitionButton->setMinimumSize(110, 34);
+		transitionButton->setMinimumSize(120, 34);
+		transitionButton->setFocusPolicy(Qt::NoFocus);
 		transitionButton->setToolTip(msg("Studio.TransitionHint"));
+		transitionButton->setContextMenuPolicy(Qt::CustomContextMenu);
 		connect(transitionButton, &QPushButton::clicked, this, []() { transitionNow(); });
+		connect(transitionButton, &QWidget::customContextMenuRequested, this,
+			[this]() { pl_transitions_dialog_show(this); });
 		center->addWidget(transitionButton);
 		transitionInfo = new QLabel(this);
 		transitionInfo->setAlignment(Qt::AlignCenter);
-		transitionInfo->setEnabled(false);
+		transitionInfo->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY));
 		center->addWidget(transitionInfo);
-
-		/* Modo estúdio liga e desliga aqui; a engrenagem abre a janelinha das transições. */
-		auto *modeRow = new QHBoxLayout();
-		modeRow->setSpacing(4);
-		studioButton = new QPushButton(msg("Studio.StudioMode"), this);
-		studioButton->setCheckable(true);
-		studioButton->setToolTip(msg("Studio.StudioModeHint"));
-		studioButton->setStyleSheet("QPushButton { padding: 3px 8px; border-radius: 4px; }"
-					    "QPushButton:checked { background: #2fa84f; color: white; }");
-		connect(studioButton, &QPushButton::clicked, this,
-			[](bool on) { obs_frontend_set_preview_program_mode(on); });
-		modeRow->addWidget(studioButton, 1);
-		auto *transitionGear = plIconButton(this, "icon-gear", ":/settings/images/settings/general.svg",
-						    msg("Studio.TransitionSettings"));
-		connect(transitionGear, &QToolButton::clicked, this, [this]() { pl_transitions_dialog_show(this); });
-		modeRow->addWidget(transitionGear);
-		center->addLayout(modeRow);
 		center->addStretch(1);
 		middle->addLayout(center);
 
-		program = new Monitor(this, msg("Studio.Program"), "#e5352b", drawProgram, this);
+		program = new Monitor(this, msg("Studio.Program"), SOMUN_RED, drawProgram, this);
 		middle->addWidget(program, 1);
 
 		/* Botão direito: os mesmos menus da janela original do OBS. */
@@ -865,8 +859,9 @@ public:
 			}
 		});
 
-		/* O vertical, em pé, ao lado do Programa (some quando está desligado em Painéis). */
+		/* O vertical do ar, em pé e pequeno, ao lado do No ar (some quando está desligado em Painéis). */
 		verticalHolder = new QWidget(this);
+		verticalHolder->setProperty("plMaxWidth", VERTICAL_WIDTH);
 		auto *verticalLayout = new QVBoxLayout(verticalHolder);
 		verticalLayout->setContentsMargins(0, 0, 0, 0);
 		verticalLayout->addWidget(pl_vertical_program_create(verticalHolder));
@@ -874,33 +869,43 @@ public:
 
 		right->addLayout(middle, 5);
 
-		/* Entradas: a mesma lista do painel do OBS (outra cópia, que mostra as mesmas cenas). */
-		right->addWidget(pl_camera_dock_create(this), 3);
+		/* Entradas: a mesma lista do painel do OBS (outra cópia, que mostra as mesmas cenas). Com o
+		 * Acompanhar ligado no monitor 2, elas encolhem em tirinhas. */
+		entries = pl_camera_dock_create(this);
+		right->addWidget(entries, 3);
 
-		/* Som: o mesmo painel Som do OBS (outra cópia). */
+		/* Som: o mesmo painel Som do OBS (outra cópia), numa faixa fina. */
 		auto *audio = pl_audio_dock_create(this);
-		audio->setMaximumHeight(170);
-		right->addWidget(audio, 2);
+		audio->setMaximumHeight(130);
+		right->addWidget(audio, 1);
 
 		body->addLayout(right, 1);
-		outer->addLayout(body, 1);
 
-		/* Rodapé: transmitir, gravar e as configurações do OBS. */
-		auto *footer = new QHBoxLayout();
-		streamButton = new QPushButton(this);
-		streamButton->setMinimumHeight(34);
-		connect(streamButton, &QPushButton::clicked, this, [this]() { toggleStream(); });
-		footer->addWidget(streamButton);
-		recordButton = new QPushButton(this);
-		recordButton->setMinimumHeight(34);
-		connect(recordButton, &QPushButton::clicked, this, []() { toggleRecord(); });
-		footer->addWidget(recordButton);
-		footer->addStretch(1);
-		auto *settings = new QPushButton(msg("Studio.Settings"), this);
-		settings->setMinimumHeight(34);
-		connect(settings, &QPushButton::clicked, this, []() { openSettings(); });
-		footer->addWidget(settings);
-		outer->addLayout(footer);
+		/* Coluna da direita: Equipe (o intercom e as câmeras do Diretor) e a Situação completa. */
+		auto *side = new QVBoxLayout();
+		side->setSpacing(10);
+		auto *team = new QFrame(this);
+		team->setObjectName("somunPanel");
+		auto *teamLayout = new QVBoxLayout(team);
+		teamLayout->setContentsMargins(8, 8, 8, 8);
+		auto *teamTitle = new QLabel(msg("Studio.Team"), team);
+		teamTitle->setObjectName("somunPanelTitle");
+		teamLayout->addWidget(teamTitle);
+		teamLayout->addWidget(pl_director_dock_create(team), 1);
+		side->addWidget(team, 3);
+		auto *status = new QFrame(this);
+		status->setObjectName("somunPanel");
+		auto *statusLayout = new QVBoxLayout(status);
+		statusLayout->setContentsMargins(10, 8, 10, 10);
+		statusLayout->addWidget(pl_stats_column_create(status), 1);
+		side->addWidget(status, 2);
+		auto *sideHolder = new QWidget(this);
+		sideHolder->setLayout(side);
+		side->setContentsMargins(0, 0, 0, 0);
+		sideHolder->setFixedWidth(330);
+		body->addWidget(sideHolder);
+
+		outer->addLayout(body, 1);
 
 		/* Os recados do diretor aparecem no canto de cima, à direita. */
 		pl_account_attach_toasts(this);
@@ -929,6 +934,7 @@ public:
 		if (program) {
 			program->screen->destroyDisplay();
 		}
+		pl_watch_release();
 	}
 
 	/* Fechar a nossa janela é fechar o OBS (com as perguntas de sempre, se estiver ao vivo). */
@@ -945,32 +951,110 @@ protected:
 		}
 	}
 
+public:
+	/* A janelinha "Fontes desta entrada" (segue a entrada que está na prévia). */
+	void showSources()
+	{
+		if (!sourcesDialog) {
+			sourcesDialog = new QDialog(this);
+			sourcesDialog->setWindowTitle(msg("Studio.SourcesTitle"));
+			sourcesDialog->resize(360, 460);
+			auto *layout = new QVBoxLayout(sourcesDialog);
+			layout->setContentsMargins(8, 8, 8, 8);
+			sources = new SourcesPanel(sourcesDialog);
+			layout->addWidget(sources);
+		}
+		sources->refresh();
+		sourcesDialog->show();
+		sourcesDialog->raise();
+		sourcesDialog->activateWindow();
+	}
+
 private:
+	/* O "⋯": tudo do OBS que não precisa ficar na tela. */
+	void showMoreMenu()
+	{
+		QMenu menu(this);
+
+		QAction *watch = menu.addAction(msg("Studio.Watch"));
+		watch->setCheckable(true);
+		watch->setChecked(pl_watch_wanted());
+		if (!pl_watch_available()) {
+			watch->setText(msg("Studio.WatchNeedsTwo"));
+			watch->setEnabled(false);
+		}
+		QString keyName = pl_talk_key_name();
+		QAction *talkKey = menu.addAction(
+			msg("Studio.TalkKey").arg(keyName.isEmpty() ? msg("TalkKey.NoneShort") : keyName));
+		menu.addSeparator();
+
+		QAction *transitions = menu.addAction(msg("Studio.TransitionsMenu"));
+		QAction *studio = menu.addAction(msg("Studio.StudioMode"));
+		studio->setCheckable(true);
+		studio->setChecked(obs_frontend_preview_program_mode_active());
+		studio->setToolTip(msg("Studio.StudioModeHint"));
+		menu.addSeparator();
+
+		QAction *settings = menu.addAction(msg("Studio.Settings"));
+		QAction *toObs = menu.addAction(msg("Studio.ToObs"));
+		/* Os menus do OBS (Arquivo, Editar, Visualizar...): os mesmos, não uma cópia. */
+		if (auto *main = qobject_cast<QMainWindow *>(obsWindow())) {
+			QMenu *obsMenus = menu.addMenu(msg("Studio.ObsMenus"));
+			for (QAction *action : main->menuBar()->actions()) {
+				obsMenus->addAction(action);
+			}
+		}
+
+		QAction *chosen = menu.exec(moreButton->mapToGlobal(QPoint(0, moreButton->height())));
+		if (!chosen) {
+			return;
+		}
+		if (chosen == watch) {
+			pl_watch_set_wanted(watch->isChecked());
+			refresh();
+		} else if (chosen == talkKey) {
+			pl_talk_key_choose(this);
+		} else if (chosen == transitions) {
+			pl_transitions_dialog_show(this);
+		} else if (chosen == studio) {
+			obs_frontend_set_preview_program_mode(studio->isChecked());
+		} else if (chosen == settings) {
+			openSettings();
+		} else if (chosen == toObs) {
+			enterObs();
+		}
+	}
+
 	void refresh()
 	{
 		pl_horizontal_preview_sync(preview->view);
 		program->screen->syncSize();
-		sources->refresh();
-		updateFooter();
+		if (sources && sourcesDialog && sourcesDialog->isVisible()) {
+			sources->refresh();
+		}
+		updateTop();
+
+		/* Monitor 2: com o Acompanhar aparecendo, as entradas daqui viram tirinhas. */
+		bool watching = pl_watch_update(this);
+		pl_camera_dock_set_compact(entries, watching);
+		pl_talk_key_set_active(isVisible());
+
 		bool vertical = pl_vertical_program_wanted();
 		if (verticalHolder->isHidden() == vertical) {
 			verticalHolder->setVisible(vertical);
 		}
-		/* Modo normal: uma tela só (a do ar, onde se mexe), sem CORTAR e Transição. */
+		/* Modo normal: uma tela só (a do ar, onde se mexe), sem cortar e transição. */
 		bool studio = obs_frontend_preview_program_mode_active();
-		if (studioButton->isChecked() != studio) {
-			QSignalBlocker block(studioButton);
-			studioButton->setChecked(studio);
-		}
 		if (program->isHidden() == studio) {
 			program->setVisible(studio);
 			cutButton->setVisible(studio);
 			transitionButton->setVisible(studio);
+			transitionInfo->setVisible(studio);
 		}
 		if (studio) {
-			preview->setLook(msg("Studio.Preview"), "#2fa84f");
+			preview->setLook(msg("Studio.Preview"), SOMUN_WHITE);
 		} else {
-			preview->setLook(msg("Studio.Program"), "#e5352b");
+			preview->setLook(msg("Studio.Program"), SOMUN_RED);
 		}
 		bool verticalPreview = vertical && studio;
 		if (verticalPreviewHolder->isHidden() == verticalPreview) {
@@ -993,33 +1077,105 @@ private:
 		obs_source_release(previewSource);
 		obs_source_release(programSource);
 
+		/* O nome da transição é o próprio botão; a duração fica embaixo, em cinza. */
 		obs_source_t *transition = obs_frontend_get_current_transition();
+		QString name = msg("Studio.Transition");
 		QString info;
 		if (transition) {
-			info = QString("%1 · %2 ms")
-				       .arg(QString::fromUtf8(obs_source_get_name(transition)))
-				       .arg(obs_frontend_get_transition_duration());
+			name = QString::fromUtf8(obs_source_get_name(transition));
+			info = QString("%1 ms").arg(obs_frontend_get_transition_duration());
 			obs_source_release(transition);
+		}
+		if (transitionButton->text() != name) {
+			transitionButton->setText(name);
 		}
 		if (transitionInfo->text() != info) {
 			transitionInfo->setText(info);
 		}
 	}
 
-	void updateFooter()
+	/* Tempo de uma saída (transmissão ou gravação) pelos quadros que ela já mandou. */
+	static QString outputClock(obs_output_t *output)
+	{
+		struct obs_video_info ovi;
+		if (!output || !obs_get_video_info(&ovi) || !ovi.fps_num) {
+			return QString();
+		}
+		uint64_t frames = (uint64_t)obs_output_get_total_frames(output);
+		uint64_t seconds = frames * ovi.fps_den / ovi.fps_num;
+		return QString("%1:%2:%3")
+			.arg(seconds / 3600, 2, 10, QChar('0'))
+			.arg(seconds / 60 % 60, 2, 10, QChar('0'))
+			.arg(seconds % 60, 2, 10, QChar('0'));
+	}
+
+	/* Bolinha vermelha do "No ar" (ícone desenhado aqui, para não depender do tema). Feito na hora,
+	 * só quando entra no ar: um ícone guardado para sempre seria apagado depois do Qt, ao fechar. */
+	static QIcon redDot()
+	{
+		QPixmap pixmap(20, 20);
+		pixmap.fill(Qt::transparent);
+		QPainter painter(&pixmap);
+		painter.setRenderHint(QPainter::Antialiasing);
+		painter.setPen(Qt::NoPen);
+		painter.setBrush(QColor(SOMUN_RED));
+		painter.drawEllipse(4, 4, 12, 12);
+		painter.end();
+		return QIcon(pixmap);
+	}
+
+	/* Topo: "Transmitir" (botão principal branco) vira "● No ar · tempo"; "Gravar" vira "Gravando · tempo". */
+	void updateTop()
 	{
 		bool streaming = obs_frontend_streaming_active();
-		QString streamText = msg(streaming ? "Studio.StreamStop" : "Studio.StreamStart");
+		QString streamText;
+		if (streaming) {
+			obs_output_t *output = obs_frontend_get_streaming_output();
+			QString clock = outputClock(output);
+			obs_output_release(output);
+			streamText = clock.isEmpty() ? msg("Studio.OnAir") : msg("Studio.OnAirClock").arg(clock);
+		} else {
+			streamText = msg("Studio.StreamStart");
+		}
 		if (streamButton->text() != streamText) {
 			streamButton->setText(streamText);
-			streamButton->setStyleSheet(streaming ? "QPushButton { background: #1f4fa8; color: white; }"
-							      : QString());
 		}
+		if (streamShownLive != (int)streaming) {
+			streamShownLive = (int)streaming;
+			if (streaming) {
+				streamButton->setIcon(redDot());
+				streamButton->setToolTip(msg("Studio.StreamStopHint"));
+				streamButton->setStyleSheet(QString("QPushButton { background: %1; color: %2; border: 1px"
+								    " solid %3; border-radius: 6px; padding: 4px 12px;"
+								    " font-weight: 600; }")
+								    .arg(QString(SOMUN_PANEL2))
+								    .arg(QString(SOMUN_TEXT))
+								    .arg(QString(SOMUN_RED)));
+			} else {
+				streamButton->setIcon(QIcon());
+				streamButton->setToolTip(QString());
+				somun_make_primary(streamButton);
+			}
+		}
+
 		bool recording = obs_frontend_recording_active();
-		QString recordText = msg(recording ? "Studio.RecordStop" : "Studio.RecordStart");
+		QString recordText;
+		if (recording) {
+			obs_output_t *output = obs_frontend_get_recording_output();
+			QString clock = outputClock(output);
+			obs_output_release(output);
+			recordText = clock.isEmpty() ? msg("Studio.Recording") : msg("Studio.RecordingClock").arg(clock);
+		} else {
+			recordText = msg("Studio.RecordStart");
+		}
 		if (recordButton->text() != recordText) {
 			recordButton->setText(recordText);
-			recordButton->setStyleSheet(recording ? "QPushButton { background: #8c2a24; color: white; }"
+		}
+		if (recordShown != (int)recording) {
+			recordShown = (int)recording;
+			recordButton->setToolTip(recording ? msg("Studio.RecordStopHint") : QString());
+			recordButton->setStyleSheet(recording ? QString("QPushButton { border: 1px solid %1; }")
+									.arg(QString(SOMUN_WHITE))
 							      : QString());
 		}
 	}
@@ -1098,6 +1254,14 @@ private:
 			releaseItems(items);
 		}
 		obs_source_release(sceneSource);
+		/* O menu do OBS ganha, só desta vez, o "Fontes desta entrada..." no alto (veja
+		 * OBSBasic::CreateSourcePopupMenu, que lê estas duas propriedades). */
+		if (!sourcesAction) {
+			sourcesAction = new QAction(msg("Entries.Sources"), this);
+			connect(sourcesAction, &QAction::triggered, this, [this]() { showSources(); });
+		}
+		main->setProperty("plPreviewExtra", QVariant::fromValue<QObject *>(sourcesAction));
+		main->setProperty("plPreviewExtraOnce", true);
 		/* Na fila: o OBS atualiza a seleção dele antes de montar o menu. */
 		QMetaObject::invokeMethod(main, "on_preview_customContextMenuRequested", Qt::QueuedConnection);
 	}
@@ -1137,9 +1301,14 @@ private:
 	Monitor *program = nullptr;
 	QPushButton *cutButton = nullptr;
 	QPushButton *transitionButton = nullptr;
-	QPushButton *studioButton = nullptr;
+	QPushButton *moreButton = nullptr;
 	QLabel *transitionInfo = nullptr;
+	QWidget *entries = nullptr;
+	QDialog *sourcesDialog = nullptr;
+	QAction *sourcesAction = nullptr;
 	SourcesPanel *sources = nullptr;
+	int streamShownLive = -1;
+	int recordShown = -1;
 	QWidget *verticalHolder = nullptr;
 	QWidget *verticalPreviewHolder = nullptr;
 	QPushButton *streamButton = nullptr;
@@ -1157,9 +1326,12 @@ void StudioWindow::enterObs()
 {
 	saveMode(MODE_OBS);
 	setObsShowing(true);
+	pl_talk_key_set_active(false);
 	if (studioWindow) {
 		studioWindow->hide();
 	}
+	/* O Acompanhar some junto (é parte da tela de operar). */
+	pl_watch_update(nullptr);
 }
 
 /* CORTAR: troca na hora, sem a transição. Usa a transição "Cortar" do OBS só para este corte e
@@ -1200,6 +1372,13 @@ void enterLive()
 		obs_frontend_set_preview_program_mode(true);
 	}
 	if (!studioWindow) {
+		pl_talk_key_install();
+		/* As fontes da entrada saíram da tela: abrem numa janelinha pelo botão direito. */
+		pl_entries_set_sources_opener([]() {
+			if (studioWindow) {
+				studioWindow->showSources();
+			}
+		});
 		studioWindow = new StudioWindow();
 		/* Abre na mesma tela em que estava a janela do OBS. */
 		if (QWidget *main = obsWindow()) {
@@ -1232,6 +1411,8 @@ void frontendEvent(enum obs_frontend_event event, void *)
 			QTimer::singleShot(0, []() { enterLive(); });
 		}
 	} else if (event == OBS_FRONTEND_EVENT_EXIT) {
+		pl_talk_key_release();
+		pl_entries_set_sources_opener(nullptr);
 		if (studioWindow) {
 			studioWindow->releaseScreens();
 			delete studioWindow.data();
@@ -1255,8 +1436,11 @@ void pl_studio_window_load(void)
 void pl_studio_window_unload(void)
 {
 	obs_frontend_remove_event_callback(frontendEvent, nullptr);
+	pl_talk_key_release();
+	pl_entries_set_sources_opener(nullptr);
 	if (studioWindow) {
 		studioWindow->releaseScreens();
 		delete studioWindow.data();
 	}
+	pl_watch_release();
 }

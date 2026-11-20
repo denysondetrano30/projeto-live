@@ -600,6 +600,16 @@ void OBSBasic::CreateSourcePopupMenu(int idx, bool preview)
 		hasVideo = (flags & OBS_SOURCE_VIDEO) == OBS_SOURCE_VIDEO;
 	}
 
+	// Projeto Live (somun live): the plugin may ask for one extra item at the top of the preview
+	// menu, only for the next menu ("Fontes desta entrada...", opened from its own window).
+	if (preview && property("plPreviewExtraOnce").toBool()) {
+		setProperty("plPreviewExtraOnce", false);
+		if (QAction *extra = qobject_cast<QAction *>(property("plPreviewExtra").value<QObject *>())) {
+			popup.addAction(extra);
+			popup.addSeparator();
+		}
+	}
+
 	// Add new source
 	QAction *addSource = popup.addAction(QTStr("AddSource"), this, &OBSBasic::AddSourceDialog);
 	popup.addAction(addSource);

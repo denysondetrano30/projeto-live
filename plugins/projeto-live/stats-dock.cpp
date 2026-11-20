@@ -104,13 +104,31 @@ void removeInstance(StatsDock *gone);
 class StatsDock : public QWidget {
 public:
 	/* withButtons: na janela do Projeto Live a faixa vem sem os botões Projeto Live, Painéis e Layout. */
-	explicit StatsDock(QWidget *parent, bool withButtons = true) : QWidget(parent)
+	explicit StatsDock(QWidget *parent, bool withButtons = true, bool column = false) : QWidget(parent)
 	{
 		cpuInfo = os_cpu_usage_info_start();
 
 		auto *outer = new QVBoxLayout(this);
 		outer->setContentsMargins(0, 0, 0, 0);
 		outer->setSpacing(0);
+
+		timer = new QTimer(this);
+		timer->setInterval(1000);
+		connect(timer, &QTimer::timeout, this, [this]() { refresh(); });
+
+		/* Coluna "Situação completa" da tela Operar: um item por linha, com o título em cima. */
+		if (column) {
+			auto *title = new QLabel(QString::fromUtf8(obs_module_text("Stats.Full")), this);
+			title->setObjectName("somunPanelTitle");
+			outer->addWidget(title);
+			outer->addSpacing(6);
+			row = new QVBoxLayout();
+			row->setContentsMargins(0, 0, 0, 0);
+			row->setSpacing(6);
+			row->addStretch(1);
+			outer->addLayout(row, 1);
+			return;
+		}
 
 		area = new QScrollArea(this);
 		area->setWidgetResizable(true);
@@ -142,9 +160,6 @@ public:
 		/* O relógio só começa quando o OBS terminar de abrir (veja start()). Durante o
 		 * carregamento dos módulos, perguntas como obs_frontend_get_streaming_output() ainda
 		 * não têm o que responder e derrubam o programa. */
-		timer = new QTimer(this);
-		timer->setInterval(1000);
-		connect(timer, &QTimer::timeout, this, [this]() { refresh(); });
 	}
 
 	/* O OBS acabou de abrir: agora dá para perguntar as coisas dele. */
@@ -200,7 +215,7 @@ private:
 			int kbps = pl_multistream_main_kbps();
 			QString text = QString::fromUtf8(obs_module_text("Stats.Main"));
 			if (kbps > 0) {
-				text += QString(" · %1 kb/s").arg(kbps);
+				text += QString(" · %1 Mb/s").arg(QString::number(kbps / 1000.0, 'f', 1));
 			}
 			item(used++)->set(text, color);
 		} else {
@@ -223,8 +238,19 @@ private:
 			} else if (status.state == PL_DEST_ERROR) {
 				color = "#e5352b";
 			}
+			/* Velocidade: o que saiu desde a última volta (1 s). */
+			if (lastBytes.size() <= i) {
+				lastBytes.resize(i + 1, 0);
+			}
+			QString text = QString::fromUtf8(info.name);
+			if (status.state == PL_DEST_LIVE && lastBytes[i] > 0 && status.total_bytes > lastBytes[i]) {
+				double mbps = (double)(status.total_bytes - lastBytes[i]) * 8.0 / 1000000.0 /
+					      (timer->interval() / 1000.0);
+				text += QString(" · %1 Mb/s").arg(QString::number(mbps, 'f', 1));
+			}
+			lastBytes[i] = status.total_bytes;
 			Item *widget = item(used++);
-			widget->set(QString::fromUtf8(info.name), color);
+			widget->set(text, color);
 			widget->setToolTip(QString::fromUtf8(status.error));
 		}
 
@@ -312,7 +338,9 @@ private:
 	}
 
 	QScrollArea *area = nullptr;
-	QHBoxLayout *row = nullptr;
+	QBoxLayout *row = nullptr;
+	/* Bytes enviados por destino na última volta do relógio (para a velocidade em Mb/s). */
+	std::vector<uint64_t> lastBytes;
 	QTimer *timer = nullptr;
 	std::vector<Item *> items;
 	os_cpu_usage_info_t *cpuInfo = nullptr;
@@ -368,6 +396,14 @@ void pl_stats_dock_unload(void)
 QWidget *pl_stats_dock_create(QWidget *parent)
 {
 	auto *created = new StatsDock(parent, false);
+	instances.push_back(created);
+	created->start();
+	return created;
+}
+
+QWidget *pl_stats_column_create(QWidget *parent)
+{
+	auto *created = new StatsDock(parent, false, true);
 	instances.push_back(created);
 	created->start();
 	return created;

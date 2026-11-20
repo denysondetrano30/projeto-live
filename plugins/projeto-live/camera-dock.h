@@ -27,4 +27,16 @@ QWidget *pl_camera_dock_create(QWidget *parent);
 
 /* Abre a janela "Adicionar fonte" do OBS para esta entrada (cena). */
 void pl_entries_add_source(struct obs_source *scene);
+
+/* A grade grande do monitor 2 ("Acompanhar"): as mesmas entradas, do tamanho que couber. */
+QWidget *pl_camera_grid_create(QWidget *parent);
+
+/* Encolhe (ou volta) as entradas de uma cópia do painel em tirinhas com nome e luzinha. */
+void pl_camera_dock_set_compact(QWidget *dock, bool compact);
+
+/* A janela do somun live diz quem abre a janelinha "Fontes desta entrada" (nulo = o painel do OBS). */
+void pl_entries_set_sources_opener(void (*opener)());
+
+/* Põe a entrada na prévia e abre as fontes dela (a janelinha, ou o painel Fontes do OBS). */
+void pl_entries_show_sources(struct obs_source *scene);
 #endif

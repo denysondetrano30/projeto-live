@@ -24,4 +24,7 @@ class QWidget;
 
 /* Mais uma faixa Situação, sem os botões (para a janela do Projeto Live). Já começa ligada. */
 QWidget *pl_stats_dock_create(QWidget *parent);
+
+/* "Situação completa" em coluna (um item por linha, com título), para a tela Operar. */
+QWidget *pl_stats_column_create(QWidget *parent);
 #endif

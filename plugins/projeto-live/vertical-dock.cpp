@@ -31,6 +31,7 @@
 #include <obs-nix-platform.h>
 #endif
 
+#include <QVariant>
 #include <QAction>
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
@@ -1937,7 +1938,13 @@ public:
 		}
 		QWidget *area = parentWidget();
 		int height = (area ? area->height() : 400) - 28;
-		setFixedWidth(std::max(140, height * 9 / 16 + 4));
+		int width = std::max(140, height * 9 / 16 + 4);
+		/* A tela Operar pede as telas em pé menores (largura máxima guardada no lugar onde ela fica). */
+		int cap = area ? area->property("plMaxWidth").toInt() : 0;
+		if (cap > 0) {
+			width = std::min(width, cap);
+		}
+		setFixedWidth(width);
 	}
 
 protected:

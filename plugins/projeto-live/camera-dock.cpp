@@ -93,6 +93,15 @@ const float SILENCE_DB = -60.0f;
 /* Larguras da miniatura: pequeno, médio, grande. */
 const int CARD_WIDTHS[3] = {170, 230, 310};
 
+/* Largura da tirinha (entrada encolhida). */
+const int COMPACT_WIDTH = 150;
+
+/* Espaço entre as miniaturas (o mesmo do FlowLayout). */
+const int CARD_GAP = 8;
+
+/* Quem abre a janelinha "Fontes desta entrada" (a janela do somun live avisa; sem ela, nulo). */
+void (*sourcesOpener)() = nullptr;
+
 enum class Tally { Off, Preview, Program };
 
 enum class Signal { None, Stalled, Live };
@@ -389,11 +398,43 @@ public:
 		return same;
 	}
 
-	void setSize(int index)
+	void setSize(int index) { setTileWidth(CARD_WIDTHS[std::clamp(index, 0, 2)]); }
+
+	/* Largura da imagem (a altura segue o 16:9). A grade do Acompanhar escolhe a largura sozinha. */
+	void setTileWidth(int cardWidth)
 	{
-		int cardWidth = CARD_WIDTHS[std::clamp(index, 0, 2)];
-		thumb->setFixedSize(cardWidth, cardWidth * 9 / 16);
-		setFixedWidth(cardWidth + 6);
+		tileWidth = std::max(cardWidth, 80);
+		thumb->setFixedSize(tileWidth, tileWidth * 9 / 16);
+		setFixedWidth(compact ? COMPACT_WIDTH : tileWidth + 6);
+	}
+
+	/* Encolhida: vira uma tirinha só com a luzinha e o nome (a imagem para de desenhar). */
+	void setCompact(bool on)
+	{
+		if (compact == on) {
+			return;
+		}
+		compact = on;
+		thumb->setVisible(!on);
+		detail->setVisible(!on);
+		if (on) {
+			level->setVisible(false);
+		}
+		setFixedWidth(on ? COMPACT_WIDTH : tileWidth + 6);
+	}
+
+	/* Na grade do Acompanhar: nome e estado em letra maior, para ler de longe. */
+	void setBig(bool on)
+	{
+		QFont nameFont = name->font();
+		nameFont.setPointSizeF(on ? 12.0 : nameFont.pointSizeF());
+		nameFont.setWeight(on ? QFont::DemiBold : QFont::Normal);
+		name->setFont(nameFont);
+		QFont badgeFont = badge->font();
+		if (on) {
+			badgeFont.setPointSizeF(11.0);
+		}
+		badge->setFont(badgeFont);
 	}
 
 	/* Um clique: manda para a prévia; no modo normal (sem prévia) já põe no ar, com a transição. */
@@ -486,27 +527,32 @@ protected:
 	}
 
 private:
+	/* Cores do somun: vermelho no ar, branco na prévia, vermelho também quando travou (o aviso mais
+	 * importante: descobrir antes de cortar para ela). */
 	void applyColors(Tally tally, Signal signal)
 	{
-		const char *border = "#3a3a44";
+		const char *border = "#3A3A3A";
 		const char *badgeText = nullptr;
 		const char *badgeColor = nullptr;
+		const char *dotColor = "#5A5A5A";
 		if (tally == Tally::Program) {
-			border = "#e5352b";
+			border = "#E5483B";
 			badgeText = "Cameras.OnAir";
-			badgeColor = "#ff8b84";
+			badgeColor = "#E5483B";
+			dotColor = "#E5483B";
 		} else if (tally == Tally::Preview) {
-			border = "#2fa84f";
+			border = "#FFFFFF";
 			badgeText = "Cameras.Preview";
-			badgeColor = "#6ddb8c";
+			badgeColor = "#FFFFFF";
+			dotColor = "#FFFFFF";
 		}
-		/* A imagem travada ou sem sinal avisa com a moldura amarela, mesmo fora do ar. */
-		if (signal != Signal::Live) {
-			if (signal == Signal::Stalled) {
-				border = "#e8a33d";
-			} else {
-				border = "#8c3a33";
-			}
+		if (signal == Signal::Stalled) {
+			border = "#E5483B";
+			badgeText = "Cameras.StalledBadge";
+			badgeColor = "#E5483B";
+			dotColor = "#E5483B";
+		} else if (signal == Signal::None && tally == Tally::Off) {
+			border = "#2A2A2A";
 		}
 
 		if (badgeText) {
@@ -515,18 +561,12 @@ private:
 				badge->setText(QString::fromUtf8(obs_module_text(badgeText)));
 				badge->setStyleSheet(QString("color: %1;").arg(badgeColor));
 			}
-			badge->setVisible(true);
+			badge->setVisible(!compact);
 		} else {
 			shownBadge.clear();
 			badge->setVisible(false);
 		}
 
-		const char *dotColor = "#e5352b";
-		if (signal == Signal::Live) {
-			dotColor = "#2fa84f";
-		} else if (signal == Signal::Stalled) {
-			dotColor = "#e8a33d";
-		}
 		if (shownDot != dotColor) {
 			shownDot = dotColor;
 			dot->setStyleSheet(QString("background: %1; border-radius: 4px;").arg(dotColor));
@@ -540,6 +580,9 @@ private:
 
 	void updateLevel(obs_source_t *src)
 	{
+		if (compact) {
+			return;
+		}
 		if (!meter) {
 			if (!(obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO)) {
 				level->setVisible(false);
@@ -558,6 +601,9 @@ private:
 		/* Sobe na hora e desce devagar, para o olho acompanhar. */
 		shown = std::max(percent, shown - 7);
 		level->setValue(shown);
+		if (level->isHidden()) {
+			level->setVisible(true);
+		}
 	}
 
 	static void levelCallback(void *param, const float magnitude[MAX_AUDIO_CHANNELS],
@@ -585,6 +631,8 @@ private:
 	obs_volmeter_t *meter = nullptr;
 	std::atomic<float> peak{SILENCE_DB};
 	int shown = 0;
+	int tileWidth = CARD_WIDTHS[1];
+	bool compact = false;
 
 public:
 	void releaseMeter()
@@ -814,7 +862,8 @@ std::vector<CameraDock *> instances;
 
 class CameraDock : public QWidget {
 public:
-	explicit CameraDock(QWidget *parent) : QWidget(parent)
+	/* grid: a grade do monitor 2 ("Acompanhar"), com as entradas do tamanho que couber na tela. */
+	explicit CameraDock(QWidget *parent, bool grid = false) : QWidget(parent), grid(grid)
 	{
 		auto *outer = new QVBoxLayout(this);
 		outer->setContentsMargins(6, 6, 6, 6);
@@ -826,6 +875,12 @@ public:
 
 		/* A explicação fica só na dica do mouse (tela limpa). */
 		setToolTip(msg("Cameras.Hint"));
+
+		/* Com o Acompanhar ligado, as entradas daqui encolhem e este aviso aparece. */
+		compactNote = new QLabel(msg("Entries.CompactNote"), this);
+		compactNote->setStyleSheet("color: #8C8C8C;");
+		compactNote->setVisible(false);
+		top->addWidget(compactNote);
 		top->addStretch(1);
 
 		sizeBox = new QComboBox(this);
@@ -844,7 +899,13 @@ public:
 		});
 		top->addWidget(sizeBox);
 
-		outer->addLayout(top);
+		if (!grid) {
+			outer->addLayout(top);
+		} else {
+			/* Na grade o tamanho é automático: sem a escolha de tamanho. */
+			sizeBox->setVisible(false);
+			delete top;
+		}
 
 		/* Sem entradas, o aviso também aceita o botão direito (é daqui que se cria a primeira). */
 		empty = new QLabel(msg("Cameras.Empty"), this);
@@ -857,6 +918,7 @@ public:
 		area = new QScrollArea(this);
 		area->setWidgetResizable(true);
 		area->setFrameShape(QFrame::NoFrame);
+		area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 		holder = new QWidget(area);
 		holder->setContextMenuPolicy(Qt::CustomContextMenu);
 		connect(holder, &QWidget::customContextMenuRequested, this,
@@ -865,6 +927,9 @@ public:
 		addCard = new AddCard(holder);
 		addCard->setSize(sizeBox->currentIndex());
 		flow->addWidget(addCard);
+		if (grid) {
+			addCard->setVisible(false);
+		}
 		area->setWidget(holder);
 		outer->addWidget(area, 1);
 
@@ -893,6 +958,34 @@ public:
 	/* Refaz a lista agora (depois de criar ou remover uma entrada). */
 	void rebuildNow() { rebuild(); }
 
+	/* Encolhe todas as entradas em tirinhas (o Acompanhar está mostrando as imagens no monitor 2). */
+	void setCompact(bool on)
+	{
+		if (grid || compact == on) {
+			return;
+		}
+		compact = on;
+		for (Card *card : cards) {
+			card->setCompact(on);
+		}
+		addCard->setVisible(!on);
+		sizeBox->setVisible(!on);
+		compactNote->setVisible(on);
+		holder->updateGeometry();
+		emitHeightChange();
+	}
+
+	bool isCompact() const { return compact; }
+
+protected:
+	void resizeEvent(QResizeEvent *event) override
+	{
+		QWidget::resizeEvent(event);
+		if (grid) {
+			fitGrid();
+		}
+	}
+
 	/* A miniatura desta cena, se ela já existir no painel. */
 	Card *cardFor(obs_source_t *scene) const
 	{
@@ -905,9 +998,60 @@ public:
 	}
 
 private:
+	/* A janela de cima pode querer encolher a faixa (feito por quem nos contém, pelo tamanho mínimo). */
+	void emitHeightChange()
+	{
+		if (compact) {
+			setMaximumHeight(72);
+		} else {
+			setMaximumHeight(QWIDGETSIZE_MAX);
+		}
+	}
+
+	/* Grade: escolhe quantas colunas deixam cada entrada o maior possível sem rolar. */
+	void fitGrid()
+	{
+		int n = (int)cards.size();
+		if (n == 0) {
+			return;
+		}
+		int width = area->width() - 4;
+		int height = area->height() - 4;
+		/* Embaixo de cada imagem: nome e estado, mais a moldura. */
+		const int below = 40;
+		int best = 0;
+		for (int cols = 1; cols <= n; cols++) {
+			int rows = (n + cols - 1) / cols;
+			int byWidth = (width - (cols - 1) * CARD_GAP) / cols - 6;
+			int byHeight = ((height - (rows - 1) * CARD_GAP) / rows - below) * 16 / 9;
+			best = std::max(best, std::min(byWidth, byHeight));
+		}
+		best = std::max(best, 160);
+		if (best == gridWidth) {
+			return;
+		}
+		gridWidth = best;
+		for (Card *card : cards) {
+			card->setTileWidth(best);
+		}
+	}
+
+	/* Tamanho, encolhida e letra grande: o que o cartão novo precisa saber. */
+	void prepare(Card *card)
+	{
+		if (grid) {
+			card->setBig(true);
+			card->setTileWidth(gridWidth > 0 ? gridWidth : CARD_WIDTHS[2]);
+		} else {
+			card->setSize(sizeBox->currentIndex());
+			card->setCompact(compact);
+		}
+	}
+
 	/* Uma miniatura por cena do OBS, na mesma ordem da lista de cenas. */
 	void rebuild()
 	{
+		size_t before = cards.size();
 		std::vector<obs_source_t *> found;
 		struct obs_frontend_source_list scenes = {};
 		obs_frontend_get_scenes(&scenes);
@@ -941,7 +1085,7 @@ private:
 				continue;
 			}
 			auto *card = new Card(holder, scene);
-			card->setSize(sizeBox->currentIndex());
+			prepare(card);
 			flow->addWidget(card);
 			cards.push_back(card);
 			moved = true;
@@ -977,6 +1121,11 @@ private:
 		}
 
 		empty->setVisible(false);
+
+		if (grid && cards.size() != before) {
+			gridWidth = 0;
+			fitGrid();
+		}
 	}
 
 	static int loadSize()
@@ -1010,6 +1159,10 @@ private:
 		obs_data_release(data);
 	}
 
+	bool grid = false;
+	bool compact = false;
+	int gridWidth = 0;
+	QLabel *compactNote = nullptr;
 	QLabel *hint = nullptr;
 	QLabel *empty = nullptr;
 	AddCard *addCard = nullptr;
@@ -1088,6 +1241,12 @@ void organizeEntry(obs_source_t *sceneSource)
 			QMessageBox::information(dialogParent(), msg("Entries.Organize"), msg("Entries.NeedStudio"));
 			return;
 		}
+	}
+
+	/* Na janela do somun live: a janelinha "Fontes desta entrada" (segue a entrada da prévia). */
+	if (sourcesOpener) {
+		sourcesOpener();
+		return;
 	}
 
 	/* Liga o painel se estiver desligado e o traz para a frente (mesmo numa aba). */
@@ -1181,7 +1340,7 @@ void showCardMenu(Card *card, const QPoint &where)
 
 	QMenu menu;
 	QAction *addAction = menu.addAction(msg("Entries.AddSource"));
-	QAction *organizeAction = menu.addAction(msg("Entries.Organize"));
+	QAction *organizeAction = menu.addAction(msg(sourcesOpener ? "Entries.Sources" : "Entries.Organize"));
 	pl_entry_transition_menu(&menu, scene);
 	menu.addSeparator();
 	QAction *renameAction = menu.addAction(msg("Entries.Rename"));
@@ -1222,6 +1381,32 @@ void pl_camera_dock_load(void)
 QWidget *pl_camera_dock_create(QWidget *parent)
 {
 	return new CameraDock(parent);
+}
+
+QWidget *pl_camera_grid_create(QWidget *parent)
+{
+	return new CameraDock(parent, true);
+}
+
+void pl_camera_dock_set_compact(QWidget *created, bool compact)
+{
+	for (CameraDock *each : instances) {
+		if (each == created) {
+			each->setCompact(compact);
+		}
+	}
+}
+
+void pl_entries_set_sources_opener(void (*opener)())
+{
+	sourcesOpener = opener;
+}
+
+void pl_entries_show_sources(obs_source_t *scene)
+{
+	if (scene) {
+		organizeEntry(scene);
+	}
 }
 
 void pl_entries_add_source(obs_source_t *scene)
