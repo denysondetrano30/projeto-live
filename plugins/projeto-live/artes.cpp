@@ -1771,7 +1771,6 @@ public:
 		/* Coluna do lado. */
 		auto *side = new QVBoxLayout();
 		side->setSpacing(8);
-		buildLook(side);
 		auto *title = new QLabel(msg("Artes.Pieces"), this);
 		title->setObjectName("somunPanelTitle");
 		side->addWidget(title);
@@ -1922,56 +1921,6 @@ private:
 				selectedItems[out].push_back(item);
 			}
 		}
-	}
-
-	/* O Look: o arquivo, liga e desliga, e o fader de força. */
-	void buildLook(QVBoxLayout *side)
-	{
-		auto *title = new QLabel(msg("Artes.Look"), this);
-		title->setObjectName("somunPanelTitle");
-		title->setToolTip(msg("Artes.LookHint"));
-		side->addWidget(title);
-		auto *row = new QHBoxLayout();
-		lookButton = new QPushButton(this);
-		lookButton->setFocusPolicy(Qt::NoFocus);
-		lookButton->setToolTip(msg("Artes.LookHint"));
-		row->addWidget(lookButton, 1);
-		lookCheck = new QCheckBox(msg("Artes.LookOn"), this);
-		lookCheck->setFocusPolicy(Qt::NoFocus);
-		row->addWidget(lookCheck);
-		side->addLayout(row);
-		lookFader = new Fader(this, msg("Artes.LookAmount"), "%");
-		side->addWidget(lookFader);
-		lookFader->setQuietly(0, 100, lookAmount);
-		lookFader->changed = [](int value) {
-			lookAmount = value;
-		};
-		{
-			QSignalBlocker block(lookCheck);
-			lookCheck->setChecked(lookOn);
-		}
-		connect(lookCheck, &QCheckBox::toggled, this, [](bool on) { lookOn = on; });
-		connect(lookButton, &QPushButton::clicked, this, [this]() {
-			QString file = QFileDialog::getOpenFileName(this, msg("Artes.ChooseLook"),
-								    QString::fromStdString(lookFile),
-								    msg("Artes.LookFilter"));
-			if (file.isEmpty()) {
-				return;
-			}
-			lookFile = file.toUtf8().constData();
-			lookOn = true;
-			QSignalBlocker block(lookCheck);
-			lookCheck->setChecked(true);
-			showLookName();
-		});
-		showLookName();
-	}
-
-	void showLookName()
-	{
-		lookButton->setText(lookFile.empty() ? msg("Artes.LookChoose")
-						     : QFileInfo(QString::fromStdString(lookFile)).completeBaseName());
-		lookCheck->setEnabled(!lookFile.empty());
 	}
 
 	/* Os campos do lower third (só aparecem com uma peça de texto escolhida). */
@@ -2159,10 +2108,6 @@ private:
 	bool rebuilding = false;
 	bool panelsLoaded = false;
 
-	QPushButton *lookButton = nullptr;
-	QCheckBox *lookCheck = nullptr;
-	Fader *lookFader = nullptr;
-
 	QWidget *textPanel = nullptr;
 	QLineEdit *lineEdits[2] = {};
 	QCheckBox *boldChecks[2] = {};
@@ -2333,4 +2278,35 @@ QWidget *pl_artes_bar_create(QWidget *parent)
 void pl_artes_open_editor(QWidget *parent)
 {
 	openEditorFor(parent, std::string());
+}
+
+/* O Look é configurado no modo Cor (color-mode.cpp). */
+QString pl_look_file(void)
+{
+	return QString::fromStdString(lookFile);
+}
+
+bool pl_look_on(void)
+{
+	return lookOn;
+}
+
+int pl_look_amount(void)
+{
+	return lookAmount;
+}
+
+void pl_look_set_file(const QString &file)
+{
+	lookFile = file.toUtf8().constData();
+}
+
+void pl_look_set_on(bool on)
+{
+	lookOn = on;
+}
+
+void pl_look_set_amount(int amount)
+{
+	lookAmount = std::clamp(amount, 0, 100);
 }

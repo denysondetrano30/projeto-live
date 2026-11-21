@@ -91,6 +91,7 @@
 #include "artes.h"
 #include "audio-dock.h"
 #include "camera-dock.h"
+#include "color-mode.h"
 #include "director-dock.h"
 #include "pl-account.h"
 #include "source-row.hpp"
@@ -1194,8 +1195,16 @@ public:
 
 		right->addLayout(middle, 5);
 
+		/* Modo Cor com um monitor só: cobre o meio da mesa até clicar em "sair". */
+		colorPanel = pl_color_panel_create(this, [this]() {
+			colorHere = false;
+			refresh();
+		});
+		colorPanel->setVisible(false);
+		right->addWidget(colorPanel, 8);
+
 		/* Entradas: a mesma lista do painel do OBS (outra cópia, que mostra as mesmas cenas). Com o
-		 * Acompanhar ligado no monitor 2, elas encolhem em tirinhas. */
+		 * Acompanhar ligado no monitor 2, elas ficam só lá. */
 		/* Artes: a barra das peças "No programa" (logo, QR code, letterbox), por cima de tudo que vai
 		 * ao ar. Um clique liga, outro desliga; "+" cria; botão direito edita. */
 		right->addWidget(pl_artes_bar_create(this));
@@ -1317,6 +1326,13 @@ private:
 		menu.addSeparator();
 
 		QAction *artes = menu.addAction(msg("Studio.ArtesMenu"));
+		/* Com o Acompanhar, o modo Cor é o botão "Cor" do monitor 2. */
+		QAction *color = nullptr;
+		if (!watchingNow) {
+			color = menu.addAction(msg("Studio.ColorMenu"));
+			color->setCheckable(true);
+			color->setChecked(colorHere);
+		}
 		QAction *transitions = menu.addAction(msg("Studio.TransitionsMenu"));
 		QAction *studio = menu.addAction(msg("Studio.StudioMode"));
 		studio->setCheckable(true);
@@ -1345,6 +1361,9 @@ private:
 			pl_talk_key_choose(this);
 		} else if (chosen == artes) {
 			pl_artes_open_editor(this);
+		} else if (color && chosen == color) {
+			colorHere = color->isChecked();
+			refresh();
 		} else if (chosen == transitions) {
 			pl_transitions_dialog_show(this);
 		} else if (chosen == studio) {
@@ -1367,30 +1386,39 @@ private:
 
 		/* Monitor 2: o Acompanhar aparece quando há dois monitores e ele está ligado. */
 		bool watching = pl_watch_update(this);
+		watchingNow = watching;
+		if (watching) {
+			colorHere = false; /* com dois monitores, o modo Cor mora no monitor 2 */
+		}
+		if (colorPanel->isHidden() == colorHere) {
+			colorPanel->setVisible(colorHere);
+		}
+		/* Com o Acompanhar, a imagem fica só no monitor 2; com o modo Cor, ele cobre o meio da mesa. */
+		bool imagesAway = watching || colorHere;
 		/* Com o Acompanhar, as entradas ficam só no monitor 2 (as duas telas não repetem nada). */
-		if (entries->isHidden() == !watching) {
-			entries->setVisible(!watching);
+		if (entries->isHidden() == !imagesAway) {
+			entries->setVisible(!imagesAway);
 		}
 		pl_talk_key_set_active(isVisible());
 
 		bool vertical = pl_vertical_program_wanted();
 		/* Com o Acompanhar, as telas em pé vão para o monitor 2 (cada uma ao lado da sua). */
-		bool verticalHere = vertical && !watching;
+		bool verticalHere = vertical && !imagesAway;
 		if (verticalHolder->isHidden() == verticalHere) {
 			verticalHolder->setVisible(verticalHere);
 		}
 		/* Modo normal: uma tela só (a do ar, onde se mexe), sem cortar e transição. Com o
 		 * Acompanhar no monitor 2, a Prévia e o No ar ficam só lá (aqui sobra espaço para o resto). */
 		bool studio = obs_frontend_preview_program_mode_active();
-		bool programShown = studio && !watching;
+		bool programShown = studio && !imagesAway;
 		if (program->isHidden() == programShown) {
 			program->setVisible(programShown);
 		}
-		if (preview->isHidden() == !watching) {
-			preview->setVisible(!watching);
+		if (preview->isHidden() == !imagesAway) {
+			preview->setVisible(!imagesAway);
 		}
 		/* Com o Acompanhar, o cortar e a transição ficam só no monitor 2 (entre a Prévia e o No ar). */
-		bool cutHere = studio && !watching;
+		bool cutHere = studio && !imagesAway;
 		if (cutButton->isHidden() == cutHere) {
 			cutButton->setVisible(cutHere);
 			transitionButton->setVisible(cutHere);
@@ -1613,6 +1641,9 @@ private:
 	QAction *sourcesAction = nullptr;
 	SourcesPanel *sources = nullptr;
 	SourcesPanel *sourcesColumn = nullptr;
+	QWidget *colorPanel = nullptr;
+	bool colorHere = false;
+	bool watchingNow = false;
 	int streamShownLive = -1;
 	int recordShown = -1;
 	QWidget *verticalHolder = nullptr;

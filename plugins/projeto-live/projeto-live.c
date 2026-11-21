@@ -10,6 +10,7 @@
 #include <obs-module.h>
 
 #include "artes.h"
+#include "color-mode.h"
 #include "audio-dock.h"
 #include "camera-dock.h"
 #include "director-dock.h"
@@ -65,6 +66,7 @@ bool obs_module_load(void)
 	pl_account_load();
 	pl_studio_window_load();
 	pl_artes_load();
+	pl_color_mode_load();
 	pl_projection_start();
 	return true;
 }

@@ -21,6 +21,8 @@ target_sources(
     audio-dock.h
     camera-dock.cpp
     camera-dock.h
+    color-mode.cpp
+    color-mode.h
     director-dock.cpp
     director-dock.h
     intercom-audio.c

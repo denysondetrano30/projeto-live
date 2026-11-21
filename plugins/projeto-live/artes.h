@@ -20,7 +20,17 @@ void pl_artes_unload(void);
 #ifdef __cplusplus
 }
 
+#include <QString>
+
 class QWidget;
+
+/* O Look (um LUT em tudo que vai ao ar): configurado no modo Cor, aplicado aqui. */
+QString pl_look_file(void);
+bool pl_look_on(void);
+int pl_look_amount(void);
+void pl_look_set_file(const QString &file);
+void pl_look_set_on(bool on);
+void pl_look_set_amount(int amount);
 
 /* A barra "Artes" da mesa: "+" e um botão por peça alfinetada (liga e desliga). */
 QWidget *pl_artes_bar_create(QWidget *parent);

@@ -38,6 +38,7 @@
 #include <QWindow>
 
 #include "camera-dock.h"
+#include "color-mode.h"
 #include "somun-style.h"
 #include "studio-window.h"
 
@@ -105,8 +106,11 @@ public:
 		colorButton = new QPushButton(msg("Watch.Color"), this);
 		colorButton->setCheckable(true);
 		colorButton->setMinimumHeight(30);
-		colorButton->setEnabled(false);
-		colorButton->setToolTip(msg("Watch.ColorSoon"));
+		colorButton->setFocusPolicy(Qt::NoFocus);
+		colorButton->setToolTip(msg("Watch.ColorHint"));
+		colorButton->setStyleSheet(QString("QPushButton:checked { background: %1; color: %2; }")
+						   .arg(QString(SOMUN_WHITE))
+						   .arg(QString(SOMUN_BLACK)));
 		top->addWidget(colorButton);
 		outer->addLayout(top);
 
@@ -116,6 +120,16 @@ public:
 
 		grid = pl_camera_grid_create(this);
 		outer->addWidget(grid, 4);
+
+		/* O modo Cor toma o monitor inteiro; Prévia, No ar e grade voltam ao sair. */
+		colorPanel = pl_color_panel_create(this, nullptr);
+		colorPanel->setVisible(false);
+		outer->addWidget(colorPanel, 9);
+		connect(colorButton, &QPushButton::toggled, this, [this](bool on) {
+			screens->setVisible(!on);
+			grid->setVisible(!on);
+			colorPanel->setVisible(on);
+		});
 	}
 
 	/* Vai para a tela (monitor) pedida e ocupa ela inteira. */
@@ -159,6 +173,7 @@ protected:
 private:
 	QPushButton *colorButton = nullptr;
 	QWidget *screens = nullptr;
+	QWidget *colorPanel = nullptr;
 	QWidget *grid = nullptr;
 	QScreen *shownOn = nullptr;
 };
