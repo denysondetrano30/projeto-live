@@ -55,14 +55,23 @@
 #include <QMargins>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPlatformSurfaceEvent>
 #include <QPoint>
 #include <QDockWidget>
+#include <QDrag>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QFontMetrics>
+#include <QPixmap>
+#include <QStringList>
 #include <QPointer>
+#include <QPushButton>
 #include <QRect>
+#include <QRectF>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QShowEvent>
@@ -189,18 +198,51 @@ public:
 		return size + QSize(margins.left() + margins.right(), margins.top() + margins.bottom());
 	}
 
+	/* Tipo de cada peça (propriedade "plKind" do widget): 0 = entrada grande (quebra linha à esquerda),
+	 * 1 = entrada encolhida (barrinha em pé, à direita), 2 = coluna das escondidas (na ponta direita). */
+	static int kindOf(QLayoutItem *item)
+	{
+		QWidget *widget = item->widget();
+		return widget ? widget->property("plKind").toInt() : 0;
+	}
+
+	/* Largura que as barrinhas e a coluna das escondidas ocupam à direita. */
+	int rightWidth() const
+	{
+		int width = 0;
+		for (QLayoutItem *item : items) {
+			if (item->isEmpty()) {
+				continue;
+			}
+			int kind = kindOf(item);
+			if (kind == 1 || kind == 2) {
+				width += item->sizeHint().width() + GAP;
+			}
+		}
+		return width;
+	}
+
 private:
 	int layoutRows(const QRect &rect, bool place) const
 	{
 		QMargins margins = contentsMargins();
 		QRect area = rect.adjusted(margins.left(), margins.top(), -margins.right(), -margins.bottom());
+		/* As grandes quebram linha só na parte esquerda; a direita fica para as barrinhas. */
+		int right = area.right() - rightWidth();
 		int x = area.x();
 		int y = area.y();
 		int rowHeight = 0;
+		int firstRow = 0;
 		for (QLayoutItem *item : items) {
+			if (item->isEmpty() || kindOf(item) != 0) {
+				continue;
+			}
 			QSize hint = item->sizeHint();
 			int next = x + hint.width() + GAP;
-			if (rowHeight > 0 && next - GAP > area.right() + 1) {
+			if (rowHeight > 0 && next - GAP > right + 1) {
+				if (firstRow == 0) {
+					firstRow = rowHeight;
+				}
 				x = area.x();
 				y += rowHeight + GAP;
 				rowHeight = 0;
@@ -211,7 +253,26 @@ private:
 			x += hint.width() + GAP;
 			rowHeight = std::max(rowHeight, hint.height());
 		}
-		return y + rowHeight - rect.y() + margins.bottom();
+		if (firstRow == 0) {
+			firstRow = rowHeight > 0 ? rowHeight : 120;
+		}
+		int bottom = y + rowHeight;
+
+		/* À direita: as barrinhas em pé (altura de uma fileira) e, na ponta, as escondidas. */
+		int sx = right + 1 + GAP;
+		for (QLayoutItem *item : items) {
+			if (item->isEmpty() || kindOf(item) == 0) {
+				continue;
+			}
+			QSize hint = item->sizeHint();
+			int height = kindOf(item) == 1 ? firstRow : std::max(hint.height(), 30);
+			if (place) {
+				item->setGeometry(QRect(sx, area.y(), hint.width(), height));
+			}
+			sx += hint.width() + GAP;
+			bottom = std::max(bottom, area.y() + height);
+		}
+		return bottom - rect.y() + margins.bottom();
 	}
 
 	static const int GAP = 8;
@@ -289,7 +350,7 @@ class Card;
 
 /* Decide o que o botão direito de uma entrada (ou do espaço vazio) mostra. */
 void showCardMenu(Card *card, const QPoint &where);
-void showHiddenMenu(const QPoint &where);
+void showEntryAgain(const QString &name);
 void showEmptyMenu(const QPoint &where);
 void newEntry();
 
@@ -306,6 +367,10 @@ protected:
 	void resizeEvent(QResizeEvent *event) override;
 	void mousePressEvent(QMouseEvent *event) override;
 	void mouseDoubleClickEvent(QMouseEvent *event) override;
+	void mouseMoveEvent(QMouseEvent *event) override;
+	void mouseReleaseEvent(QMouseEvent *event) override;
+	void dragEnterEvent(QDragEnterEvent *event) override;
+	void dropEvent(QDropEvent *event) override;
 	void contextMenuEvent(QContextMenuEvent *event) override;
 	void showEvent(QShowEvent *event) override;
 	void hideEvent(QHideEvent *event) override;
@@ -336,6 +401,36 @@ private:
 const char *const KEY_SHRUNK = "pl_encolhida";
 const char *const KEY_HIDDEN = "pl_escondida";
 const char *const KEY_CLEAN = "pl_vai_limpa";
+const char *const KEY_ORDER = "pl_ordem";
+
+/* Tipo do que se arrasta (o nome da entrada). */
+const char *const ENTRY_MIME = "application/x-somun-entry";
+
+/* Lugar da entrada na fileira (arrastando com o mouse); sem lugar escolhido, vale a ordem do OBS. */
+int entryOrder(obs_source_t *scene, int fallback)
+{
+	obs_data_t *data = obs_source_get_private_settings(scene);
+	int order = data && obs_data_has_user_value(data, KEY_ORDER) ? (int)obs_data_get_int(data, KEY_ORDER)
+								     : 100000 + fallback;
+	obs_data_release(data);
+	return order;
+}
+
+/* Põe as entradas no lugar escolhido arrastando (as sem lugar ficam na ordem do OBS, depois). */
+void sortByOrder(std::vector<obs_source_t *> &list)
+{
+	std::vector<std::pair<int, obs_source_t *>> keyed;
+	for (size_t i = 0; i < list.size(); i++) {
+		keyed.emplace_back(entryOrder(list[i], (int)i), list[i]);
+	}
+	std::stable_sort(keyed.begin(), keyed.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+	for (size_t i = 0; i < list.size(); i++) {
+		list[i] = keyed[i].second;
+	}
+}
+
+/* Arrastou "dragged" e soltou em cima de "target" (antes ou depois dele): guarda a ordem nova. */
+void reorderEntries(const QString &dragged, const QString &target, bool after);
 
 bool entryFlag(obs_source_t *scene, const char *key)
 {
@@ -383,6 +478,51 @@ bool entryGoesClean(obs_source_t *scene)
 
 /* ------------------------------------------------------------------------- */
 
+/* Largura da barrinha em pé de uma entrada encolhida. */
+const int STRIP_WIDTH = 34;
+
+/* O miolo da barrinha em pé: a luzinha em cima e o nome escrito de baixo para cima. */
+class StripLabel : public QWidget {
+public:
+	explicit StripLabel(QWidget *parent) : QWidget(parent) { setMinimumHeight(40); }
+
+	void setText(const QString &value)
+	{
+		if (text != value) {
+			text = value;
+			update();
+		}
+	}
+
+	void setDot(const QColor &color)
+	{
+		if (dot != color) {
+			dot = color;
+			update();
+		}
+	}
+
+protected:
+	void paintEvent(QPaintEvent *) override
+	{
+		QPainter painter(this);
+		painter.setRenderHint(QPainter::Antialiasing);
+		painter.setPen(Qt::NoPen);
+		painter.setBrush(dot);
+		painter.drawEllipse(QRectF(width() / 2.0 - 4.0, 4.0, 8.0, 8.0));
+		painter.setPen(QColor("#F2F2F2"));
+		painter.translate(width() / 2.0, height() - 4.0);
+		painter.rotate(-90.0);
+		QFontMetrics metrics(font());
+		QString shown = metrics.elidedText(text, Qt::ElideRight, std::max(height() - 22, 10));
+		painter.drawText(QPointF(0.0, metrics.ascent() / 2.0 - 1.0), shown);
+	}
+
+private:
+	QString text;
+	QColor dot = QColor("#5A5A5A");
+};
+
 /* Uma miniatura inteira (uma entrada = uma cena): imagem, moldura, nome, atraso e barrinha. */
 class Card : public QFrame {
 public:
@@ -394,6 +534,7 @@ public:
 		setFrameShape(QFrame::NoFrame);
 		setCursor(Qt::PointingHandCursor);
 		setToolTip(msg("Cameras.Hint"));
+		setAcceptDrops(true);
 
 		auto *layout = new QVBoxLayout(this);
 		layout->setContentsMargins(3, 3, 3, 3);
@@ -435,6 +576,11 @@ public:
 
 		layout->addLayout(row);
 
+		/* Encolhida: no lugar da imagem e da linha do nome, a barrinha em pé. */
+		strip = new StripLabel(this);
+		strip->setVisible(false);
+		layout->addWidget(strip, 1);
+
 		level = new Level(this);
 		layout->addWidget(level);
 
@@ -465,7 +611,7 @@ public:
 	{
 		tileWidth = std::max(cardWidth, 80);
 		thumb->setFixedSize(tileWidth, tileWidth * 9 / 16);
-		setFixedWidth(compact ? COMPACT_WIDTH : tileWidth + 6);
+		setFixedWidth(compact ? STRIP_WIDTH : tileWidth + 6);
 	}
 
 	/* O painel inteiro encolhido (todas em tirinha). */
@@ -477,6 +623,9 @@ public:
 
 	/* Escondida pela pessoa (botão direito > Esconder): o painel tira da fileira. */
 	bool isHiddenByUser() const { return hiddenByUser; }
+
+	/* Nome da entrada (como aparece no cartão). */
+	QString entryName() const { return name->text(); }
 
 	/* Encolhida (por ela ou pelo painel inteiro)? */
 	bool isCompact() const { return compact; }
@@ -493,6 +642,53 @@ public:
 			badgeFont.setPointSizeF(11.0);
 		}
 		badge->setFont(badgeFont);
+	}
+
+	/* Mouse: um clique (sem arrastar) manda para a prévia ao soltar; arrastar muda o lugar da entrada. */
+	void pressStart(const QPoint &global)
+	{
+		pressGlobal = global;
+		pressing = true;
+	}
+
+	void pressMove(const QPoint &global, Qt::MouseButtons buttons)
+	{
+		if (pressing && (buttons & Qt::LeftButton) &&
+		    (global - pressGlobal).manhattanLength() >= QApplication::startDragDistance()) {
+			pressing = false;
+			startDrag();
+		}
+	}
+
+	void pressEnd()
+	{
+		if (pressing) {
+			pressing = false;
+			sendToPreview();
+		}
+	}
+
+	void dragArrives(QDragEnterEvent *event)
+	{
+		if (event->mimeData()->hasFormat(ENTRY_MIME)) {
+			event->acceptProposedAction();
+		}
+	}
+
+	/* Soltou uma entrada aqui: ela vai para antes desta (metade esquerda) ou depois (direita). */
+	void dropHere(QDropEvent *event, const QPoint &local)
+	{
+		if (!event->mimeData()->hasFormat(ENTRY_MIME)) {
+			return;
+		}
+		QString dragged = QString::fromUtf8(event->mimeData()->data(ENTRY_MIME));
+		event->acceptProposedAction();
+		bool after = compact ? local.y() > height() / 2 : local.x() > width() / 2;
+		if (dragged != entryName()) {
+			/* Depois de o arrastar terminar: a fileira vai ser refeita. */
+			QString target = entryName();
+			QTimer::singleShot(0, [dragged, target, after]() { reorderEntries(dragged, target, after); });
+		}
 	}
 
 	/* Um clique: manda para a prévia; no modo normal (sem prévia) já põe no ar, com a transição. */
@@ -530,6 +726,7 @@ public:
 		}
 
 		name->setText(QString::fromUtf8(obs_source_get_name(src)));
+		strip->setText(name->text());
 
 		/* As marcas do botão direito (podem ter mudado em outra cópia do painel). */
 		shrunkByUser = entryFlag(src, KEY_SHRUNK);
@@ -593,7 +790,63 @@ protected:
 		event->accept();
 	}
 
+	/* A barrinha em pé (encolhida) não tem imagem: o mouse cai no próprio cartão. */
+	void mousePressEvent(QMouseEvent *event) override
+	{
+		if (event->button() == Qt::LeftButton) {
+			pressStart(event->globalPosition().toPoint());
+		}
+		QFrame::mousePressEvent(event);
+	}
+
+	void mouseMoveEvent(QMouseEvent *event) override
+	{
+		pressMove(event->globalPosition().toPoint(), event->buttons());
+		QFrame::mouseMoveEvent(event);
+	}
+
+	void mouseReleaseEvent(QMouseEvent *event) override
+	{
+		if (event->button() == Qt::LeftButton) {
+			pressEnd();
+		}
+		QFrame::mouseReleaseEvent(event);
+	}
+
+	void mouseDoubleClickEvent(QMouseEvent *event) override
+	{
+		if (event->button() == Qt::LeftButton) {
+			sendToProgram();
+		}
+		QFrame::mouseDoubleClickEvent(event);
+	}
+
+	void dragEnterEvent(QDragEnterEvent *event) override { dragArrives(event); }
+
+	void dropEvent(QDropEvent *event) override { dropHere(event, event->position().toPoint()); }
+
 private:
+	/* Começa a arrastar esta entrada (o desenho que acompanha o mouse é o nome dela). */
+	void startDrag()
+	{
+		QString label = entryName();
+		QFontMetrics metrics(font());
+		QPixmap pixmap(metrics.horizontalAdvance(label) + 24, metrics.height() + 12);
+		pixmap.fill(QColor("#232323"));
+		QPainter painter(&pixmap);
+		painter.setPen(QColor("#F2F2F2"));
+		painter.drawText(pixmap.rect(), Qt::AlignCenter, label);
+		painter.end();
+
+		auto *mime = new QMimeData();
+		mime->setData(ENTRY_MIME, label.toUtf8());
+		auto *drag = new QDrag(this);
+		drag->setMimeData(mime);
+		drag->setPixmap(pixmap);
+		drag->setHotSpot(QPoint(pixmap.width() / 2, pixmap.height() / 2));
+		drag->exec(Qt::MoveAction);
+	}
+
 	/* Tirinha (sem imagem) quando ela encolheu esta entrada ou o painel inteiro está encolhido. */
 	void applyCompact()
 	{
@@ -608,7 +861,15 @@ private:
 			level->setVisible(false);
 			cleanTag->setVisible(false);
 		}
-		setFixedWidth(on ? COMPACT_WIDTH : tileWidth + 6);
+		dot->setVisible(!on);
+		name->setVisible(!on);
+		if (on) {
+			badge->setVisible(false);
+		}
+		strip->setVisible(on);
+		/* O layout põe a barrinha em pé à direita (veja FlowLayout). */
+		setProperty("plKind", on ? 1 : 0);
+		setFixedWidth(on ? STRIP_WIDTH : tileWidth + 6);
 	}
 
 	/* Cores do somun: vermelho no ar, branco na prévia, vermelho também quando travou (o aviso mais
@@ -651,6 +912,7 @@ private:
 			badge->setVisible(false);
 		}
 
+		strip->setDot(QColor(dotColor));
 		if (shownDot != dotColor) {
 			shownDot = dotColor;
 			dot->setStyleSheet(QString("background: %1; border-radius: 4px;").arg(dotColor));
@@ -712,6 +974,9 @@ private:
 	QLabel *name = nullptr;
 	QLabel *detail = nullptr;
 	QLabel *cleanTag = nullptr;
+	StripLabel *strip = nullptr;
+	QPoint pressGlobal;
+	bool pressing = false;
 	Level *level = nullptr;
 	obs_volmeter_t *meter = nullptr;
 	std::atomic<float> peak{SILENCE_DB};
@@ -740,6 +1005,8 @@ public:
 Thumb::Thumb(Card *card, obs_source_t *source) : QWidget(card), card(card)
 {
 	weak = obs_source_get_weak_source(source);
+	/* Soltar uma entrada arrastada em cima desta muda a ordem (veja Card::dropHere). */
+	setAcceptDrops(true);
 
 	setAttribute(Qt::WA_PaintOnScreen);
 	setAttribute(Qt::WA_StaticContents);
@@ -781,9 +1048,39 @@ void Thumb::resizeEvent(QResizeEvent *event)
 void Thumb::mousePressEvent(QMouseEvent *event)
 {
 	if (event->button() == Qt::LeftButton && card) {
-		card->sendToPreview();
+		card->pressStart(event->globalPosition().toPoint());
 	}
 	QWidget::mousePressEvent(event);
+}
+
+void Thumb::mouseMoveEvent(QMouseEvent *event)
+{
+	if (card) {
+		card->pressMove(event->globalPosition().toPoint(), event->buttons());
+	}
+	QWidget::mouseMoveEvent(event);
+}
+
+void Thumb::mouseReleaseEvent(QMouseEvent *event)
+{
+	if (event->button() == Qt::LeftButton && card) {
+		card->pressEnd();
+	}
+	QWidget::mouseReleaseEvent(event);
+}
+
+void Thumb::dragEnterEvent(QDragEnterEvent *event)
+{
+	if (card) {
+		card->dragArrives(event);
+	}
+}
+
+void Thumb::dropEvent(QDropEvent *event)
+{
+	if (card) {
+		card->dropHere(event, mapTo(card, event->position().toPoint()));
+	}
 }
 
 void Thumb::mouseDoubleClickEvent(QMouseEvent *event)
@@ -945,45 +1242,53 @@ protected:
 	}
 };
 
-/* O cartão "⋯ outras entradas (N)": as entradas escondidas. Um clique mostra a lista para trazer de
- * volta. Só aparece se houver alguma escondida. */
-class OtherCard : public QFrame {
+/* A coluna das entradas escondidas, na ponta direita: uma pílula cinza por entrada, uma embaixo da
+ * outra. Um clique na pílula traz a entrada de volta. Só aparece se houver alguma escondida. */
+class HiddenColumn : public QWidget {
 public:
-	explicit OtherCard(QWidget *parent) : QFrame(parent)
+	explicit HiddenColumn(QWidget *parent) : QWidget(parent)
 	{
-		setObjectName("plOtherCard");
-		setCursor(Qt::PointingHandCursor);
-		setToolTip(msg("Entries.OthersHint"));
-		setStyleSheet("QFrame#plOtherCard { border: 1px dashed #3A3A3A; border-radius: 6px; }");
-		auto *layout = new QVBoxLayout(this);
-		layout->setContentsMargins(6, 4, 6, 4);
-		label = new QLabel(this);
-		label->setAlignment(Qt::AlignCenter);
-		label->setStyleSheet("color: #A8A8A8;");
-		layout->addWidget(label);
-		setFixedSize(COMPACT_WIDTH + 20, 30);
+		setProperty("plKind", 2);
+		layout = new QVBoxLayout(this);
+		layout->setContentsMargins(0, 0, 0, 0);
+		layout->setSpacing(4);
+		setFixedWidth(120);
 		setVisible(false);
 	}
 
-	void setCount(int count)
+	/* Refaz as pílulas se a lista de escondidas mudou. */
+	void setNames(const QStringList &names)
 	{
-		QString text = msg("Entries.Others").arg(count);
-		if (label->text() != text) {
-			label->setText(text);
+		if (names == shown) {
+			return;
 		}
-	}
-
-protected:
-	void mouseReleaseEvent(QMouseEvent *event) override
-	{
-		if (event->button() == Qt::LeftButton && rect().contains(event->pos())) {
-			showHiddenMenu(mapToGlobal(QPoint(0, height())));
+		shown = names;
+		while (QLayoutItem *item = layout->takeAt(0)) {
+			if (QWidget *widget = item->widget()) {
+				widget->deleteLater();
+			}
+			delete item;
 		}
-		QFrame::mouseReleaseEvent(event);
+		for (const QString &name : names) {
+			auto *pill = new QPushButton(name, this);
+			pill->setCursor(Qt::PointingHandCursor);
+			pill->setFocusPolicy(Qt::NoFocus);
+			pill->setToolTip(msg("Entries.OthersHint"));
+			pill->setStyleSheet(
+				"QPushButton { background: #232323; color: #A8A8A8; border: 1px solid #3A3A3A;"
+				" border-radius: 12px; padding: 3px 10px; text-align: left; }"
+				"QPushButton:hover { color: #F2F2F2; }");
+			connect(pill, &QPushButton::clicked, this, [name]() { showEntryAgain(name); });
+			layout->addWidget(pill);
+		}
+		layout->addStretch(1);
+		adjustSize();
+		updateGeometry();
 	}
 
 private:
-	QLabel *label = nullptr;
+	QVBoxLayout *layout = nullptr;
+	QStringList shown;
 };
 
 class CameraDock;
@@ -1053,8 +1358,8 @@ public:
 		connect(holder, &QWidget::customContextMenuRequested, this,
 			[this](const QPoint &pos) { showEmptyMenu(holder->mapToGlobal(pos)); });
 		flow = new FlowLayout(holder);
-		otherCard = new OtherCard(holder);
-		flow->addWidget(otherCard);
+		hiddenColumn = new HiddenColumn(holder);
+		flow->addWidget(hiddenColumn);
 		addCard = new AddCard(holder);
 		addCard->setSize(sizeBox->currentIndex());
 		flow->addWidget(addCard);
@@ -1140,11 +1445,12 @@ private:
 		}
 	}
 
-	/* Escondidas saem da fileira (e contam no "⋯ outras entradas"); encolhidas viram tirinha. Quando
-	 * isso muda, a grade do monitor 2 recalcula o tamanho das que sobraram grandes. */
+	/* Escondidas saem da fileira (e viram pílulas na coluna da direita); encolhidas viram barrinhas em
+	 * pé à direita. Quando isso muda, o layout se refaz e a grade do monitor 2 recalcula o tamanho
+	 * das que sobraram grandes. */
 	void syncHidden()
 	{
-		int hidden = 0;
+		QStringList hiddenNames;
 		QString signature;
 		for (Card *card : cards) {
 			bool show = !card->isHiddenByUser();
@@ -1152,17 +1458,19 @@ private:
 				card->setVisible(show);
 			}
 			if (!show) {
-				hidden++;
+				hiddenNames.append(card->entryName());
 			}
 			signature += show ? (card->isCompact() ? 'c' : 'v') : 'h';
 		}
-		otherCard->setCount(hidden);
-		bool showOthers = hidden > 0 && !compact;
-		if (otherCard->isHidden() == showOthers) {
-			otherCard->setVisible(showOthers);
+		hiddenColumn->setNames(hiddenNames);
+		bool showHidden = !hiddenNames.isEmpty() && !compact;
+		if (hiddenColumn->isHidden() == showHidden) {
+			hiddenColumn->setVisible(showHidden);
 		}
+		signature += hiddenNames.join('|');
 		if (signature != shownSignature) {
 			shownSignature = signature;
+			flow->invalidate();
 			holder->updateGeometry();
 			if (grid) {
 				gridWidth = 0;
@@ -1171,27 +1479,21 @@ private:
 		}
 	}
 
-	/* Grade: escolhe quantas colunas deixam cada entrada o maior possível sem rolar. As tirinhas
-	 * (encolhidas e o "⋯ outras entradas") ficam numa linha embaixo. */
+	/* Grade: escolhe quantas colunas deixam cada entrada grande o maior possível sem rolar, na parte
+	 * esquerda (a direita fica para as barrinhas e as escondidas). */
 	void fitGrid()
 	{
 		int n = 0;
-		bool strips = !otherCard->isHidden();
 		for (Card *card : cards) {
-			if (card->isHiddenByUser()) {
-				continue;
-			}
-			if (card->isCompact()) {
-				strips = true;
-			} else {
+			if (!card->isHiddenByUser() && !card->isCompact()) {
 				n++;
 			}
 		}
 		if (n == 0) {
 			return;
 		}
-		int width = area->width() - 4;
-		int height = area->height() - 4 - (strips ? 40 : 0);
+		int width = area->width() - 4 - flow->rightWidth();
+		int height = area->height() - 4;
 		/* Embaixo de cada imagem: nome e estado, mais a moldura. */
 		const int below = 40;
 		int best = 0;
@@ -1234,6 +1536,7 @@ private:
 			found.push_back(obs_source_get_ref(scenes.sources.array[i]));
 		}
 		obs_frontend_source_list_free(&scenes);
+		sortByOrder(found);
 
 		/* Tira as cenas que não existem mais. */
 		for (int i = (int)cards.size() - 1; i >= 0; i--) {
@@ -1287,8 +1590,8 @@ private:
 
 		/* O "⋯ outras entradas" e o "+ Entrada" ficam sempre por último. */
 		if (moved) {
-			flow->removeWidget(otherCard);
-			flow->addWidget(otherCard);
+			flow->removeWidget(hiddenColumn);
+			flow->addWidget(hiddenColumn);
 			flow->removeWidget(addCard);
 			flow->addWidget(addCard);
 		}
@@ -1343,7 +1646,7 @@ private:
 	QLabel *hint = nullptr;
 	QLabel *empty = nullptr;
 	AddCard *addCard = nullptr;
-	OtherCard *otherCard = nullptr;
+	HiddenColumn *hiddenColumn = nullptr;
 	QString shownSignature;
 	QComboBox *sizeBox = nullptr;
 	QScrollArea *area = nullptr;
@@ -1555,34 +1858,58 @@ void showCardMenu(Card *card, const QPoint &where)
 	obs_source_release(scene);
 }
 
-/* "⋯ outras entradas": a lista das escondidas; escolher uma traz de volta para a fileira. */
-void showHiddenMenu(const QPoint &where)
+/* Guarda a ordem nova depois de arrastar: a entrada arrastada vai para antes (ou depois) da outra, e
+ * todas ganham o seu lugar (pl_ordem). Vale nos dois monitores. */
+void reorderEntries(const QString &dragged, const QString &target, bool after)
 {
-	std::vector<obs_source_t *> hidden;
+	std::vector<obs_source_t *> list;
 	struct obs_frontend_source_list scenes = {};
 	obs_frontend_get_scenes(&scenes);
 	for (size_t i = 0; i < scenes.sources.num; i++) {
-		obs_source_t *scene = scenes.sources.array[i];
-		if (entryFlag(scene, KEY_HIDDEN)) {
-			hidden.push_back(obs_source_get_ref(scene));
-		}
+		list.push_back(obs_source_get_ref(scenes.sources.array[i]));
 	}
 	obs_frontend_source_list_free(&scenes);
+	sortByOrder(list);
 
-	QMenu menu;
-	QAction *title = menu.addAction(msg("Entries.OthersTitle"));
-	title->setEnabled(false);
-	std::vector<QAction *> actions;
-	for (obs_source_t *scene : hidden) {
-		actions.push_back(menu.addAction(QString::fromUtf8(obs_source_get_name(scene))));
-	}
-	QAction *chosen = menu.exec(where);
-	for (size_t i = 0; i < actions.size(); i++) {
-		if (chosen == actions[i]) {
-			setEntryFlag(hidden[i], KEY_HIDDEN, false);
+	obs_source_t *moving = nullptr;
+	for (auto it = list.begin(); it != list.end(); ++it) {
+		if (QString::fromUtf8(obs_source_get_name(*it)) == dragged) {
+			moving = *it;
+			list.erase(it);
+			break;
 		}
 	}
-	for (obs_source_t *scene : hidden) {
+	if (moving) {
+		auto where = list.end();
+		for (auto it = list.begin(); it != list.end(); ++it) {
+			if (QString::fromUtf8(obs_source_get_name(*it)) == target) {
+				where = after ? it + 1 : it;
+				break;
+			}
+		}
+		list.insert(where, moving);
+		for (size_t i = 0; i < list.size(); i++) {
+			obs_data_t *data = obs_source_get_private_settings(list[i]);
+			if (data) {
+				obs_data_set_int(data, KEY_ORDER, (long long)i);
+				obs_data_release(data);
+			}
+		}
+	}
+	for (obs_source_t *scene : list) {
+		obs_source_release(scene);
+	}
+	for (CameraDock *each : instances) {
+		each->rebuildNow();
+	}
+}
+
+/* Pílula da coluna das escondidas: traz a entrada de volta para a fileira. */
+void showEntryAgain(const QString &name)
+{
+	obs_source_t *scene = obs_get_source_by_name(name.toUtf8().constData());
+	if (scene) {
+		setEntryFlag(scene, KEY_HIDDEN, false);
 		obs_source_release(scene);
 	}
 }
