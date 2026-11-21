@@ -18,6 +18,10 @@ extern "C" {
 #define PL_VERTICAL_WIDTH 1080
 #define PL_VERTICAL_HEIGHT 1920
 
+/* Canais da tela vertical (desenhados em ordem): as artes "atrás da câmera" e, por cima, o programa. */
+#define PL_VERTICAL_BACK_CHANNEL 0
+#define PL_VERTICAL_PROGRAM_CHANNEL 1
+
 /* Passa a seguir os avisos do OBS (chamado no carregamento do módulo). */
 void pl_vertical_load(void);
 void pl_vertical_unload(void);

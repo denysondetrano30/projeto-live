@@ -973,7 +973,7 @@ static void sync_twins(void)
 
 obs_source_t *pl_vertical_active_scene(obs_canvas_t *target)
 {
-	obs_source_t *channel = target ? obs_canvas_get_channel(target, 0) : NULL;
+	obs_source_t *channel = target ? obs_canvas_get_channel(target, PL_VERTICAL_PROGRAM_CHANNEL) : NULL;
 	if (channel && obs_source_get_type(channel) == OBS_SOURCE_TYPE_TRANSITION) {
 		obs_source_t *active = obs_transition_get_active_source(channel);
 		obs_source_release(channel);
@@ -1025,7 +1025,7 @@ static obs_source_t *matching_transition(void)
 			obs_source_t *showing = pl_vertical_active_scene(canvas);
 			obs_transition_set(fresh, showing);
 			obs_source_release(showing);
-			obs_canvas_set_channel(canvas, 0, fresh);
+			obs_canvas_set_channel(canvas, PL_VERTICAL_PROGRAM_CHANNEL, fresh);
 			obs_source_release(transition);
 			transition = fresh;
 			transition_is_own = own;
@@ -1047,7 +1047,7 @@ static void set_on_air(obs_source_t *scene, bool animate)
 
 	obs_source_t *with = matching_transition();
 	if (!with) {
-		obs_canvas_set_channel(canvas, 0, scene);
+		obs_canvas_set_channel(canvas, PL_VERTICAL_PROGRAM_CHANNEL, scene);
 	} else if (!already) {
 		int duration = transition_is_own ? pl_vertical_pref_int("transition_ms")
 						 : obs_frontend_get_transition_duration();
@@ -1264,7 +1264,7 @@ static void release_canvas(void)
 	unwatch_all();
 	save_own_transition();
 	if (canvas && transition) {
-		obs_canvas_set_channel(canvas, 0, NULL);
+		obs_canvas_set_channel(canvas, PL_VERTICAL_PROGRAM_CHANNEL, NULL);
 	}
 	obs_source_release(transition);
 	transition = NULL;

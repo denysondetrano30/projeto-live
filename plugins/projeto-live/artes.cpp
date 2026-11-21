@@ -57,6 +57,7 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
+#include <QComboBox>
 #include <QFileInfo>
 #include <QFontMetrics>
 #include <QHBoxLayout>
@@ -107,6 +108,9 @@ const uint32_t CHANNEL = 10;
 const int OUT_WIDE = 0; /* saída deitada, 16:9 */
 const int OUT_TALL = 1; /* saída em pé, 9:16 */
 
+/* Onde a peça aparece. */
+enum Where { WHERE_BOTH = 0, WHERE_WIDE = 1, WHERE_TALL = 2 };
+
 const uint32_t ANIM_MS = 400;
 
 const char *const SAVE_KEY = "somun_artes";
@@ -139,6 +143,8 @@ struct Piece {
 	uint32_t color = 0xFF000000; /* ABGR, como o OBS guarda */
 	int bar[2] = {12, 12};       /* letterbox: altura de cada barra, em % da altura da saída */
 	bool pinned = true;          /* "à mão": aparece na barra da mesa */
+	int where = WHERE_BOTH;      /* deitado e em pé, só deitado ou só em pé */
+	bool behind = false;         /* em pé: fica atrás da câmera */
 	bool temporary = false;
 	int seconds = 10;
 	int anim = ANIM_FADE;
@@ -168,6 +174,7 @@ struct Piece {
 };
 
 obs_scene_t *scenes[2] = {};
+obs_scene_t *backScene = nullptr; /* em pé, atrás da câmera */
 std::vector<std::unique_ptr<Piece>> pieces;
 QTimer *ticker = nullptr;
 bool loaded = false;
@@ -226,6 +233,19 @@ void ensureScenes()
 	if (!scenes[OUT_TALL]) {
 		scenes[OUT_TALL] = obs_scene_create_private("somun artes 9:16");
 	}
+	if (!backScene) {
+		backScene = obs_scene_create_private("somun artes fundo 9:16");
+	}
+}
+
+bool showsIn(const Piece *piece, int out)
+{
+	return piece->where == WHERE_BOTH || (piece->where == WHERE_WIDE) == (out == OUT_WIDE);
+}
+
+obs_scene_t *sceneFor(const Piece *piece, int out)
+{
+	return out == OUT_TALL && piece->behind ? backScene : scenes[out];
 }
 
 Piece *findPiece(const std::string &id)
@@ -322,12 +342,12 @@ void applyAnim(Piece *piece)
 
 obs_sceneitem_t *addItem(Piece *piece, int out, obs_source_t *source)
 {
-	obs_sceneitem_t *item = obs_scene_add(scenes[out], source);
+	obs_sceneitem_t *item = obs_scene_add(sceneFor(piece, out), source);
 	if (!item) {
 		return nullptr;
 	}
 	obs_sceneitem_addref(item);
-	obs_sceneitem_set_visible(item, piece->on);
+	obs_sceneitem_set_visible(item, piece->on && showsIn(piece, out));
 	piece->items[out].push_back(item);
 	return item;
 }
@@ -606,17 +626,71 @@ void releasePiece(Piece *piece)
 /* As camadas seguem a ordem da lista: a última peça fica por cima. */
 void reorderLayers()
 {
-	for (int out = 0; out < 2; out++) {
+	for (int layer = 0; layer < 3; layer++) {
+		int out = layer == OUT_WIDE ? OUT_WIDE : OUT_TALL;
+		bool behind = layer == 2;
+		obs_scene_t *scene = behind ? backScene : scenes[out];
 		std::vector<obs_sceneitem_t *> order;
 		for (auto &piece : pieces) {
+			if (out == OUT_TALL && piece->behind != behind) {
+				continue;
+			}
 			for (obs_sceneitem_t *item : piece->items[out]) {
 				order.push_back(item);
 			}
 		}
-		if (!order.empty() && scenes[out]) {
-			obs_scene_reorder_items(scenes[out], order.data(), order.size());
+		if (!order.empty() && scene) {
+			obs_scene_reorder_items(scene, order.data(), order.size());
 		}
 	}
+}
+
+/* Mostra ou esconde os itens conforme a peça está ligada e onde ela aparece. */
+void applyVisible(Piece *piece)
+{
+	for (int out = 0; out < 2; out++) {
+		bool visible = piece->on && showsIn(piece, out);
+		for (obs_sceneitem_t *item : piece->items[out]) {
+			if (obs_sceneitem_visible(item) != visible) {
+				obs_sceneitem_set_visible(item, visible);
+			}
+		}
+	}
+}
+
+/* Passa a peça em pé para trás da câmera (ou de volta), no mesmo lugar e tamanho. */
+void moveTallLayer(Piece *piece, bool behind)
+{
+	if (piece->behind == behind) {
+		return;
+	}
+	ensureScenes();
+	std::vector<obs_sceneitem_t *> old = std::move(piece->items[OUT_TALL]);
+	piece->items[OUT_TALL].clear();
+	{
+		std::lock_guard<std::mutex> lock(selectedMutex);
+		auto &sel = selectedItems[OUT_TALL];
+		for (obs_sceneitem_t *item : old) {
+			auto found = std::find(sel.begin(), sel.end(), item);
+			if (found != sel.end()) {
+				obs_sceneitem_release(*found);
+				sel.erase(found);
+			}
+		}
+	}
+	piece->behind = behind;
+	for (obs_sceneitem_t *item : old) {
+		struct obs_transform_info info = {};
+		obs_sceneitem_get_info2(item, &info);
+		obs_sceneitem_t *fresh = addItem(piece, OUT_TALL, obs_sceneitem_get_source(item));
+		if (fresh) {
+			obs_sceneitem_set_info2(fresh, &info);
+		}
+		obs_sceneitem_remove(item);
+		obs_sceneitem_release(item);
+	}
+	applyAnim(piece);
+	reorderLayers();
 }
 
 void clearAll()
@@ -635,11 +709,7 @@ void setOn(Piece *piece, bool on)
 	piece->on = on;
 	piece->onAt = on ? now() : 0;
 	piece->offAt = on && piece->temporary ? piece->onAt + (qint64)piece->seconds * 1000 : 0;
-	for (int out = 0; out < 2; out++) {
-		for (obs_sceneitem_t *item : piece->items[out]) {
-			obs_sceneitem_set_visible(item, on);
-		}
-	}
+	applyVisible(piece);
 	notifyBars(false);
 	notifyEditor(false);
 }
@@ -695,7 +765,8 @@ void applyLook(bool clean)
 	obs_frontend_source_list_free(&transitions);
 	obs_canvas_t *canvas = pl_vertical_get_canvas();
 	if (canvas) {
-		obs_source_t *tall = obs_canvas_get_channel(canvas, 0);
+		/* Só no programa: a arte de trás não ganha a cor do Look. */
+		obs_source_t *tall = obs_canvas_get_channel(canvas, PL_VERTICAL_PROGRAM_CHANNEL);
 		if (tall) {
 			ensureLook(tall, enabled);
 			obs_source_release(tall);
@@ -748,6 +819,12 @@ void applyChannels()
 			obs_canvas_set_channel(canvas, CHANNEL, wantTall);
 		}
 		obs_source_release(currentTall);
+		obs_source_t *wantBack = loaded && !clean && backScene ? obs_scene_get_source(backScene) : nullptr;
+		obs_source_t *currentBack = obs_canvas_get_channel(canvas, PL_VERTICAL_BACK_CHANNEL);
+		if (currentBack != wantBack) {
+			obs_canvas_set_channel(canvas, PL_VERTICAL_BACK_CHANNEL, wantBack);
+		}
+		obs_source_release(currentBack);
 		obs_canvas_release(canvas);
 	}
 	applyLook(clean);
@@ -789,6 +866,8 @@ void saveLoad(obs_data_t *data, bool saving, void *)
 			obs_data_set_int(item, "barra16", piece->bar[OUT_WIDE]);
 			obs_data_set_int(item, "barra916", piece->bar[OUT_TALL]);
 			obs_data_set_bool(item, "a_mao", piece->pinned);
+			obs_data_set_int(item, "onde", piece->where);
+			obs_data_set_bool(item, "atras", piece->behind);
 			obs_data_set_bool(item, "temporaria", piece->temporary);
 			obs_data_set_int(item, "segundos", piece->seconds);
 			obs_data_set_int(item, "animacao", piece->anim);
@@ -861,6 +940,8 @@ void saveLoad(obs_data_t *data, bool saving, void *)
 		piece->bar[OUT_WIDE] = (int)obs_data_get_int(item, "barra16");
 		piece->bar[OUT_TALL] = (int)obs_data_get_int(item, "barra916");
 		piece->pinned = obs_data_get_bool(item, "a_mao");
+		piece->where = std::clamp((int)obs_data_get_int(item, "onde"), 0, 2);
+		piece->behind = obs_data_get_bool(item, "atras") && piece->where != WHERE_WIDE;
 		piece->temporary = obs_data_get_bool(item, "temporaria");
 		piece->seconds = std::max((int)obs_data_get_int(item, "segundos"), 1);
 		piece->anim = (int)obs_data_get_int(item, "animacao");
@@ -948,6 +1029,8 @@ void duplicatePiece(Piece *source)
 	copy->bar[0] = source->bar[0];
 	copy->bar[1] = source->bar[1];
 	copy->pinned = source->pinned;
+	copy->where = source->where;
+	copy->behind = source->behind;
 	copy->temporary = source->temporary;
 	copy->seconds = source->seconds;
 	copy->anim = source->anim;
@@ -1540,9 +1623,12 @@ private:
 				obs_source_release(program);
 			}
 		} else {
+			if (backScene) {
+				obs_source_video_render(obs_scene_get_source(backScene));
+			}
 			obs_canvas_t *canvas = pl_vertical_get_canvas();
 			if (canvas) {
-				obs_source_t *program = obs_canvas_get_channel(canvas, 0);
+				obs_source_t *program = obs_canvas_get_channel(canvas, PL_VERTICAL_PROGRAM_CHANNEL);
 				if (program) {
 					obs_source_video_render(program);
 					obs_source_release(program);
@@ -1788,6 +1874,7 @@ public:
 		empty->setWordWrap(true);
 		empty->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY));
 		side->addWidget(empty);
+		buildWherePanel(side);
 		buildTextPanel(side);
 		auto *add = new QPushButton(msg("Artes.Add"), this);
 		somun_make_primary(add);
@@ -1845,6 +1932,7 @@ public:
 			panelsLoaded = true;
 			loadTextPanel();
 		}
+		loadWherePanel();
 		syncSizeFaders();
 		for (int i = 0; i < list->count(); i++) {
 			if (list->item(i)->data(Qt::UserRole).toString().toStdString() == id &&
@@ -1916,11 +2004,74 @@ private:
 			return;
 		}
 		for (int out = 0; out < 2; out++) {
+			if (!showsIn(piece, out)) {
+				continue;
+			}
 			for (obs_sceneitem_t *item : piece->items[out]) {
 				obs_sceneitem_addref(item);
 				selectedItems[out].push_back(item);
 			}
 		}
+	}
+
+	/* Onde a peça aparece e, em pé, se fica atrás da câmera. */
+	void buildWherePanel(QVBoxLayout *side)
+	{
+		wherePanel = new QWidget(this);
+		auto *layout = new QVBoxLayout(wherePanel);
+		layout->setContentsMargins(0, 4, 0, 4);
+		layout->setSpacing(6);
+		auto *row = new QHBoxLayout();
+		auto *label = new QLabel(msg("Artes.Where"), wherePanel);
+		label->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY2));
+		row->addWidget(label);
+		whereBox = new QComboBox(wherePanel);
+		whereBox->setFocusPolicy(Qt::NoFocus);
+		whereBox->addItem(msg("Artes.WhereBoth"), WHERE_BOTH);
+		whereBox->addItem(msg("Artes.WhereWide"), WHERE_WIDE);
+		whereBox->addItem(msg("Artes.WhereTall"), WHERE_TALL);
+		row->addWidget(whereBox, 1);
+		layout->addLayout(row);
+		behindCheck = new QCheckBox(msg("Artes.Behind"), wherePanel);
+		behindCheck->setFocusPolicy(Qt::NoFocus);
+		behindCheck->setToolTip(msg("Artes.BehindHint"));
+		layout->addWidget(behindCheck);
+		connect(whereBox, &QComboBox::currentIndexChanged, this, [this](int index) {
+			Piece *piece = findPiece(selectedId);
+			if (!piece || index < 0) {
+				return;
+			}
+			if (index == WHERE_WIDE) {
+				moveTallLayer(piece, false);
+			}
+			piece->where = index;
+			applyVisible(piece);
+			select(selectedId);
+			setSelectedItems(selectedId);
+		});
+		connect(behindCheck, &QCheckBox::toggled, this, [this](bool on) {
+			Piece *piece = findPiece(selectedId);
+			if (piece) {
+				moveTallLayer(piece, on);
+				setSelectedItems(selectedId);
+			}
+		});
+		wherePanel->setVisible(false);
+		side->addWidget(wherePanel);
+	}
+
+	void loadWherePanel()
+	{
+		Piece *piece = findPiece(selectedId);
+		wherePanel->setVisible(piece != nullptr);
+		if (!piece) {
+			return;
+		}
+		QSignalBlocker blockWhere(whereBox);
+		QSignalBlocker blockBehind(behindCheck);
+		whereBox->setCurrentIndex(piece->where);
+		behindCheck->setChecked(piece->behind);
+		behindCheck->setEnabled(piece->where != WHERE_WIDE);
 	}
 
 	/* Os campos do lower third (só aparecem com uma peça de texto escolhida). */
@@ -2028,8 +2179,9 @@ private:
 	{
 		Piece *piece = findPiece(selectedId);
 		for (int out = 0; out < 2; out++) {
-			sizeFaders[out]->setEnabled(piece != nullptr);
-			if (!piece || piece->items[out].empty()) {
+			bool here = piece && showsIn(piece, out);
+			sizeFaders[out]->setEnabled(here);
+			if (!here || piece->items[out].empty()) {
 				sizeFaders[out]->setTitle(msg("Artes.Size"));
 				sizeFaders[out]->setQuietly(2, 100, 2);
 				continue;
@@ -2108,6 +2260,10 @@ private:
 	bool rebuilding = false;
 	bool panelsLoaded = false;
 
+	QWidget *wherePanel = nullptr;
+	QComboBox *whereBox = nullptr;
+	QCheckBox *behindCheck = nullptr;
+
 	QWidget *textPanel = nullptr;
 	QLineEdit *lineEdits[2] = {};
 	QCheckBox *boldChecks[2] = {};
@@ -2132,6 +2288,9 @@ void CanvasView::mousePressEvent(QMouseEvent *event)
 	/* A de cima primeiro (a última camada). */
 	for (auto it = pieces.rbegin(); it != pieces.rend(); ++it) {
 		Piece *piece = it->get();
+		if (!showsIn(piece, out)) {
+			continue;
+		}
 		for (obs_sceneitem_t *item : piece->items[out]) {
 			struct matrix4 box, inverse;
 			obs_sceneitem_get_box_transform(item, &box);
@@ -2215,6 +2374,7 @@ void shutdown()
 	obs_canvas_t *canvas = pl_vertical_get_canvas();
 	if (canvas) {
 		obs_canvas_set_channel(canvas, CHANNEL, nullptr);
+		obs_canvas_set_channel(canvas, PL_VERTICAL_BACK_CHANNEL, nullptr);
 		obs_canvas_release(canvas);
 	}
 	clearAll();
@@ -2222,6 +2382,8 @@ void shutdown()
 		obs_scene_release(scene);
 		scene = nullptr;
 	}
+	obs_scene_release(backScene);
+	backScene = nullptr;
 }
 
 void frontendEvent(enum obs_frontend_event event, void *)
