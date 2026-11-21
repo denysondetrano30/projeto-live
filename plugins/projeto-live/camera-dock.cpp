@@ -432,6 +432,9 @@ void sortByOrder(std::vector<obs_source_t *> &list)
 /* Arrastou "dragged" e soltou em cima de "target" (antes ou depois dele): guarda a ordem nova. */
 void reorderEntries(const QString &dragged, const QString &target, bool after);
 
+/* Atualiza agora todas as cópias do painel (monitor 1 e monitor 2). */
+void refreshAllNow();
+
 bool entryFlag(obs_source_t *scene, const char *key)
 {
 	obs_data_t *data = obs_source_get_private_settings(scene);
@@ -1395,6 +1398,15 @@ public:
 	/* Refaz a lista agora (depois de criar ou remover uma entrada). */
 	void rebuildNow() { rebuild(); }
 
+	/* Lê as marcas e arruma a fileira agora (depois de encolher, esconder ou trazer de volta). */
+	void refreshNow()
+	{
+		for (Card *card : cards) {
+			card->refresh();
+		}
+		syncHidden();
+	}
+
 	/* Encolhe todas as entradas em tirinhas (o Acompanhar está mostrando as imagens no monitor 2). */
 	void setCompact(bool on)
 	{
@@ -1854,6 +1866,10 @@ void showCardMenu(Card *card, const QPoint &where)
 	} else if (chosen == deleteAction) {
 		deleteEntry(scene);
 	}
+	if (chosen && (chosen == shrinkAction || chosen == hideAction || chosen == cleanAction)) {
+		/* Aparece na hora nos dois monitores (sem esperar o relógio do painel). */
+		refreshAllNow();
+	}
 
 	obs_source_release(scene);
 }
@@ -1904,12 +1920,20 @@ void reorderEntries(const QString &dragged, const QString &target, bool after)
 	}
 }
 
+void refreshAllNow()
+{
+	for (CameraDock *each : instances) {
+		each->refreshNow();
+	}
+}
+
 /* Pílula da coluna das escondidas: traz a entrada de volta para a fileira. */
 void showEntryAgain(const QString &name)
 {
 	obs_source_t *scene = obs_get_source_by_name(name.toUtf8().constData());
 	if (scene) {
 		setEntryFlag(scene, KEY_HIDDEN, false);
+		refreshAllNow();
 		obs_source_release(scene);
 	}
 }
