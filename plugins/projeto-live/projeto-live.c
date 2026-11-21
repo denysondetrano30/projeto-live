@@ -26,6 +26,7 @@
 #include "studio-window.h"
 #include "stream-dock.h"
 #include "vertical-dock.h"
+#include "vertical-pan.h"
 #include "vertical-record.h"
 #include "vertical.h"
 
@@ -67,6 +68,7 @@ bool obs_module_load(void)
 	pl_studio_window_load();
 	pl_artes_load();
 	pl_color_mode_load();
+	pl_vertical_pan_load();
 	pl_projection_start();
 	return true;
 }
@@ -74,6 +76,7 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
 	pl_projection_stop();
+	pl_vertical_pan_unload();
 	pl_artes_unload();
 	pl_studio_window_unload();
 	pl_account_unload();

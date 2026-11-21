@@ -80,6 +80,8 @@ target_sources(
     usb-relay.h
     vertical-dock.cpp
     vertical-dock.h
+    vertical-pan.cpp
+    vertical-pan.h
     vertical-record.c
     vertical-record.h
     vertical.c

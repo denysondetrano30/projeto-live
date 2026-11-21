@@ -101,6 +101,7 @@
 #include "team-panel.h"
 #include "transitions-dialog.h"
 #include "vertical-dock.h"
+#include "vertical-pan.h"
 #include "watch-window.h"
 
 namespace {
@@ -893,6 +894,8 @@ void drawProgramOutput(void *, uint32_t cx, uint32_t cy)
 	}
 	if (beginFit(ovi.base_width, ovi.base_height, cx, cy)) {
 		obs_render_main_texture();
+		/* A guia: a parte do 16:9 que está indo para o vertical (só no No ar). */
+		pl_vertical_pan_draw_guide();
 		endFit();
 	}
 }
@@ -947,7 +950,17 @@ public:
 		info->setAlignment(Qt::AlignCenter);
 		info->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY));
 		center->addWidget(info);
+		/* Deslizar a janela do vertical, logo abaixo da transição. */
+		center->addWidget(pl_vertical_pan_create(this));
 		center->addStretch(1);
+	}
+
+	/* Sem modo estúdio não tem cortar nem transição, mas o deslizar do vertical continua. */
+	void setCutVisible(bool on)
+	{
+		cut->setVisible(on);
+		transition->setVisible(on);
+		info->setVisible(on);
 	}
 
 	/* Nome e duração da transição de agora. */
@@ -1035,7 +1048,7 @@ private:
 		bool studio = obs_frontend_preview_program_mode_active();
 		if (program->isHidden() == studio) {
 			program->setVisible(studio);
-			cutColumn->setVisible(studio);
+			cutColumn->setCutVisible(studio);
 		}
 		/* Telas em pé: o No ar em pé quando o vertical está ligado; a Prévia em pé só no modo estúdio. */
 		bool vertical = pl_vertical_program_wanted();
@@ -1176,6 +1189,12 @@ public:
 		transitionInfo->setAlignment(Qt::AlignCenter);
 		transitionInfo->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY));
 		center->addWidget(transitionInfo);
+		/* Com um monitor só, o deslizar do vertical fica aqui; com o Acompanhar, no monitor 2. */
+		panHolder = new QWidget(this);
+		auto *panLayout = new QVBoxLayout(panHolder);
+		panLayout->setContentsMargins(0, 0, 0, 0);
+		panLayout->addWidget(pl_vertical_pan_create(panHolder));
+		center->addWidget(panHolder);
 		center->addStretch(1);
 		middle->addLayout(center);
 
@@ -1423,6 +1442,9 @@ private:
 		}
 		/* Com o Acompanhar, o cortar e a transição ficam só no monitor 2 (entre a Prévia e o No ar). */
 		bool cutHere = studio && !imagesAway;
+		if (panHolder->isHidden() == !imagesAway) {
+			panHolder->setVisible(!imagesAway);
+		}
 		if (cutButton->isHidden() == cutHere) {
 			cutButton->setVisible(cutHere);
 			transitionButton->setVisible(cutHere);
@@ -1646,6 +1668,7 @@ private:
 	SourcesPanel *sources = nullptr;
 	SourcesPanel *sourcesColumn = nullptr;
 	QWidget *colorPanel = nullptr;
+	QWidget *panHolder = nullptr;
 	QVBoxLayout *rightLayout = nullptr;
 	QHBoxLayout *middleLayout = nullptr;
 	bool colorHere = false;

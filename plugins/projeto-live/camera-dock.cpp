@@ -92,6 +92,7 @@
 
 #include "phone-source.h"
 #include "transitions-dialog.h"
+#include "vertical-pan.h"
 
 namespace {
 
@@ -1837,6 +1838,11 @@ void showCardMenu(Card *card, const QPoint &where)
 	QAction *organizeAction = menu.addAction(msg(sourcesOpener ? "Entries.Sources" : "Entries.Organize"));
 	pl_entry_transition_menu(&menu, scene);
 	menu.addSeparator();
+	QAction *frameAction = nullptr;
+	if (pl_vertical_frame_available(scene)) {
+		frameAction = menu.addAction(msg("Pan.FrameMenu"));
+		menu.addSeparator();
+	}
 	/* Parte B: encolher (tirinha), esconder (sai da fileira) e "vai limpa" (ignora o No programa). */
 	bool shrunk = entryFlag(scene, KEY_SHRUNK);
 	QAction *shrinkAction = menu.addAction(msg(shrunk ? "Entries.Grow" : "Entries.Shrink"));
@@ -1855,6 +1861,8 @@ void showCardMenu(Card *card, const QPoint &where)
 		openAddSource(scene);
 	} else if (chosen == organizeAction) {
 		organizeEntry(scene);
+	} else if (frameAction && chosen == frameAction) {
+		pl_vertical_frame_open(scene, dialogParent());
 	} else if (chosen == shrinkAction) {
 		setEntryFlag(scene, KEY_SHRUNK, !shrunk);
 	} else if (chosen == hideAction) {
