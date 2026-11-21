@@ -1194,6 +1194,8 @@ public:
 		middle->addStretch(0);
 
 		right->addLayout(middle, 5);
+		rightLayout = right;
+		middleLayout = middle;
 
 		/* Modo Cor com um monitor só: cobre o meio da mesa até clicar em "sair". */
 		colorPanel = pl_color_panel_create(this, [this]() {
@@ -1395,6 +1397,8 @@ private:
 		}
 		/* Com o Acompanhar, a imagem fica só no monitor 2; com o modo Cor, ele cobre o meio da mesa. */
 		bool imagesAway = watching || colorHere;
+		/* No modo Cor o meio (vazio) não guarda lugar: o painel ocupa a altura toda. */
+		rightLayout->setStretchFactor(middleLayout, colorHere ? 0 : 5);
 		/* Com o Acompanhar, as entradas ficam só no monitor 2 (as duas telas não repetem nada). */
 		if (entries->isHidden() == !imagesAway) {
 			entries->setVisible(!imagesAway);
@@ -1642,6 +1646,8 @@ private:
 	SourcesPanel *sources = nullptr;
 	SourcesPanel *sourcesColumn = nullptr;
 	QWidget *colorPanel = nullptr;
+	QVBoxLayout *rightLayout = nullptr;
+	QHBoxLayout *middleLayout = nullptr;
 	bool colorHere = false;
 	bool watchingNow = false;
 	int streamShownLive = -1;

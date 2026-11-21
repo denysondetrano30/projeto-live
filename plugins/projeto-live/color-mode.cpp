@@ -25,6 +25,7 @@
 #include <obs-nix-platform.h>
 #endif
 
+#include <graphics/vec2.h>
 #include <graphics/vec3.h>
 #include <graphics/vec4.h>
 
@@ -71,6 +72,7 @@ namespace {
 
 const char *const FILTER_ID = "somun_cor_filter";
 const char *const FILTER_NAME = "somun cor";
+const char *const PREVIEW_LOOK = "somun cor look";
 
 /* A temperatura neutra e quanto o fader anda (em oitavas de Kelvin, de -100 a +100). */
 const double NEUTRAL_KELVIN = 5600.0;
@@ -315,11 +317,29 @@ std::vector<CameraEntry> listCameras()
 /* ------------------------------------------------------------------------- */
 /* Medir a cor média de uma câmera (para "igualar")                           */
 
-bool averageOf(obs_source_t *source, double out[3])
+/* Onde a câmera fica dentro da cena de prévia (encaixada no meio, sem deformar). */
+bool cameraRect(obs_source_t *scene, obs_source_t *camera, float &x, float &y, float &w, float &h)
 {
-	uint32_t w = obs_source_get_width(source);
-	uint32_t h = obs_source_get_height(source);
-	if (!w || !h) {
+	uint32_t sceneW = obs_source_get_width(scene);
+	uint32_t sceneH = obs_source_get_height(scene);
+	uint32_t camW = obs_source_get_width(camera);
+	uint32_t camH = obs_source_get_height(camera);
+	if (!sceneW || !sceneH || !camW || !camH) {
+		return false;
+	}
+	float scale = std::min((float)sceneW / (float)camW, (float)sceneH / (float)camH);
+	w = (float)camW * scale;
+	h = (float)camH * scale;
+	x = ((float)sceneW - w) / 2.0f;
+	y = ((float)sceneH - h) / 2.0f;
+	return true;
+}
+
+/* A cor média da câmera como aparece na tela (com o Look, se ele estiver sendo mostrado). */
+bool averageOf(obs_source_t *source, obs_source_t *camera, double out[3])
+{
+	float x, y, w, h;
+	if (!cameraRect(source, camera, x, y, w, h)) {
 		return false;
 	}
 	const uint32_t cx = 64, cy = 36;
@@ -330,7 +350,7 @@ bool averageOf(obs_source_t *source, double out[3])
 		struct vec4 clear;
 		vec4_zero(&clear);
 		gs_clear(GS_CLEAR_COLOR, &clear, 0.0f, 0);
-		gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
+		gs_ortho(x, x + w, y, y + h, -100.0f, 100.0f);
 		gs_blend_state_push();
 		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
 		obs_source_video_render(source);
@@ -362,38 +382,61 @@ bool averageOf(obs_source_t *source, double out[3])
 	return ok;
 }
 
+/* "Igualar": mede as duas como aparecem na tela. O Look não é uma conta reta, então repete a medida
+ * algumas vezes até chegar perto. */
 struct MatchJob {
-	obs_weak_source_t *reference = nullptr;
-	obs_weak_source_t *camera = nullptr;
+	obs_weak_source_t *reference = nullptr;     /* a câmera de referência */
+	obs_weak_source_t *camera = nullptr;        /* a câmera que vai mudar */
+	obs_weak_source_t *referenceView = nullptr; /* a prévia de cada uma (com ou sem o Look) */
+	obs_weak_source_t *cameraView = nullptr;
+	int round = 0;
 	QPointer<QLabel> status;
 	std::function<void()> done;
 };
+
+const int MATCH_ROUNDS = 4;
+const int MATCH_WAIT_MS = 180;
+
+void matchTask(void *param);
 
 void finishMatch(MatchJob *job, bool ok, const double ref[3], const double cam[3])
 {
 	obs_source_t *camera = obs_weak_source_get_source(job->camera);
 	bool applied = false;
+	bool moved = false;
 	if (camera && ok && ref[0] > 0.002 && ref[2] > 0.002 && cam[0] > 0.002 && cam[2] > 0.002) {
 		double lumaRef = 0.2126 * ref[0] + 0.7152 * ref[1] + 0.0722 * ref[2];
 		double lumaCam = 0.2126 * cam[0] + 0.7152 * cam[1] + 0.0722 * cam[2];
 		if (lumaRef > 0.002 && lumaCam > 0.002) {
 			double octaves = std::log2((ref[0] / ref[2]) / (cam[0] / cam[2]));
-			int cor = readValue(camera, "cor") + (int)std::lround(octaves / KELVIN_SPAN * 100.0);
-			int luz = readValue(camera, "luz") + (int)std::lround(std::log2(lumaRef / lumaCam) * 100.0);
-			writeValue(camera, "cor", std::clamp(cor, -100, 100));
-			writeValue(camera, "luz", std::clamp(luz, -300, 300));
+			int oldCor = readValue(camera, "cor");
+			int oldLuz = readValue(camera, "luz");
+			int cor = std::clamp(oldCor + (int)std::lround(octaves / KELVIN_SPAN * 100.0), -100, 100);
+			int luz =
+				std::clamp(oldLuz + (int)std::lround(std::log2(lumaRef / lumaCam) * 100.0), -300, 300);
+			writeValue(camera, "cor", cor);
+			writeValue(camera, "luz", luz);
 			applied = true;
+			moved = std::abs(cor - oldCor) > 1 || std::abs(luz - oldLuz) > 2;
 		}
 	}
 	obs_source_release(camera);
-	if (job->status) {
-		job->status->setText(applied ? QString() : msg("Color.MatchFailed"));
-	}
 	if (job->done) {
 		job->done();
 	}
+	/* Ainda longe: espera a imagem nova chegar e mede de novo. */
+	if (applied && moved && ++job->round < MATCH_ROUNDS) {
+		QTimer::singleShot(MATCH_WAIT_MS, qApp,
+				   [job]() { obs_queue_task(OBS_TASK_GRAPHICS, matchTask, job, false); });
+		return;
+	}
+	if (job->status) {
+		job->status->setText(applied ? QString() : msg("Color.MatchFailed"));
+	}
 	obs_weak_source_release(job->reference);
 	obs_weak_source_release(job->camera);
+	obs_weak_source_release(job->referenceView);
+	obs_weak_source_release(job->cameraView);
 	delete job;
 }
 
@@ -405,13 +448,17 @@ void matchTask(void *param)
 	bool ok = false;
 	obs_source_t *reference = obs_weak_source_get_source(job->reference);
 	obs_source_t *camera = obs_weak_source_get_source(job->camera);
-	if (reference && camera) {
+	obs_source_t *referenceView = obs_weak_source_get_source(job->referenceView);
+	obs_source_t *cameraView = obs_weak_source_get_source(job->cameraView);
+	if (reference && camera && referenceView && cameraView) {
 		obs_enter_graphics();
-		ok = averageOf(reference, ref.data()) && averageOf(camera, cam.data());
+		ok = averageOf(referenceView, reference, ref.data()) && averageOf(cameraView, camera, cam.data());
 		obs_leave_graphics();
 	}
 	obs_source_release(reference);
 	obs_source_release(camera);
+	obs_source_release(referenceView);
+	obs_source_release(cameraView);
 	QMetaObject::invokeMethod(
 		qApp, [job, ok, ref, cam]() { finishMatch(job, ok, ref.data(), cam.data()); }, Qt::QueuedConnection);
 }
@@ -496,12 +543,18 @@ private:
 	QLabel *value = nullptr;
 };
 
-/* A imagem ao vivo de uma câmera, já com a correção. */
+/* A imagem ao vivo de uma câmera, já com a correção e, se for o caso, com o Look. A câmera fica numa
+ * cena privada só desta prévia, e o Look é um filtro nessa cena: não mexe em nada que vai ao ar. */
 class CameraView : public QWidget {
 public:
 	CameraView(QWidget *parent, obs_source_t *source) : QWidget(parent)
 	{
 		weak = obs_source_get_weak_source(source);
+		previewScene = obs_scene_create_private("somun cor previa");
+		previewItem = obs_scene_add(previewScene, source);
+		obs_sceneitem_set_bounds_type(previewItem, OBS_BOUNDS_SCALE_INNER);
+		obs_sceneitem_set_bounds_alignment(previewItem, OBS_ALIGN_CENTER);
+		fitItem();
 		setAttribute(Qt::WA_PaintOnScreen);
 		setAttribute(Qt::WA_StaticContents);
 		setAttribute(Qt::WA_NoSystemBackground);
@@ -523,10 +576,52 @@ public:
 	~CameraView() override
 	{
 		destroyDisplay();
+		obs_scene_release(previewScene);
 		obs_weak_source_release(weak);
 	}
 
 	QPaintEngine *paintEngine() const override { return nullptr; }
+
+	/* A prévia desta câmera, sem referência (vive enquanto esta tela existir). */
+	obs_source_t *previewSource() const { return obs_scene_get_source(previewScene); }
+
+	/* Mostra (ou não) o Look do momento nesta prévia. */
+	void syncLook(bool withLook)
+	{
+		fitItem();
+		obs_source_t *scene = previewSource();
+		std::string file = pl_look_file().toUtf8().constData();
+		bool enabled = withLook && pl_look_on() && !file.empty();
+		double amount = pl_look_amount() / 100.0;
+		obs_source_t *filter = obs_source_get_filter_by_name(scene, PREVIEW_LOOK);
+		if (!filter) {
+			if (!enabled) {
+				return;
+			}
+			obs_data_t *settings = obs_data_create();
+			obs_data_set_string(settings, "image_path", file.c_str());
+			obs_data_set_double(settings, "clut_amount", amount);
+			filter = obs_source_create_private("clut_filter", PREVIEW_LOOK, settings);
+			obs_data_release(settings);
+			if (!filter) {
+				return;
+			}
+			obs_source_filter_add(scene, filter);
+		} else if (enabled) {
+			obs_data_t *settings = obs_source_get_settings(filter);
+			if (file != obs_data_get_string(settings, "image_path") ||
+			    std::abs(obs_data_get_double(settings, "clut_amount") - amount) > 0.001) {
+				obs_data_set_string(settings, "image_path", file.c_str());
+				obs_data_set_double(settings, "clut_amount", amount);
+				obs_source_update(filter, settings);
+			}
+			obs_data_release(settings);
+		}
+		if (obs_source_enabled(filter) != enabled) {
+			obs_source_set_enabled(filter, enabled);
+		}
+		obs_source_release(filter);
+	}
 
 protected:
 	void paintEvent(QPaintEvent *event) override
@@ -577,21 +672,36 @@ private:
 		if (!source) {
 			return;
 		}
-		uint32_t sw = obs_source_get_width(source);
-		uint32_t sh = obs_source_get_height(source);
-		if (sw && sh && cx && cy) {
-			float scale = std::min((float)cx / (float)sw, (float)cy / (float)sh);
+		obs_source_t *scene = self->previewSource();
+		float x, y, sw, sh;
+		if (cx && cy && cameraRect(scene, source, x, y, sw, sh)) {
+			float scale = std::min((float)cx / sw, (float)cy / sh);
 			int w = std::max((int)std::lround(sw * scale), 1);
 			int h = std::max((int)std::lround(sh * scale), 1);
 			gs_projection_push();
 			gs_viewport_push();
 			gs_set_viewport(((int)cx - w) / 2, ((int)cy - h) / 2, w, h);
-			gs_ortho(0.0f, (float)sw, 0.0f, (float)sh, -100.0f, 100.0f);
-			obs_source_video_render(source);
+			gs_ortho(x, x + sw, y, y + sh, -100.0f, 100.0f);
+			obs_source_video_render(scene);
 			gs_viewport_pop();
 			gs_projection_pop();
 		}
 		obs_source_release(source);
+	}
+
+	/* A câmera ocupa a cena de prévia inteira (a cena tem o tamanho da saída do OBS). */
+	void fitItem()
+	{
+		struct obs_video_info ovi;
+		if (!previewItem || !obs_get_video_info(&ovi) ||
+		    (fittedW == ovi.base_width && fittedH == ovi.base_height)) {
+			return;
+		}
+		fittedW = ovi.base_width;
+		fittedH = ovi.base_height;
+		struct vec2 bounds;
+		vec2_set(&bounds, (float)fittedW, (float)fittedH);
+		obs_sceneitem_set_bounds(previewItem, &bounds);
 	}
 
 	QSize pixelSize() const
@@ -648,6 +758,10 @@ private:
 
 	obs_weak_source_t *weak = nullptr;
 	obs_display_t *display = nullptr;
+	obs_scene_t *previewScene = nullptr;
+	obs_sceneitem_t *previewItem = nullptr;
+	uint32_t fittedW = 0;
+	uint32_t fittedH = 0;
 };
 
 QString kelvinText(int value)
@@ -681,7 +795,10 @@ public:
 		return same;
 	}
 
-	void refresh(obs_source_t *reference);
+	void refresh(obs_source_t *reference, bool withLook);
+
+	/* A prévia desta câmera, sem referência. */
+	obs_source_t *previewSource() const { return view->previewSource(); }
 
 private:
 	void setReference();
@@ -689,6 +806,7 @@ private:
 
 	ColorPanel *panel = nullptr;
 	obs_weak_source_t *weak = nullptr;
+	CameraView *view = nullptr;
 	WordFader *cor = nullptr;
 	WordFader *luz = nullptr;
 	QPushButton *referenceButton = nullptr;
@@ -725,7 +843,10 @@ public:
 		top->addWidget(lookButton);
 		lookCheck = new QCheckBox(msg("Artes.LookOn"), this);
 		lookCheck->setFocusPolicy(Qt::NoFocus);
-		connect(lookCheck, &QCheckBox::toggled, this, [](bool on) { pl_look_set_on(on); });
+		connect(lookCheck, &QCheckBox::toggled, this, [this](bool on) {
+			pl_look_set_on(on);
+			refresh();
+		});
 		top->addWidget(lookCheck);
 		auto *amountLabel = new QLabel(msg("Artes.LookAmount"), this);
 		amountLabel->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY2));
@@ -741,7 +862,18 @@ public:
 		connect(lookAmount, &QSlider::valueChanged, this, [this](int value) {
 			lookValue->setText(QString("%1%").arg(value));
 			pl_look_set_amount(value);
+			refresh();
 		});
+		/* Só nesta tela: compara a câmera sem o Look. Não muda o que vai ao ar. */
+		withoutLookButton = new QPushButton(msg("Color.WithoutLook"), this);
+		withoutLookButton->setCheckable(true);
+		withoutLookButton->setFocusPolicy(Qt::NoFocus);
+		withoutLookButton->setToolTip(msg("Color.WithoutLookHint"));
+		withoutLookButton->setStyleSheet(QString("QPushButton:checked { background: %1; color: %2; }")
+							 .arg(QString(SOMUN_WHITE))
+							 .arg(QString(SOMUN_BLACK)));
+		connect(withoutLookButton, &QPushButton::toggled, this, [this]() { refresh(); });
+		top->addWidget(withoutLookButton);
 		top->addStretch(1);
 		auto *hint = new QLabel(msg("Color.MatchHint"), this);
 		hint->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY));
@@ -806,6 +938,17 @@ public:
 		return reference;
 	}
 
+	/* A prévia de uma câmera, sem referência (nula se ela não estiver no painel). */
+	obs_source_t *previewFor(obs_source_t *camera) const
+	{
+		for (CameraTile *tile : tiles) {
+			if (tile->isSource(camera)) {
+				return tile->previewSource();
+			}
+		}
+		return nullptr;
+	}
+
 protected:
 	void showEvent(QShowEvent *event) override
 	{
@@ -844,6 +987,7 @@ private:
 			QSignalBlocker block(lookCheck);
 			lookCheck->setChecked(pl_look_on());
 		}
+		withoutLookButton->setEnabled(!file.isEmpty() && pl_look_on());
 		if (!lookAmount->isSliderDown() && lookAmount->value() != pl_look_amount()) {
 			QSignalBlocker block(lookAmount);
 			lookAmount->setValue(pl_look_amount());
@@ -879,8 +1023,9 @@ private:
 		}
 
 		obs_source_t *reference = findReference(cameras);
+		bool withLook = !withoutLookButton->isChecked();
 		for (CameraTile *tile : tiles) {
-			tile->refresh(reference);
+			tile->refresh(reference, withLook);
 		}
 		obs_source_release(reference);
 		for (CameraEntry &entry : cameras) {
@@ -892,6 +1037,7 @@ private:
 	QCheckBox *lookCheck = nullptr;
 	QSlider *lookAmount = nullptr;
 	QLabel *lookValue = nullptr;
+	QPushButton *withoutLookButton = nullptr;
 	QLabel *empty = nullptr;
 	QGridLayout *grid = nullptr;
 	QTimer *timer = nullptr;
@@ -908,7 +1054,8 @@ CameraTile::CameraTile(QWidget *parent, ColorPanel *panel, obs_source_t *source,
 	layout->setContentsMargins(8, 8, 8, 8);
 	layout->setSpacing(6);
 
-	layout->addWidget(new CameraView(this, source), 1);
+	view = new CameraView(this, source);
+	layout->addWidget(view, 1);
 
 	auto *head = new QHBoxLayout();
 	auto *name = new QLabel(title, this);
@@ -955,12 +1102,13 @@ CameraTile::CameraTile(QWidget *parent, ColorPanel *panel, obs_source_t *source,
 	};
 }
 
-void CameraTile::refresh(obs_source_t *reference)
+void CameraTile::refresh(obs_source_t *reference, bool withLook)
 {
 	obs_source_t *camera = obs_weak_source_get_source(weak);
 	if (!camera) {
 		return;
 	}
+	view->syncLook(withLook);
 	cor->setQuietly(readValue(camera, "cor"));
 	luz->setQuietly(readValue(camera, "luz"));
 	bool mine = reference == camera;
@@ -990,11 +1138,14 @@ void CameraTile::match()
 {
 	obs_source_t *camera = obs_weak_source_get_source(weak);
 	obs_source_t *reference = panel->currentReference();
-	if (camera && reference && camera != reference) {
+	obs_source_t *referenceView = reference ? panel->previewFor(reference) : nullptr;
+	if (camera && reference && camera != reference && referenceView) {
 		status->clear();
 		auto *job = new MatchJob();
 		job->reference = obs_source_get_weak_source(reference);
 		job->camera = obs_source_get_weak_source(camera);
+		job->referenceView = obs_source_get_weak_source(referenceView);
+		job->cameraView = obs_source_get_weak_source(view->previewSource());
 		job->status = status;
 		QPointer<ColorPanel> owner(panel);
 		job->done = [owner]() {
