@@ -88,6 +88,7 @@
 #include <string>
 #include <vector>
 
+#include "artes.h"
 #include "audio-dock.h"
 #include "camera-dock.h"
 #include "director-dock.h"
@@ -1195,6 +1196,10 @@ public:
 
 		/* Entradas: a mesma lista do painel do OBS (outra cópia, que mostra as mesmas cenas). Com o
 		 * Acompanhar ligado no monitor 2, elas encolhem em tirinhas. */
+		/* Artes: a barra das peças "No programa" (logo, QR code, letterbox), por cima de tudo que vai
+		 * ao ar. Um clique liga, outro desliga; "+" cria; botão direito edita. */
+		right->addWidget(pl_artes_bar_create(this));
+
 		entries = pl_camera_dock_create(this);
 		right->addWidget(entries, 3);
 
@@ -1311,6 +1316,7 @@ private:
 			msg("Studio.TalkKey").arg(keyName.isEmpty() ? msg("TalkKey.NoneShort") : keyName));
 		menu.addSeparator();
 
+		QAction *artes = menu.addAction(msg("Studio.ArtesMenu"));
 		QAction *transitions = menu.addAction(msg("Studio.TransitionsMenu"));
 		QAction *studio = menu.addAction(msg("Studio.StudioMode"));
 		studio->setCheckable(true);
@@ -1337,6 +1343,8 @@ private:
 			refresh();
 		} else if (chosen == talkKey) {
 			pl_talk_key_choose(this);
+		} else if (chosen == artes) {
+			pl_artes_open_editor(this);
 		} else if (chosen == transitions) {
 			pl_transitions_dialog_show(this);
 		} else if (chosen == studio) {

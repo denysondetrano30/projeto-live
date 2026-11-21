@@ -10,6 +10,8 @@ add_library(OBS::projeto-live ALIAS projeto-live)
 target_sources(
   projeto-live
   PRIVATE
+    artes.cpp
+    artes.h
     audio-wizard.cpp
     audio-wizard.h
     caption-source.c

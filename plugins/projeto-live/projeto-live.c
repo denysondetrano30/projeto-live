@@ -9,6 +9,7 @@
 
 #include <obs-module.h>
 
+#include "artes.h"
 #include "audio-dock.h"
 #include "camera-dock.h"
 #include "director-dock.h"
@@ -63,6 +64,7 @@ bool obs_module_load(void)
 	pl_audio_wizard_load();
 	pl_account_load();
 	pl_studio_window_load();
+	pl_artes_load();
 	pl_projection_start();
 	return true;
 }
@@ -70,6 +72,7 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
 	pl_projection_stop();
+	pl_artes_unload();
 	pl_studio_window_unload();
 	pl_account_unload();
 	pl_stats_dock_unload();
