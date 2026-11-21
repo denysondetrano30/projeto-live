@@ -14,8 +14,8 @@
  * - entrada e saída com esmaecer (0,4 s) ou sem animação;
  * - tudo fica salvo junto com o projeto (coleção de cenas) do OBS.
  *
- * Leva 1 (20/11): Imagem (logo, QR code em PNG), Retângulo e Letterbox. A leva 2 traz Texto (lower
- * third), deslizar, Look (LUT), teclas de atalho e vídeo em repetição.
+ * Peças: Imagem (logo, QR code em PNG), Texto (lower third, desenhado num PNG com a Outfit), Retângulo,
+ * Letterbox e Vídeo em repetição. O Look é um LUT nas transições do programa, por baixo das peças.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -44,6 +44,12 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QColor>
+#include <QColorDialog>
+#include <QFile>
+#include <QFont>
+#include <QImage>
+#include <QMetaObject>
+#include <QSlider>
 #include <QContextMenuEvent>
 #include <QDateTime>
 #include <QDialog>
@@ -83,6 +89,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -110,8 +117,19 @@ QString msg(const char *key)
 	return QString::fromUtf8(obs_module_text(key));
 }
 
-enum Kind { KIND_IMAGE = 0, KIND_RECT = 1, KIND_LETTERBOX = 2 };
-enum Anim { ANIM_FADE = 0, ANIM_NONE = 1 };
+enum Kind { KIND_IMAGE = 0, KIND_RECT = 1, KIND_LETTERBOX = 2, KIND_TEXT = 3, KIND_VIDEO = 4 };
+/* Deslizar: de onde a peça vem (a saída volta pelo mesmo lado). */
+enum Anim {
+	ANIM_FADE = 0,
+	ANIM_NONE = 1,
+	ANIM_FROM_LEFT = 2,
+	ANIM_FROM_RIGHT = 3,
+	ANIM_FROM_TOP = 4,
+	ANIM_FROM_BOTTOM = 5
+};
+
+const char *const LOOK_NAME = "somun look";
+const char *const LOOK_KEY = "somun_look";
 
 struct Piece {
 	std::string id;
@@ -129,6 +147,24 @@ struct Piece {
 	qint64 offAt = 0;
 	std::vector<obs_source_t *> sources;     /* donos */
 	std::vector<obs_sceneitem_t *> items[2]; /* com referência */
+
+	/* Texto (lower third): vira um PNG desenhado aqui, com a Outfit. */
+	std::string line1;
+	std::string line2;
+	int size1 = 64;
+	int size2 = 40;
+	bool bold1 = true;
+	bool bold2 = false;
+	std::string textColor = "#F2F2F2";
+	bool barOn = true;
+	std::string barColor = "#141414";
+	int barOpacity = 85;
+	int imageW = 1;
+	int imageH = 1;
+
+	/* Tecla de atalho (aparece em Configurações > Teclas de atalho). */
+	obs_hotkey_id hotkey = OBS_INVALID_HOTKEY_ID;
+	std::string *hotkeyId = nullptr;
 };
 
 obs_scene_t *scenes[2] = {};
@@ -139,6 +175,12 @@ bool loaded = false;
 /* O que a tela "No programa" desenha mesmo desligado (a peça escolhida), lido na thread de vídeo. */
 std::mutex selectedMutex;
 std::vector<obs_sceneitem_t *> selectedItems[2];
+
+/* O Look: um LUT no programa (fica por baixo das peças; não vale em entrada "vai limpa"). */
+std::string lookFile;
+bool lookOn = false;
+int lookAmount = 100;
+std::vector<obs_weak_source_t *> lookSources;
 
 class ArtsBar;
 std::vector<ArtsBar *> bars;
@@ -219,18 +261,57 @@ obs_source_t *makeImage(const std::string &file, const char *name)
 	return source;
 }
 
-/* Esmaecer (0,4 s) ou entrar seco, para cada item da peça. Cada item tem a sua transição. */
+obs_source_t *makeVideo(const std::string &file, const char *name)
+{
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_bool(settings, "is_local_file", true);
+	obs_data_set_string(settings, "local_file", file.c_str());
+	obs_data_set_bool(settings, "looping", true);
+	obs_source_t *source = obs_source_create_private("ffmpeg_source", name, settings);
+	obs_data_release(settings);
+	if (source) {
+		/* A animação de canto não entra no som da live. */
+		obs_source_set_muted(source, true);
+	}
+	return source;
+}
+
+/* A transição de entrada ou de saída. Deslizar: entra vindo do lado escolhido e sai por ele. */
+obs_source_t *makeTransition(int anim, bool show)
+{
+	if (anim == ANIM_FADE) {
+		return obs_source_create_private("fade_transition", "somun esmaecer", nullptr);
+	}
+	const char *in = "up";
+	const char *back = "down";
+	if (anim == ANIM_FROM_LEFT) {
+		in = "right";
+		back = "left";
+	} else if (anim == ANIM_FROM_RIGHT) {
+		in = "left";
+		back = "right";
+	} else if (anim == ANIM_FROM_TOP) {
+		in = "down";
+		back = "up";
+	}
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_string(settings, "direction", show ? in : back);
+	obs_source_t *slide = obs_source_create_private("slide_transition", "somun deslizar", settings);
+	obs_data_release(settings);
+	return slide;
+}
+
+/* Esmaecer, deslizar (0,4 s) ou entrar seco, para cada item da peça. Cada item tem a sua transição. */
 void applyAnim(Piece *piece)
 {
 	for (int out = 0; out < 2; out++) {
 		for (obs_sceneitem_t *item : piece->items[out]) {
 			for (int show = 0; show < 2; show++) {
-				if (piece->anim == ANIM_FADE) {
-					obs_source_t *fade =
-						obs_source_create_private("fade_transition", "somun esmaecer", nullptr);
-					obs_sceneitem_set_transition(item, show == 1, fade);
+				if (piece->anim != ANIM_NONE) {
+					obs_source_t *transition = makeTransition(piece->anim, show == 1);
+					obs_sceneitem_set_transition(item, show == 1, transition);
 					obs_sceneitem_set_transition_duration(item, show == 1, ANIM_MS);
-					obs_source_release(fade);
+					obs_source_release(transition);
 				} else {
 					obs_sceneitem_set_transition(item, show == 1, nullptr);
 				}
@@ -251,6 +332,88 @@ obs_sceneitem_t *addItem(Piece *piece, int out, obs_source_t *source)
 	return item;
 }
 
+/* O arquivo PNG de uma peça de texto. */
+std::string textImagePath(const std::string &id)
+{
+	char *dir = obs_module_config_path("artes");
+	std::string path;
+	if (dir) {
+		os_mkdirs(dir);
+		path = std::string(dir) + "/" + id + ".png";
+		bfree(dir);
+	}
+	return path;
+}
+
+/* Desenha o lower third (até duas linhas e a barra de fundo) num PNG transparente. */
+void renderText(Piece *piece)
+{
+	QString family = somun_font_family();
+	QString first = QString::fromStdString(piece->line1);
+	QString second = QString::fromStdString(piece->line2);
+	QFont font1(family);
+	font1.setPixelSize(std::max(piece->size1, 8));
+	font1.setWeight(piece->bold1 ? QFont::ExtraBold : QFont::Normal);
+	QFont font2(family);
+	font2.setPixelSize(std::max(piece->size2, 8));
+	font2.setWeight(piece->bold2 ? QFont::ExtraBold : QFont::Normal);
+	QFontMetrics metrics1(font1);
+	QFontMetrics metrics2(font2);
+	bool hasSecond = !second.trimmed().isEmpty();
+	int padX = std::max(piece->size1 * 6 / 10, 12);
+	int padY = std::max(piece->size1 * 3 / 10, 8);
+	int gap = hasSecond ? std::max(piece->size2 / 6, 2) : 0;
+	int textW = std::max(metrics1.horizontalAdvance(first), hasSecond ? metrics2.horizontalAdvance(second) : 0);
+	int width = std::max(textW, 40) + padX * 2;
+	int height = metrics1.height() + (hasSecond ? gap + metrics2.height() : 0) + padY * 2;
+
+	QImage image(width, height, QImage::Format_ARGB32_Premultiplied);
+	image.fill(Qt::transparent);
+	QPainter painter(&image);
+	painter.setRenderHint(QPainter::Antialiasing);
+	painter.setRenderHint(QPainter::TextAntialiasing);
+	if (piece->barOn) {
+		QColor bar(QString::fromStdString(piece->barColor));
+		bar.setAlpha(std::clamp(piece->barOpacity, 0, 100) * 255 / 100);
+		painter.fillRect(image.rect(), bar);
+	}
+	painter.setPen(QColor(QString::fromStdString(piece->textColor)));
+	painter.setFont(font1);
+	painter.drawText(padX, padY + metrics1.ascent(), first);
+	if (hasSecond) {
+		painter.setFont(font2);
+		painter.drawText(padX, padY + metrics1.height() + gap + metrics2.ascent(), second);
+	}
+	painter.end();
+
+	piece->file = textImagePath(piece->id);
+	image.save(QString::fromStdString(piece->file), "PNG");
+	piece->imageW = width;
+	piece->imageH = height;
+}
+
+/* O texto mudou: redesenha mantendo a escala e o canto de cima à esquerda em cada saída. */
+void updateText(Piece *piece)
+{
+	int oldW = std::max(piece->imageW, 1);
+	renderText(piece);
+	if (!piece->sources.empty()) {
+		obs_data_t *settings = obs_data_create();
+		obs_data_set_string(settings, "file", piece->file.c_str());
+		obs_source_update(piece->sources[0], settings);
+		obs_data_release(settings);
+	}
+	for (int out = 0; out < 2; out++) {
+		for (obs_sceneitem_t *item : piece->items[out]) {
+			struct vec2 bounds;
+			obs_sceneitem_get_bounds(item, &bounds);
+			float scale = bounds.x / (float)oldW;
+			vec2_set(&bounds, (float)piece->imageW * scale, (float)piece->imageH * scale);
+			obs_sceneitem_set_bounds(item, &bounds);
+		}
+	}
+}
+
 /* Lugar de começo de uma peça nova: canto de cima à direita (logo), dentro da margem segura. */
 void placeDefault(Piece *piece, int out, obs_sceneitem_t *item, obs_source_t *source)
 {
@@ -264,6 +427,10 @@ void placeDefault(Piece *piece, int out, obs_sceneitem_t *item, obs_source_t *so
 	if (piece->kind == KIND_IMAGE && sw && sh) {
 		bh = bw * (float)sh / (float)sw;
 	}
+	if (piece->kind == KIND_TEXT) {
+		bw = std::min((float)piece->imageW * w / (out == OUT_TALL ? 1350.0f : 1920.0f), w * 0.9f);
+		bh = bw * (float)piece->imageH / (float)piece->imageW;
+	}
 	struct vec2 bounds;
 	vec2_set(&bounds, bw, bh);
 	obs_sceneitem_set_bounds_type(item, piece->kind == KIND_RECT ? OBS_BOUNDS_STRETCH : OBS_BOUNDS_SCALE_INNER);
@@ -272,6 +439,8 @@ void placeDefault(Piece *piece, int out, obs_sceneitem_t *item, obs_source_t *so
 	struct vec2 pos;
 	if (piece->kind == KIND_RECT) {
 		vec2_set(&pos, (w - bw) / 2.0f, (h - bh) / 2.0f);
+	} else if (piece->kind == KIND_TEXT) {
+		vec2_set(&pos, w * 0.05f, h * 0.95f - bh); /* lower third: embaixo, à esquerda */
 	} else {
 		vec2_set(&pos, w - margin - bw, margin);
 	}
@@ -315,6 +484,45 @@ void layoutLetterbox(Piece *piece, int out)
 	}
 }
 
+void setOn(Piece *piece, bool on);
+
+/* Tecla de atalho da peça: liga e desliga (vem de outra thread, por isso vai pela fila do Qt). */
+void hotkeyPressed(void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed)
+{
+	if (!pressed || !data) {
+		return;
+	}
+	std::string id = *static_cast<std::string *>(data);
+	QMetaObject::invokeMethod(
+		qApp,
+		[id]() {
+			if (Piece *piece = findPiece(id)) {
+				setOn(piece, !piece->on);
+			}
+		},
+		Qt::QueuedConnection);
+}
+
+std::string hotkeyDescription(const Piece *piece)
+{
+	return msg("Artes.HotkeyName").arg(QString::fromStdString(piece->name)).toUtf8().constData();
+}
+
+void registerHotkey(Piece *piece, obs_data_t *saved)
+{
+	piece->hotkeyId = new std::string(piece->id);
+	std::string name = "somun.arte." + piece->id;
+	piece->hotkey = obs_hotkey_register_frontend(name.c_str(), hotkeyDescription(piece).c_str(), hotkeyPressed,
+						     piece->hotkeyId);
+	if (saved) {
+		obs_data_array_t *keys = obs_data_get_array(saved, "tecla");
+		if (keys) {
+			obs_hotkey_load(piece->hotkey, keys);
+			obs_data_array_release(keys);
+		}
+	}
+}
+
 /* Cria as fontes e os itens da peça nas duas saídas (no lugar guardado, se houver). */
 void buildPiece(Piece *piece, obs_data_t *saved)
 {
@@ -329,9 +537,17 @@ void buildPiece(Piece *piece, obs_data_t *saved)
 			layoutLetterbox(piece, out);
 		}
 	} else {
-		obs_source_t *source = piece->kind == KIND_IMAGE
-					       ? makeImage(piece->file, piece->name.c_str())
-					       : makeColor(piece->color, 400, 225, piece->name.c_str());
+		if (piece->kind == KIND_TEXT) {
+			renderText(piece);
+		}
+		obs_source_t *source = nullptr;
+		if (piece->kind == KIND_IMAGE || piece->kind == KIND_TEXT) {
+			source = makeImage(piece->file, piece->name.c_str());
+		} else if (piece->kind == KIND_VIDEO) {
+			source = makeVideo(piece->file, piece->name.c_str());
+		} else {
+			source = makeColor(piece->color, 400, 225, piece->name.c_str());
+		}
 		if (!source) {
 			return;
 		}
@@ -350,10 +566,17 @@ void buildPiece(Piece *piece, obs_data_t *saved)
 		}
 	}
 	applyAnim(piece);
+	registerHotkey(piece, saved);
 }
 
 void releasePiece(Piece *piece)
 {
+	if (piece->hotkey != OBS_INVALID_HOTKEY_ID) {
+		obs_hotkey_unregister(piece->hotkey);
+		piece->hotkey = OBS_INVALID_HOTKEY_ID;
+	}
+	delete piece->hotkeyId;
+	piece->hotkeyId = nullptr;
 	{
 		std::lock_guard<std::mutex> lock(selectedMutex);
 		for (int out = 0; out < 2; out++) {
@@ -421,6 +644,84 @@ void setOn(Piece *piece, bool on)
 	notifyEditor(false);
 }
 
+/* Põe (ou acerta) o filtro do Look numa fonte do programa. */
+void ensureLook(obs_source_t *source, bool enabled)
+{
+	obs_source_t *filter = obs_source_get_filter_by_name(source, LOOK_NAME);
+	double amount = lookAmount / 100.0;
+	if (!filter) {
+		if (!enabled) {
+			return;
+		}
+		obs_data_t *settings = obs_data_create();
+		obs_data_set_string(settings, "image_path", lookFile.c_str());
+		obs_data_set_double(settings, "clut_amount", amount);
+		filter = obs_source_create_private("clut_filter", LOOK_NAME, settings);
+		obs_data_release(settings);
+		if (!filter) {
+			return;
+		}
+		obs_source_filter_add(source, filter);
+		lookSources.push_back(obs_source_get_weak_source(source));
+	} else if (enabled) {
+		obs_data_t *settings = obs_source_get_settings(filter);
+		if (lookFile != obs_data_get_string(settings, "image_path") ||
+		    std::abs(obs_data_get_double(settings, "clut_amount") - amount) > 0.001) {
+			obs_data_set_string(settings, "image_path", lookFile.c_str());
+			obs_data_set_double(settings, "clut_amount", amount);
+			obs_source_update(filter, settings);
+		}
+		obs_data_release(settings);
+	}
+	if (obs_source_enabled(filter) != enabled) {
+		obs_source_set_enabled(filter, enabled);
+	}
+	obs_source_release(filter);
+}
+
+/* O Look vai em todas as transições do programa (o corte troca de transição por um instante) e na
+ * saída em pé. Entrada "vai limpa" fica sem ele. */
+void applyLook(bool clean)
+{
+	if (lookFile.empty() && lookSources.empty()) {
+		return;
+	}
+	bool enabled = loaded && lookOn && !clean && !lookFile.empty();
+	struct obs_frontend_source_list transitions = {};
+	obs_frontend_get_transitions(&transitions);
+	for (size_t i = 0; i < transitions.sources.num; i++) {
+		ensureLook(transitions.sources.array[i], enabled);
+	}
+	obs_frontend_source_list_free(&transitions);
+	obs_canvas_t *canvas = pl_vertical_get_canvas();
+	if (canvas) {
+		obs_source_t *tall = obs_canvas_get_channel(canvas, 0);
+		if (tall) {
+			ensureLook(tall, enabled);
+			obs_source_release(tall);
+		}
+		obs_canvas_release(canvas);
+	}
+}
+
+/* Tira o filtro do Look de tudo (trocando de projeto ou fechando). */
+void clearLookFilters()
+{
+	for (obs_weak_source_t *weak : lookSources) {
+		obs_source_t *source = obs_weak_source_get_source(weak);
+		if (source) {
+			obs_source_t *filter = obs_source_get_filter_by_name(source, LOOK_NAME);
+			if (filter) {
+				obs_source_filter_remove(source, filter);
+				obs_source_release(filter);
+			}
+			obs_source_release(source);
+		}
+		obs_weak_source_release(weak);
+	}
+	lookSources.clear();
+}
+
 /* A camada vai ao ar nas duas saídas, menos quando a entrada no ar está marcada "vai limpa". */
 void applyChannels()
 {
@@ -449,6 +750,7 @@ void applyChannels()
 		obs_source_release(currentTall);
 		obs_canvas_release(canvas);
 	}
+	applyLook(clean);
 }
 
 void tick()
@@ -491,6 +793,21 @@ void saveLoad(obs_data_t *data, bool saving, void *)
 			obs_data_set_int(item, "segundos", piece->seconds);
 			obs_data_set_int(item, "animacao", piece->anim);
 			obs_data_set_bool(item, "ligada", piece->on && !piece->temporary);
+			obs_data_set_string(item, "linha1", piece->line1.c_str());
+			obs_data_set_string(item, "linha2", piece->line2.c_str());
+			obs_data_set_int(item, "tamanho1", piece->size1);
+			obs_data_set_int(item, "tamanho2", piece->size2);
+			obs_data_set_bool(item, "negrito1", piece->bold1);
+			obs_data_set_bool(item, "negrito2", piece->bold2);
+			obs_data_set_string(item, "cor_texto", piece->textColor.c_str());
+			obs_data_set_bool(item, "barra_ligada", piece->barOn);
+			obs_data_set_string(item, "cor_barra", piece->barColor.c_str());
+			obs_data_set_int(item, "opacidade_barra", piece->barOpacity);
+			if (piece->hotkey != OBS_INVALID_HOTKEY_ID) {
+				obs_data_array_t *keys = obs_hotkey_save(piece->hotkey);
+				obs_data_set_array(item, "tecla", keys);
+				obs_data_array_release(keys);
+			}
 			if (piece->kind != KIND_LETTERBOX) {
 				for (int out = 0; out < 2; out++) {
 					if (piece->items[out].empty()) {
@@ -511,10 +828,26 @@ void saveLoad(obs_data_t *data, bool saving, void *)
 		}
 		obs_data_set_array(data, SAVE_KEY, array);
 		obs_data_array_release(array);
+		obs_data_t *look = obs_data_create();
+		obs_data_set_string(look, "arquivo", lookFile.c_str());
+		obs_data_set_bool(look, "ligado", lookOn);
+		obs_data_set_int(look, "forca", lookAmount);
+		obs_data_set_obj(data, LOOK_KEY, look);
+		obs_data_release(look);
 		return;
 	}
 
 	clearAll();
+	clearLookFilters();
+	lookFile.clear();
+	lookOn = false;
+	lookAmount = 100;
+	if (obs_data_t *look = obs_data_get_obj(data, LOOK_KEY)) {
+		lookFile = obs_data_get_string(look, "arquivo");
+		lookOn = obs_data_get_bool(look, "ligado");
+		lookAmount = std::clamp((int)obs_data_get_int(look, "forca"), 0, 100);
+		obs_data_release(look);
+	}
 	obs_data_array_t *array = obs_data_get_array(data, SAVE_KEY);
 	size_t count = array ? obs_data_array_count(array) : 0;
 	for (size_t i = 0; i < count; i++) {
@@ -532,6 +865,18 @@ void saveLoad(obs_data_t *data, bool saving, void *)
 		piece->seconds = std::max((int)obs_data_get_int(item, "segundos"), 1);
 		piece->anim = (int)obs_data_get_int(item, "animacao");
 		piece->on = obs_data_get_bool(item, "ligada");
+		piece->line1 = obs_data_get_string(item, "linha1");
+		piece->line2 = obs_data_get_string(item, "linha2");
+		if (piece->kind == KIND_TEXT) {
+			piece->size1 = std::clamp((int)obs_data_get_int(item, "tamanho1"), 16, 200);
+			piece->size2 = std::clamp((int)obs_data_get_int(item, "tamanho2"), 16, 200);
+			piece->bold1 = obs_data_get_bool(item, "negrito1");
+			piece->bold2 = obs_data_get_bool(item, "negrito2");
+			piece->textColor = obs_data_get_string(item, "cor_texto");
+			piece->barOn = obs_data_get_bool(item, "barra_ligada");
+			piece->barColor = obs_data_get_string(item, "cor_barra");
+			piece->barOpacity = std::clamp((int)obs_data_get_int(item, "opacidade_barra"), 0, 100);
+		}
 		if (piece->id.empty()) {
 			piece->id = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
 		}
@@ -562,6 +907,19 @@ Piece *createPiece(QWidget *parent, int kind)
 		}
 		piece->file = file.toUtf8().constData();
 		piece->name = QFileInfo(file).completeBaseName().toUtf8().constData();
+	} else if (kind == KIND_VIDEO) {
+		QString file = QFileDialog::getOpenFileName(parent, msg("Artes.ChooseVideo"), QString(),
+							    msg("Artes.VideoFilter"));
+		if (file.isEmpty()) {
+			return nullptr;
+		}
+		piece->file = file.toUtf8().constData();
+		piece->name = QFileInfo(file).completeBaseName().toUtf8().constData();
+	} else if (kind == KIND_TEXT) {
+		piece->name = msg("Artes.Text").toUtf8().constData();
+		piece->line1 = msg("Artes.TextLine1").toUtf8().constData();
+		piece->line2 = msg("Artes.TextLine2").toUtf8().constData();
+		piece->anim = ANIM_FROM_LEFT;
 	} else if (kind == KIND_RECT) {
 		piece->name = msg("Artes.Rect").toUtf8().constData();
 		piece->color = 0xFF141414;
@@ -593,6 +951,16 @@ void duplicatePiece(Piece *source)
 	copy->temporary = source->temporary;
 	copy->seconds = source->seconds;
 	copy->anim = source->anim;
+	copy->line1 = source->line1;
+	copy->line2 = source->line2;
+	copy->size1 = source->size1;
+	copy->size2 = source->size2;
+	copy->bold1 = source->bold1;
+	copy->bold2 = source->bold2;
+	copy->textColor = source->textColor;
+	copy->barOn = source->barOn;
+	copy->barColor = source->barColor;
+	copy->barOpacity = source->barOpacity;
 	/* Começa no mesmo lugar da original. */
 	obs_data_t *saved = obs_data_create();
 	if (source->kind != KIND_LETTERBOX) {
@@ -622,8 +990,13 @@ void deletePiece(const std::string &id)
 {
 	for (auto it = pieces.begin(); it != pieces.end(); ++it) {
 		if ((*it)->id == id) {
+			bool text = (*it)->kind == KIND_TEXT;
+			std::string file = (*it)->file;
 			releasePiece(it->get());
 			pieces.erase(it);
+			if (text) {
+				QFile::remove(QString::fromStdString(file));
+			}
 			break;
 		}
 	}
@@ -688,12 +1061,18 @@ void pieceMenu(const std::string &id, const QPoint &where, QWidget *parent)
 	QMenu *animMenu = menu.addMenu(msg("Artes.Animation"));
 	auto *animGroup = new QActionGroup(&menu);
 	QAction *fade = animMenu->addAction(msg("Artes.AnimFade"));
+	QAction *fromLeft = animMenu->addAction(msg("Artes.AnimLeft"));
+	QAction *fromRight = animMenu->addAction(msg("Artes.AnimRight"));
+	QAction *fromTop = animMenu->addAction(msg("Artes.AnimTop"));
+	QAction *fromBottom = animMenu->addAction(msg("Artes.AnimBottom"));
 	QAction *none = animMenu->addAction(msg("Artes.AnimNone"));
-	for (QAction *action : {fade, none}) {
+	/* Na mesma ordem dos valores de Anim. */
+	QAction *animActions[6] = {fade, none, fromLeft, fromRight, fromTop, fromBottom};
+	for (QAction *action : animActions) {
 		action->setCheckable(true);
 		animGroup->addAction(action);
 	}
-	(piece->anim == ANIM_FADE ? fade : none)->setChecked(true);
+	animActions[std::clamp(piece->anim, 0, 5)]->setChecked(true);
 	menu.addSeparator();
 	QAction *pinned = menu.addAction(msg("Artes.Pinned"));
 	pinned->setCheckable(true);
@@ -716,6 +1095,9 @@ void pieceMenu(const std::string &id, const QPoint &where, QWidget *parent)
 		piece = findPiece(id);
 		if (ok && !text.isEmpty() && piece) {
 			piece->name = text.toUtf8().constData();
+			if (piece->hotkey != OBS_INVALID_HOTKEY_ID) {
+				obs_hotkey_set_description(piece->hotkey, hotkeyDescription(piece).c_str());
+			}
 			notifyBars(true);
 			notifyEditor(true);
 		}
@@ -741,13 +1123,17 @@ void pieceMenu(const std::string &id, const QPoint &where, QWidget *parent)
 			piece->seconds = seconds;
 			notifyBars(false);
 		}
-	} else if (chosen == fade || chosen == none) {
-		piece->anim = chosen == fade ? ANIM_FADE : ANIM_NONE;
-		applyAnim(piece);
 	} else if (chosen == pinned) {
 		piece->pinned = pinned->isChecked();
 		notifyBars(true);
 		notifyEditor(true);
+	} else {
+		for (int i = 0; i < 6; i++) {
+			if (chosen == animActions[i]) {
+				piece->anim = i;
+				applyAnim(piece);
+			}
+		}
 	}
 }
 
@@ -756,13 +1142,23 @@ void addMenu(QWidget *parent, const QPoint &where)
 {
 	QMenu menu(parent);
 	QAction *image = menu.addAction(msg("Artes.AddImage"));
+	QAction *text = menu.addAction(msg("Artes.AddText"));
 	QAction *rect = menu.addAction(msg("Artes.AddRect"));
 	QAction *letterbox = menu.addAction(msg("Artes.AddLetterbox"));
+	QAction *video = menu.addAction(msg("Artes.AddVideo"));
 	QAction *chosen = menu.exec(where);
-	int kind = chosen == image       ? KIND_IMAGE
-		   : chosen == rect      ? KIND_RECT
-		   : chosen == letterbox ? KIND_LETTERBOX
-					 : -1;
+	int kind = -1;
+	if (chosen == image) {
+		kind = KIND_IMAGE;
+	} else if (chosen == text) {
+		kind = KIND_TEXT;
+	} else if (chosen == rect) {
+		kind = KIND_RECT;
+	} else if (chosen == letterbox) {
+		kind = KIND_LETTERBOX;
+	} else if (chosen == video) {
+		kind = KIND_VIDEO;
+	}
 	if (kind < 0) {
 		return;
 	}
@@ -1245,8 +1641,92 @@ private:
 	vec2 itemStart = {};
 };
 
-/* A tela "No programa": as duas saídas lado a lado e, do lado, o Look (leva 2), a lista de peças com o
- * alfinete "à mão" e o "+ adicionar". */
+/* Um fader: nome, barrinha de arrastar e o valor escrito do lado. */
+class Fader : public QWidget {
+public:
+	Fader(QWidget *parent, const QString &title, const QString &unit) : QWidget(parent), unit(unit)
+	{
+		auto *row = new QHBoxLayout(this);
+		row->setContentsMargins(0, 0, 0, 0);
+		row->setSpacing(8);
+		label = new QLabel(title, this);
+		label->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY2));
+		row->addWidget(label);
+		slider = new QSlider(Qt::Horizontal, this);
+		slider->setFocusPolicy(Qt::NoFocus);
+		row->addWidget(slider, 1);
+		value = new QLabel(this);
+		value->setMinimumWidth(46);
+		value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+		row->addWidget(value);
+		connect(slider, &QSlider::valueChanged, this, [this](int current) {
+			showValue(current);
+			if (changed) {
+				changed(current);
+			}
+		});
+	}
+
+	/* Põe o valor sem avisar ninguém (ao escolher outra peça). */
+	void setQuietly(int minimum, int maximum, int current)
+	{
+		QSignalBlocker block(slider);
+		slider->setRange(minimum, maximum);
+		slider->setValue(current);
+		showValue(slider->value());
+	}
+
+	void setTitle(const QString &title) { label->setText(title); }
+
+	int current() const { return slider->value(); }
+
+	std::function<void(int)> changed;
+
+private:
+	void showValue(int current) { value->setText(QString::number(current) + unit); }
+
+	QString unit;
+	QLabel *label = nullptr;
+	QSlider *slider = nullptr;
+	QLabel *value = nullptr;
+};
+
+/* Um botãozinho que mostra a cor escolhida e abre o seletor. */
+class ColorButton : public QPushButton {
+public:
+	explicit ColorButton(QWidget *parent) : QPushButton(parent)
+	{
+		setFixedSize(44, 24);
+		setFocusPolicy(Qt::NoFocus);
+		connect(this, &QPushButton::clicked, this, [this]() {
+			QColor chosen = QColorDialog::getColor(QColor(color), window());
+			if (chosen.isValid()) {
+				setColor(chosen.name());
+				if (changed) {
+					changed(color);
+				}
+			}
+		});
+	}
+
+	void setColor(const QString &value)
+	{
+		color = value;
+		setStyleSheet(QString("QPushButton { background: %1; border: 1px solid %2; border-radius: 4px; }")
+				      .arg(color)
+				      .arg(QString(SOMUN_LINE2)));
+	}
+
+	QString current() const { return color; }
+
+	std::function<void(const QString &)> changed;
+
+private:
+	QString color = "#FFFFFF";
+};
+
+/* A tela "No programa": as duas saídas lado a lado e, do lado, o Look, a lista de peças com o
+ * alfinete "à mão", os campos do texto (quando a peça é de texto) e o "+ adicionar". */
 class EditorDialog : public QDialog {
 public:
 	explicit EditorDialog(QWidget *parent) : QDialog(parent)
@@ -1254,14 +1734,25 @@ public:
 		setWindowTitle(msg("Artes.EditorTitle"));
 		setObjectName("somunWindow");
 		setAttribute(Qt::WA_StyledBackground, true);
-		setStyleSheet(somun_window_style());
-		resize(1300, 640);
+		setStyleSheet(somun_window_style() +
+			      QString("QSlider::groove:horizontal { height: 4px; background: %1; border-radius: 2px; }"
+				      "QSlider::sub-page:horizontal { background: %2; border-radius: 2px; }"
+				      "QSlider::handle:horizontal { background: %3; width: 14px; height: 14px;"
+				      " margin: -5px 0; border-radius: 7px; }"
+				      "QLineEdit { background: %4; border: 1px solid %5; border-radius: 6px;"
+				      " padding: 4px 6px; }")
+				      .arg(QString(SOMUN_LINE2))
+				      .arg(QString(SOMUN_GRAY2))
+				      .arg(QString(SOMUN_WHITE))
+				      .arg(QString(SOMUN_BLACK))
+				      .arg(QString(SOMUN_LINE2)));
+		resize(1400, 800);
 
 		auto *outer = new QHBoxLayout(this);
 		outer->setContentsMargins(14, 12, 14, 14);
 		outer->setSpacing(14);
 
-		/* As duas saídas, cada uma com o seu "menor | maior". */
+		/* As duas saídas, cada uma com o seu fader de tamanho. */
 		for (int out = 0; out < 2; out++) {
 			auto *column = new QVBoxLayout();
 			auto *label = new QLabel(msg(out == OUT_WIDE ? "Artes.Wide" : "Artes.Tall"), this);
@@ -1269,29 +1760,18 @@ public:
 			column->addWidget(label);
 			views[out] = new CanvasView(this, out);
 			column->addWidget(views[out], 1);
-			auto *sizeRow = new QHBoxLayout();
-			sizeRow->addStretch(1);
-			auto *smaller = new QPushButton(msg("Artes.Smaller"), this);
-			auto *bigger = new QPushButton(msg("Artes.Bigger"), this);
-			for (QPushButton *button : {smaller, bigger}) {
-				button->setFocusPolicy(Qt::NoFocus);
-				button->setMinimumWidth(90);
-				sizeRow->addWidget(button);
-			}
-			sizeRow->addStretch(1);
-			column->addLayout(sizeRow);
-			connect(smaller, &QPushButton::clicked, this, [this, out]() { resizeSelected(out, false); });
-			connect(bigger, &QPushButton::clicked, this, [this, out]() { resizeSelected(out, true); });
+			sizeFaders[out] = new Fader(this, msg("Artes.Size"), "%");
+			sizeFaders[out]->changed = [this, out](int value) {
+				resizeSelected(out, value);
+			};
+			column->addWidget(sizeFaders[out]);
 			outer->addLayout(column, out == OUT_WIDE ? 16 : 6);
 		}
 
 		/* Coluna do lado. */
 		auto *side = new QVBoxLayout();
 		side->setSpacing(8);
-		auto *look = new QPushButton(msg("Artes.Look"), this);
-		look->setEnabled(false);
-		look->setToolTip(msg("Artes.LookSoon"));
-		side->addWidget(look);
+		buildLook(side);
 		auto *title = new QLabel(msg("Artes.Pieces"), this);
 		title->setObjectName("somunPanelTitle");
 		side->addWidget(title);
@@ -1309,6 +1789,7 @@ public:
 		empty->setWordWrap(true);
 		empty->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY));
 		side->addWidget(empty);
+		buildTextPanel(side);
 		auto *add = new QPushButton(msg("Artes.Add"), this);
 		somun_make_primary(add);
 		connect(add, &QPushButton::clicked, this,
@@ -1321,8 +1802,13 @@ public:
 		auto *sideHolder = new QWidget(this);
 		sideHolder->setLayout(side);
 		side->setContentsMargins(0, 0, 0, 0);
-		sideHolder->setFixedWidth(280);
+		sideHolder->setFixedWidth(310);
 		outer->addWidget(sideHolder);
+
+		/* O texto é redesenhado logo depois de parar de digitar ou de mexer no fader. */
+		textTimer.setSingleShot(true);
+		textTimer.setInterval(120);
+		connect(&textTimer, &QTimer::timeout, this, [this]() { applyTextPanel(); });
 
 		connect(list, &QListWidget::currentItemChanged, this, [this](QListWidgetItem *current) {
 			if (current && !rebuilding) {
@@ -1346,11 +1832,21 @@ public:
 	/* Escolhe a peça (moldura nas duas saídas e linha da lista). */
 	void select(const std::string &id)
 	{
+		bool changedPiece = id != selectedId || !panelsLoaded;
+		if (changedPiece && textTimer.isActive()) {
+			textTimer.stop();
+			applyTextPanel(); /* não perde o que acabou de digitar na peça anterior */
+		}
 		selectedId = id;
 		for (CanvasView *view : views) {
 			view->selected = id;
 		}
 		setSelectedItems(id);
+		if (changedPiece) {
+			panelsLoaded = true;
+			loadTextPanel();
+		}
+		syncSizeFaders();
 		for (int i = 0; i < list->count(); i++) {
 			if (list->item(i)->data(Qt::UserRole).toString().toStdString() == id &&
 			    list->currentRow() != i) {
@@ -1398,6 +1894,7 @@ public:
 		rebuilding = false;
 		if (!findPiece(selectedId)) {
 			selectedId.clear();
+			panelsLoaded = false; /* a peça foi apagada: os campos do texto somem */
 		}
 		select(selectedId);
 	}
@@ -1427,23 +1924,200 @@ private:
 		}
 	}
 
-	/* "menor | maior": muda o tamanho da peça escolhida nesta saída (letterbox: a altura das barras). */
-	void resizeSelected(int out, bool bigger)
+	/* O Look: o arquivo, liga e desliga, e o fader de força. */
+	void buildLook(QVBoxLayout *side)
+	{
+		auto *title = new QLabel(msg("Artes.Look"), this);
+		title->setObjectName("somunPanelTitle");
+		title->setToolTip(msg("Artes.LookHint"));
+		side->addWidget(title);
+		auto *row = new QHBoxLayout();
+		lookButton = new QPushButton(this);
+		lookButton->setFocusPolicy(Qt::NoFocus);
+		lookButton->setToolTip(msg("Artes.LookHint"));
+		row->addWidget(lookButton, 1);
+		lookCheck = new QCheckBox(msg("Artes.LookOn"), this);
+		lookCheck->setFocusPolicy(Qt::NoFocus);
+		row->addWidget(lookCheck);
+		side->addLayout(row);
+		lookFader = new Fader(this, msg("Artes.LookAmount"), "%");
+		side->addWidget(lookFader);
+		lookFader->setQuietly(0, 100, lookAmount);
+		lookFader->changed = [](int value) {
+			lookAmount = value;
+		};
+		{
+			QSignalBlocker block(lookCheck);
+			lookCheck->setChecked(lookOn);
+		}
+		connect(lookCheck, &QCheckBox::toggled, this, [](bool on) { lookOn = on; });
+		connect(lookButton, &QPushButton::clicked, this, [this]() {
+			QString file = QFileDialog::getOpenFileName(this, msg("Artes.ChooseLook"),
+								    QString::fromStdString(lookFile),
+								    msg("Artes.LookFilter"));
+			if (file.isEmpty()) {
+				return;
+			}
+			lookFile = file.toUtf8().constData();
+			lookOn = true;
+			QSignalBlocker block(lookCheck);
+			lookCheck->setChecked(true);
+			showLookName();
+		});
+		showLookName();
+	}
+
+	void showLookName()
+	{
+		lookButton->setText(lookFile.empty() ? msg("Artes.LookChoose")
+						     : QFileInfo(QString::fromStdString(lookFile)).completeBaseName());
+		lookCheck->setEnabled(!lookFile.empty());
+	}
+
+	/* Os campos do lower third (só aparecem com uma peça de texto escolhida). */
+	void buildTextPanel(QVBoxLayout *side)
+	{
+		textPanel = new QWidget(this);
+		auto *layout = new QVBoxLayout(textPanel);
+		layout->setContentsMargins(0, 4, 0, 4);
+		layout->setSpacing(6);
+		auto *title = new QLabel(msg("Artes.TextTitle"), textPanel);
+		title->setObjectName("somunPanelTitle");
+		layout->addWidget(title);
+		for (int i = 0; i < 2; i++) {
+			auto *line = new QHBoxLayout();
+			lineEdits[i] = new QLineEdit(textPanel);
+			lineEdits[i]->setPlaceholderText(msg(i == 0 ? "Artes.TextLine1" : "Artes.TextLine2"));
+			line->addWidget(lineEdits[i], 1);
+			boldChecks[i] = new QCheckBox(msg("Artes.Bold"), textPanel);
+			boldChecks[i]->setFocusPolicy(Qt::NoFocus);
+			line->addWidget(boldChecks[i]);
+			layout->addLayout(line);
+			lineFaders[i] = new Fader(textPanel, msg("Artes.Size"), "");
+			layout->addWidget(lineFaders[i]);
+			lineFaders[i]->changed = [this](int) {
+				textTimer.start();
+			};
+			connect(lineEdits[i], &QLineEdit::textChanged, this, [this]() { textTimer.start(); });
+			connect(boldChecks[i], &QCheckBox::toggled, this, [this]() { textTimer.start(); });
+		}
+		auto *colors = new QHBoxLayout();
+		auto *colorLabel = new QLabel(msg("Artes.TextColor"), textPanel);
+		colorLabel->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY2));
+		colors->addWidget(colorLabel);
+		textColorButton = new ColorButton(textPanel);
+		textColorButton->changed = [this](const QString &) {
+			textTimer.start();
+		};
+		colors->addWidget(textColorButton);
+		colors->addStretch(1);
+		barCheck = new QCheckBox(msg("Artes.TextBar"), textPanel);
+		barCheck->setFocusPolicy(Qt::NoFocus);
+		connect(barCheck, &QCheckBox::toggled, this, [this]() { textTimer.start(); });
+		colors->addWidget(barCheck);
+		barColorButton = new ColorButton(textPanel);
+		barColorButton->changed = [this](const QString &) {
+			textTimer.start();
+		};
+		colors->addWidget(barColorButton);
+		layout->addLayout(colors);
+		barFader = new Fader(textPanel, msg("Artes.TextOpacity"), "%");
+		barFader->changed = [this](int) {
+			textTimer.start();
+		};
+		layout->addWidget(barFader);
+		textPanel->setVisible(false);
+		side->addWidget(textPanel);
+	}
+
+	/* Põe nos campos os valores da peça de texto escolhida. */
+	void loadTextPanel()
+	{
+		Piece *piece = findPiece(selectedId);
+		bool isText = piece && piece->kind == KIND_TEXT;
+		textPanel->setVisible(isText);
+		if (!isText) {
+			return;
+		}
+		for (int i = 0; i < 2; i++) {
+			QSignalBlocker blockLine(lineEdits[i]);
+			QSignalBlocker blockBold(boldChecks[i]);
+			lineEdits[i]->setText(QString::fromStdString(i == 0 ? piece->line1 : piece->line2));
+			boldChecks[i]->setChecked(i == 0 ? piece->bold1 : piece->bold2);
+			lineFaders[i]->setQuietly(16, 200, i == 0 ? piece->size1 : piece->size2);
+		}
+		QSignalBlocker blockBar(barCheck);
+		barCheck->setChecked(piece->barOn);
+		textColorButton->setColor(QString::fromStdString(piece->textColor));
+		barColorButton->setColor(QString::fromStdString(piece->barColor));
+		barFader->setQuietly(0, 100, piece->barOpacity);
+	}
+
+	/* Leva os campos para a peça e redesenha. */
+	void applyTextPanel()
+	{
+		Piece *piece = findPiece(selectedId);
+		if (!piece || piece->kind != KIND_TEXT) {
+			return;
+		}
+		piece->line1 = lineEdits[0]->text().toUtf8().constData();
+		piece->line2 = lineEdits[1]->text().toUtf8().constData();
+		piece->bold1 = boldChecks[0]->isChecked();
+		piece->bold2 = boldChecks[1]->isChecked();
+		piece->size1 = lineFaders[0]->current();
+		piece->size2 = lineFaders[1]->current();
+		piece->textColor = textColorButton->current().toUtf8().constData();
+		piece->barOn = barCheck->isChecked();
+		piece->barColor = barColorButton->current().toUtf8().constData();
+		piece->barOpacity = barFader->current();
+		updateText(piece);
+		syncSizeFaders();
+	}
+
+	/* Os faders de tamanho mostram a peça escolhida em cada saída. */
+	void syncSizeFaders()
+	{
+		Piece *piece = findPiece(selectedId);
+		for (int out = 0; out < 2; out++) {
+			sizeFaders[out]->setEnabled(piece != nullptr);
+			if (!piece || piece->items[out].empty()) {
+				sizeFaders[out]->setTitle(msg("Artes.Size"));
+				sizeFaders[out]->setQuietly(2, 100, 2);
+				continue;
+			}
+			if (piece->kind == KIND_LETTERBOX) {
+				sizeFaders[out]->setTitle(msg("Artes.BarHeight"));
+				sizeFaders[out]->setQuietly(1, 45, piece->bar[out]);
+				continue;
+			}
+			float w, h;
+			canvasSize(out, w, h);
+			struct vec2 bounds;
+			obs_sceneitem_get_bounds(piece->items[out][0], &bounds);
+			sizeFaders[out]->setTitle(msg("Artes.Size"));
+			sizeFaders[out]->setQuietly(2, 100, (int)std::lround(bounds.x * 100.0f / w));
+		}
+	}
+
+	/* Fader de tamanho: largura da peça em % da saída, a partir do meio (letterbox: altura das barras). */
+	void resizeSelected(int out, int value)
 	{
 		Piece *piece = findPiece(selectedId);
 		if (!piece) {
 			return;
 		}
 		if (piece->kind == KIND_LETTERBOX) {
-			piece->bar[out] = std::clamp(piece->bar[out] + (bigger ? 1 : -1), 1, 45);
+			piece->bar[out] = std::clamp(value, 1, 45);
 			layoutLetterbox(piece, out);
 			return;
 		}
-		float factor = bigger ? 1.1f : 1.0f / 1.1f;
+		float w, h;
+		canvasSize(out, w, h);
 		for (obs_sceneitem_t *item : piece->items[out]) {
 			struct vec2 pos, bounds;
 			obs_sceneitem_get_pos(item, &pos);
 			obs_sceneitem_get_bounds(item, &bounds);
+			float factor = (w * (float)value / 100.0f) / std::max(bounds.x, 1.0f);
 			struct vec2 grown;
 			vec2_set(&grown, std::max(bounds.x * factor, 8.0f), std::max(bounds.y * factor, 8.0f));
 			/* Cresce e encolhe a partir do meio (não sai andando). */
@@ -1478,10 +2152,26 @@ private:
 	}
 
 	CanvasView *views[2] = {};
+	Fader *sizeFaders[2] = {};
 	QListWidget *list = nullptr;
 	QLabel *empty = nullptr;
 	std::string selectedId;
 	bool rebuilding = false;
+	bool panelsLoaded = false;
+
+	QPushButton *lookButton = nullptr;
+	QCheckBox *lookCheck = nullptr;
+	Fader *lookFader = nullptr;
+
+	QWidget *textPanel = nullptr;
+	QLineEdit *lineEdits[2] = {};
+	QCheckBox *boldChecks[2] = {};
+	Fader *lineFaders[2] = {};
+	ColorButton *textColorButton = nullptr;
+	ColorButton *barColorButton = nullptr;
+	QCheckBox *barCheck = nullptr;
+	Fader *barFader = nullptr;
+	QTimer textTimer;
 
 	friend class CanvasView;
 };
@@ -1575,6 +2265,7 @@ void shutdown()
 		return;
 	}
 	loaded = false;
+	clearLookFilters();
 	obs_set_output_source(CHANNEL, nullptr);
 	obs_canvas_t *canvas = pl_vertical_get_canvas();
 	if (canvas) {
@@ -1600,6 +2291,10 @@ void frontendEvent(enum obs_frontend_event event, void *)
 		if (editor) {
 			editor->close();
 		}
+		clearLookFilters();
+		lookFile.clear();
+		lookOn = false;
+		lookAmount = 100;
 		clearAll();
 		notifyBars(true);
 	} else if (event == OBS_FRONTEND_EVENT_EXIT) {
