@@ -209,16 +209,8 @@ private:
 	{
 		size_t used = 0;
 
-		/* Transmissão principal do OBS e os destinos extras. */
-		if (obs_frontend_streaming_active()) {
-			const char *color = "#2fa84f";
-			int kbps = pl_multistream_main_kbps();
-			QString text = QString::fromUtf8(obs_module_text("Stats.Main"));
-			if (kbps > 0) {
-				text += QString(" · %1 Mb/s").arg(QString::number(kbps / 1000.0, 'f', 1));
-			}
-			item(used++)->set(text, color);
-		} else {
+		/* A transmissão é a nossa lista de destinos (parte G): parada, só "Fora do ar". */
+		if (!pl_multistream_active()) {
 			item(used++)->set(QString::fromUtf8(obs_module_text("Stats.Offline")), "#6d6d78");
 		}
 
@@ -276,9 +268,9 @@ private:
 				nullptr);
 		}
 
-		/* Quadros perdidos na transmissão. */
+		/* Quadros perdidos na transmissão do OBS (só no Modo OBS; os destinos do somun entram na G3). */
 		obs_output_t *stream = obs_frontend_get_streaming_output();
-		if (stream) {
+		if (stream && obs_output_active(stream)) {
 			int dropped = obs_output_get_frames_dropped(stream);
 			int total = obs_output_get_total_frames(stream);
 			QString text = QString::fromUtf8(obs_module_text("Stats.Dropped")).arg(dropped);
@@ -286,8 +278,8 @@ private:
 				text += QString(" (%1%)").arg(QString::number(dropped * 100.0 / total, 'f', 1));
 			}
 			item(used++)->set(text, dropped > 0 ? "#e8a33d" : nullptr);
-			obs_output_release(stream);
 		}
+		obs_output_release(stream);
 
 		/* Espaço no disco onde a gravação é salva. */
 		char *path = obs_frontend_get_current_record_output_path();

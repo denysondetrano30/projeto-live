@@ -46,14 +46,14 @@ struct pl_dest_info {
 	char server[PL_DEST_TEXT_MAX];
 	char key[PL_DEST_TEXT_MAX];
 	bool enabled;
-	/* false: mesmo vídeo da transmissão principal (não pesa no PC). */
-	bool own_quality;
-	/* Só com own_quality. */
-	int bitrate_kbps;
 	bool vertical;
-	/* Codificador da qualidade própria ("" = o melhor do PC). */
+	/* Dia (AAAA-MM-DD) em que a chave foi colada: "chave de hoje" ou "chave velha". */
+	char key_date[16];
+	/* Antigos (antes da parte G, 22/11): ficam no arquivo, mas não valem mais. A qualidade agora
+	 * é uma só para todos (pl_multistream_quality_kbps). */
+	bool own_quality;
+	int bitrate_kbps;
 	char encoder[64];
-	/* Tamanho do vertical (0 = 1080x1920 da tela vertical; ex.: 720x1280). */
 	int width;
 	int height;
 };
@@ -65,7 +65,7 @@ struct pl_dest_status {
 	uint64_t total_bytes;
 };
 
-/* Lê destinos.json e passa a seguir o botão "Iniciar transmissão". */
+/* Lê destinos.json. */
 void pl_multistream_load(void);
 void pl_multistream_unload(void);
 
@@ -79,10 +79,19 @@ void pl_multistream_get_status(size_t index, struct pl_dest_status *status);
  */
 void pl_multistream_set_all(const struct pl_dest_info *infos, size_t count);
 
-/* A transmissão principal (Configurações > Transmissão) está no ar? */
-bool pl_multistream_main_live(void);
-/* Velocidade de vídeo da principal, em kbps (0 se não souber). */
-int pl_multistream_main_kbps(void);
+/*
+ * A transmissão do somun live (o botão "Transmitir"). start liga todos os destinos marcados e
+ * devolve quantos são (0 = nenhum marcado, nada acontece). stop para todos.
+ */
+int pl_multistream_start(void);
+void pl_multistream_stop(void);
+bool pl_multistream_active(void);
+/* Segundos desde o "Transmitir" (0 parada). */
+uint64_t pl_multistream_seconds(void);
+
+/* A qualidade de todos os destinos (horizontal e vertical), em kbps. Muda na hora, mesmo no ar. */
+int pl_multistream_quality_kbps(void);
+void pl_multistream_set_quality_kbps(int kbps);
 
 /* Endereço padrão da plataforma ("" se a pessoa precisa colar o da plataforma). */
 const char *pl_multistream_default_server(const char *platform);

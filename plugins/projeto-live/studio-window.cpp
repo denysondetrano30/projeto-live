@@ -93,6 +93,7 @@
 #include "camera-dock.h"
 #include "color-mode.h"
 #include "director-dock.h"
+#include "multistream.h"
 #include "pl-account.h"
 #include "source-row.hpp"
 #include "somun-style.h"
@@ -1533,13 +1534,16 @@ private:
 	/* Topo: "Transmitir" (botão principal branco) vira "● No ar · tempo"; "Gravar" vira "Gravando · tempo". */
 	void updateTop()
 	{
-		bool streaming = obs_frontend_streaming_active();
+		/* A transmissão é a nossa lista de destinos (parte G), não a do OBS. */
+		bool streaming = pl_multistream_active();
 		QString streamText;
 		if (streaming) {
-			obs_output_t *output = obs_frontend_get_streaming_output();
-			QString clock = outputClock(output);
-			obs_output_release(output);
-			streamText = clock.isEmpty() ? msg("Studio.OnAir") : msg("Studio.OnAirClock").arg(clock);
+			uint64_t seconds = pl_multistream_seconds();
+			QString clock = QString("%1:%2:%3")
+						.arg(seconds / 3600, 2, 10, QChar('0'))
+						.arg(seconds / 60 % 60, 2, 10, QChar('0'))
+						.arg(seconds % 60, 2, 10, QChar('0'));
+			streamText = msg("Studio.OnAirClock").arg(clock);
 		} else {
 			streamText = msg("Studio.StreamStart");
 		}
@@ -1591,13 +1595,24 @@ private:
 	/* Parar a transmissão pergunta antes (um clique sem querer derrubaria a live). */
 	void toggleStream()
 	{
-		if (!obs_frontend_streaming_active()) {
-			obs_frontend_streaming_start();
+		if (!pl_multistream_active()) {
+			/* Sem destino marcado não há para onde transmitir: oferece abrir as Configurações. */
+			if (pl_multistream_start() == 0) {
+				QMessageBox box(QMessageBox::Information, msg("Studio.StreamStart"),
+						msg("Studio.NoDestinations"), QMessageBox::NoButton, this);
+				QPushButton *open =
+					box.addButton(msg("Studio.OpenDestinations"), QMessageBox::AcceptRole);
+				box.addButton(QMessageBox::Cancel);
+				box.exec();
+				if (box.clickedButton() == open) {
+					openSettings();
+				}
+			}
 			return;
 		}
 		if (QMessageBox::question(this, msg("Studio.StreamStop"), msg("Studio.StreamStopConfirm")) ==
 		    QMessageBox::Yes) {
-			obs_frontend_streaming_stop();
+			pl_multistream_stop();
 		}
 	}
 

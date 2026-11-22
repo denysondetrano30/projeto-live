@@ -1,24 +1,21 @@
 /*
- * Projeto Live: destinos extras da transmissão (multistream direto do PC, sem serviço no meio).
+ * somun live: a transmissão (multistream direto do PC, sem serviço no meio).
  *
- * A transmissão principal continua sendo a de Configurações > Transmissão. Cada destino extra
- * (YouTube, Facebook, Instagram, TikTok ou outro endereço RTMP) é uma saída "rtmp_output" própria,
- * ligada junto com o botão "Iniciar transmissão" e desligada junto com "Parar transmissão".
+ * Parte G (22/11): a nossa lista de destinos é a DONA da transmissão. O "Transmitir" da tela
+ * Operar chama pl_multistream_start(), que liga todos os destinos marcados; não existe principal
+ * nem secundário, e a transmissão do próprio OBS (Configurações > Transmissão) não é usada (fica
+ * só para o Modo OBS). Uma live só vertical é um destino vertical e pronto.
  *
- * Com a "mesma qualidade da principal", o destino usa o vídeo já comprimido da transmissão
- * principal: o PC comprime uma vez só e manda cópias. Com qualidade própria, o destino ganha um
- * codificador só dele (o melhor que o PC tiver: placa de vídeo primeiro, x264 por último). O áudio
- * é sempre o da principal.
+ * Cada destino (YouTube, Facebook, Instagram, TikTok ou outro endereço RTMP) é uma saída
+ * "rtmp_output" própria. Os horizontais dividem UM codificador (imagem do Programa) e os verticais
+ * outro (tela vertical, vertical.c, 1080x1920); o áudio é um só para todos. Assim 3 destinos
+ * horizontais custam quase o mesmo que 1. A qualidade (Mb/s) é uma só, para horizontal e vertical.
  *
  * Se um destino cair, só ele tenta voltar sozinho (até 20 vezes, a cada 10 s); os outros seguem.
- * Os destinos ficam em destinos.json, na pasta de configuração do plugin.
+ * Os destinos e a qualidade ficam em destinos.json, na pasta de configuração do plugin. Na primeira
+ * vez, a transmissão que estava configurada no OBS vira um destino horizontal da lista.
  *
- * Destinos verticais (Instagram, TikTok ou outro marcado como vertical) recebem a tela vertical
- * (vertical.c), sempre com um codificador próprio (na "mesma qualidade", com a velocidade da
- * principal), em 1080x1920 ou num tamanho menor escolhido (ex.: 720x1280).
- *
- * A lista é editada na aba "Multistream" das Configurações do OBS (stream-dock.cpp) e salva
- * inteira com pl_multistream_set_all.
+ * A lista é editada nas Configurações (stream-dock.cpp) e salva inteira com pl_multistream_set_all.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -33,14 +30,18 @@
 #include <obs-module.h>
 #include <util/darray.h>
 #include <util/platform.h>
+#include <util/config-file.h>
 #include <util/threading.h>
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define RECONNECT_TRIES 20
 #define RECONNECT_SECONDS 10
 #define DEFAULT_KBPS 6000
+#define MIN_KBPS 1000
+#define MAX_KBPS 20000
 #define AUDIO_KBPS 160
 
 struct dest {
@@ -49,9 +50,6 @@ struct dest {
 	/* Só na thread da interface. */
 	obs_output_t *output;
 	obs_service_t *service;
-	/* Codificadores próprios (qualidade própria, ou a principal sem vídeo ou sem som). */
-	obs_encoder_t *own_video;
-	obs_encoder_t *own_audio;
 
 	/* Com state_mutex (os avisos das saídas chegam em outras threads). */
 	enum pl_dest_state state;
@@ -61,9 +59,19 @@ struct dest {
 static DARRAY(struct dest *) dests;
 static pthread_mutex_t state_mutex;
 static bool loaded;
-/* A saída de transmissão do OBS só existe depois que ele termina de abrir e até começar a fechar;
- * antes disso, obs_frontend_get_streaming_output() derruba o OBS. */
+/* O OBS terminou de abrir (a transmissão antiga dele já pode ser lida para a mudança). */
 static bool frontend_ready;
+
+/* A transmissão (só na thread da interface). */
+static bool active;
+static uint64_t started_ns;
+static int quality_kbps = DEFAULT_KBPS;
+/* destinos.json ainda não tinha a qualidade: na primeira vez, traz a transmissão antiga do OBS. */
+static bool needs_migration;
+/* Codificadores divididos: um horizontal, um vertical e um de áudio para todos. */
+static obs_encoder_t *shared_horizontal;
+static obs_encoder_t *shared_vertical;
+static obs_encoder_t *shared_audio;
 
 /* ------------------------------------------------------------------------- */
 /* Plataformas                                                                */
@@ -173,11 +181,7 @@ static void dest_release(struct dest *d)
 		d->output = NULL;
 	}
 	obs_service_release(d->service);
-	obs_encoder_release(d->own_video);
-	obs_encoder_release(d->own_audio);
 	d->service = NULL;
-	d->own_video = NULL;
-	d->own_audio = NULL;
 }
 
 /* O melhor codificador H.264 do PC: placa de vídeo (NVIDIA, AMD, Intel, Mac) e, por último, x264. */
@@ -200,17 +204,6 @@ const char *pl_best_h264_encoder(void)
 	return "obs_x264";
 }
 
-static bool encoder_exists(const char *wanted)
-{
-	const char *id;
-	for (size_t i = 0; wanted && *wanted && obs_enum_encoder_types(i, &id); i++) {
-		if (strcmp(id, wanted) == 0) {
-			return true;
-		}
-	}
-	return false;
-}
-
 void pl_multistream_enum_encoders(pl_encoder_cb callback, void *param)
 {
 	const char *id;
@@ -226,40 +219,37 @@ void pl_multistream_enum_encoders(pl_encoder_cb callback, void *param)
 	}
 }
 
-static obs_encoder_t *create_video_encoder(const struct dest *d, int kbps, video_t *video)
+static void encoder_settings(obs_data_t *settings, const char *id, int kbps)
 {
-	const char *id = encoder_exists(d->info.encoder) ? d->info.encoder : pl_best_h264_encoder();
-	obs_data_t *settings = obs_data_create();
 	obs_data_set_string(settings, "rate_control", "CBR");
 	obs_data_set_int(settings, "bitrate", kbps);
 	obs_data_set_int(settings, "keyint_sec", 2);
 	if (strcmp(id, "obs_x264") == 0) {
 		obs_data_set_string(settings, "preset", "veryfast");
 	}
+}
 
-	char name[PL_DEST_NAME_MAX + 32];
-	snprintf(name, sizeof(name), "Projeto Live: video %s", d->info.name);
+static obs_encoder_t *create_video_encoder(const char *label, int kbps, video_t *video)
+{
+	const char *id = pl_best_h264_encoder();
+	obs_data_t *settings = obs_data_create();
+	encoder_settings(settings, id, kbps);
+	char name[64];
+	snprintf(name, sizeof(name), "somun live: video %s", label);
 	obs_encoder_t *encoder = obs_video_encoder_create(id, name, settings, NULL);
 	obs_data_release(settings);
 	if (encoder) {
 		obs_encoder_set_video(encoder, video);
-		if (d->info.vertical && d->info.width > 0 && d->info.height > 0 &&
-		    (d->info.width != PL_VERTICAL_WIDTH || d->info.height != PL_VERTICAL_HEIGHT)) {
-			obs_encoder_set_scaled_size(encoder, (uint32_t)d->info.width, (uint32_t)d->info.height);
-		}
-		blog(LOG_INFO, "[projeto-live] destino '%s' com codificador próprio %s, %d kbps", d->info.name, id,
-		     kbps);
+		blog(LOG_INFO, "[projeto-live] codificador %s (%s), %d kbps", label, id, kbps);
 	}
 	return encoder;
 }
 
-static obs_encoder_t *create_audio_encoder(const struct dest *d)
+static obs_encoder_t *create_audio_encoder(void)
 {
 	obs_data_t *settings = obs_data_create();
 	obs_data_set_int(settings, "bitrate", AUDIO_KBPS);
-	char name[PL_DEST_NAME_MAX + 32];
-	snprintf(name, sizeof(name), "Projeto Live: audio %s", d->info.name);
-	obs_encoder_t *encoder = obs_audio_encoder_create("ffmpeg_aac", name, settings, 0, NULL);
+	obs_encoder_t *encoder = obs_audio_encoder_create("ffmpeg_aac", "somun live: audio", settings, 0, NULL);
 	obs_data_release(settings);
 	if (encoder) {
 		obs_encoder_set_audio(encoder, obs_get_audio());
@@ -267,15 +257,15 @@ static obs_encoder_t *create_audio_encoder(const struct dest *d)
 	return encoder;
 }
 
-static int encoder_kbps(obs_encoder_t *encoder)
+/* Solta os codificadores divididos (as saídas que ainda os usam seguram a parte delas). */
+static void release_shared_encoders(void)
 {
-	if (!encoder) {
-		return 0;
-	}
-	obs_data_t *settings = obs_encoder_get_settings(encoder);
-	int kbps = (int)obs_data_get_int(settings, "bitrate");
-	obs_data_release(settings);
-	return kbps;
+	obs_encoder_release(shared_horizontal);
+	obs_encoder_release(shared_vertical);
+	obs_encoder_release(shared_audio);
+	shared_horizontal = NULL;
+	shared_vertical = NULL;
+	shared_audio = NULL;
 }
 
 static void dest_start(struct dest *d)
@@ -290,43 +280,32 @@ static void dest_start(struct dest *d)
 		set_state(d, PL_DEST_ERROR, obs_module_text("Stream.Error.Missing"));
 		return;
 	}
-
-	obs_output_t *main_output = frontend_ready ? obs_frontend_get_streaming_output() : NULL;
-	if (!main_output || !obs_output_active(main_output)) {
-		obs_output_release(main_output);
+	if (!active) {
 		set_state(d, PL_DEST_WAITING, NULL);
 		return;
 	}
 
+	/* Os codificadores divididos nascem com o primeiro destino que precisa deles. */
 	bool vertical = d->info.vertical;
-	obs_encoder_t *main_video = obs_output_get_video_encoder(main_output);
-	obs_encoder_t *video = (d->info.own_quality || vertical) ? NULL : main_video;
-	obs_encoder_t *audio = obs_output_get_audio_encoder(main_output, 0);
-	if (!video) {
+	obs_encoder_t **shared = vertical ? &shared_vertical : &shared_horizontal;
+	if (!*shared) {
 		video_t *picture = vertical ? pl_vertical_get_video() : obs_get_video();
 		if (!picture) {
-			obs_output_release(main_output);
 			set_state(d, PL_DEST_ERROR, obs_module_text("Stream.Error.NoVertical"));
 			return;
 		}
-		int kbps = d->info.own_quality ? d->info.bitrate_kbps : encoder_kbps(main_video);
-		d->own_video = create_video_encoder(d, kbps > 0 ? kbps : DEFAULT_KBPS, picture);
-		video = d->own_video;
+		*shared = create_video_encoder(vertical ? "vertical" : "horizontal", quality_kbps, picture);
 	}
-	if (!audio) {
-		d->own_audio = create_audio_encoder(d);
-		audio = d->own_audio;
+	if (!shared_audio) {
+		shared_audio = create_audio_encoder();
 	}
-	obs_output_release(main_output);
-
-	if (!video || !audio) {
-		dest_release(d);
+	if (!*shared || !shared_audio) {
 		set_state(d, PL_DEST_ERROR, obs_module_text("Stream.Error.Encoder"));
 		return;
 	}
 
 	char name[PL_DEST_NAME_MAX + 32];
-	snprintf(name, sizeof(name), "Projeto Live: %s", d->info.name);
+	snprintf(name, sizeof(name), "somun live: %s", d->info.name);
 
 	obs_data_t *service_settings = obs_data_create();
 	obs_data_set_string(service_settings, "server", d->info.server);
@@ -342,8 +321,8 @@ static void dest_start(struct dest *d)
 	}
 
 	obs_output_set_service(d->output, d->service);
-	obs_output_set_video_encoder(d->output, video);
-	obs_output_set_audio_encoder(d->output, audio, 0);
+	obs_output_set_video_encoder(d->output, *shared);
+	obs_output_set_audio_encoder(d->output, shared_audio, 0);
 	obs_output_set_reconnect_settings(d->output, RECONNECT_TRIES, RECONNECT_SECONDS);
 
 	signal_handler_t *signals = obs_output_get_signal_handler(d->output);
@@ -354,7 +333,7 @@ static void dest_start(struct dest *d)
 
 	set_state(d, PL_DEST_CONNECTING, NULL);
 	blog(LOG_INFO, "[projeto-live] ligando o destino '%s' (%s)", d->info.name,
-	     d->own_video ? "qualidade própria" : "mesmo vídeo da principal");
+	     vertical ? "vertical" : "horizontal");
 	if (!obs_output_start(d->output)) {
 		const char *error = obs_output_get_last_error(d->output);
 		char text[PL_DEST_ERROR_MAX];
@@ -392,25 +371,27 @@ static void stop_all(void)
 	}
 }
 
+static void migrate_obs_stream(void);
+
+/* A transmissão do OBS (Configurações > Transmissão) não liga mais os destinos: só o nosso
+ * "Transmitir" (pl_multistream_start). Ela continua existindo sozinha no Modo OBS. */
 static void frontend_event(enum obs_frontend_event event, void *param)
 {
 	UNUSED_PARAMETER(param);
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		frontend_ready = true;
-		break;
-	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
-		start_all();
-		break;
-	case OBS_FRONTEND_EVENT_STREAMING_STOPPING:
-	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
-		stop_all();
+		if (needs_migration) {
+			migrate_obs_stream();
+		}
 		break;
 	case OBS_FRONTEND_EVENT_EXIT:
 		frontend_ready = false;
+		active = false;
 		for (size_t i = 0; i < dests.num; i++) {
 			dest_release(dests.array[i]);
 		}
+		release_shared_encoders();
 		break;
 	default:
 		break;
@@ -448,10 +429,12 @@ static void save_dests(void)
 			obs_data_set_string(item, "encoder", info->encoder);
 			obs_data_set_int(item, "width", info->width);
 			obs_data_set_int(item, "height", info->height);
+			obs_data_set_string(item, "key_date", info->key_date);
 			obs_data_array_push_back(array, item);
 			obs_data_release(item);
 		}
 		obs_data_set_array(data, "destinations", array);
+		obs_data_set_int(data, "quality_kbps", quality_kbps);
 		obs_data_save_json_safe(data, path, "tmp", "bak");
 		obs_data_array_release(array);
 		obs_data_release(data);
@@ -470,6 +453,7 @@ static struct dest *new_dest(const struct pl_dest_info *info)
 	d->info.key[sizeof(d->info.key) - 1] = 0;
 	d->info.id[sizeof(d->info.id) - 1] = 0;
 	d->info.encoder[sizeof(d->info.encoder) - 1] = 0;
+	d->info.key_date[sizeof(d->info.key_date) - 1] = 0;
 	if (!*d->info.id) {
 		char *uuid = os_generate_uuid();
 		copy_text(d->info.id, sizeof(d->info.id), uuid);
@@ -485,7 +469,17 @@ static void load_dests(void)
 	obs_data_t *data = path ? obs_data_create_from_json_file_safe(path, "bak") : NULL;
 	bfree(path);
 	if (!data) {
+		needs_migration = true;
 		return;
+	}
+
+	/* Sem a qualidade, o arquivo é de antes da parte G: traz a transmissão antiga do OBS. */
+	needs_migration = !obs_data_has_user_value(data, "quality_kbps");
+	if (!needs_migration) {
+		quality_kbps = (int)obs_data_get_int(data, "quality_kbps");
+		if (quality_kbps < MIN_KBPS || quality_kbps > MAX_KBPS) {
+			quality_kbps = DEFAULT_KBPS;
+		}
 	}
 
 	obs_data_array_t *array = obs_data_get_array(data, "destinations");
@@ -511,12 +505,113 @@ static void load_dests(void)
 					: pl_multistream_platform_vertical(info.platform);
 		info.width = (int)obs_data_get_int(item, "width");
 		info.height = (int)obs_data_get_int(item, "height");
+		copy_text(info.key_date, sizeof(info.key_date), obs_data_get_string(item, "key_date"));
 		struct dest *d = new_dest(&info);
 		da_push_back(dests, &d);
 		obs_data_release(item);
 	}
 	obs_data_array_release(array);
 	obs_data_release(data);
+}
+
+static void today_text(char *out, size_t size)
+{
+	time_t now = time(NULL);
+	struct tm local;
+#ifdef _WIN32
+	localtime_s(&local, &now);
+#else
+	localtime_r(&now, &local);
+#endif
+	strftime(out, size, "%Y-%m-%d", &local);
+}
+
+static const char *guess_platform(const char *url)
+{
+	if (strstr(url, "youtube.com")) {
+		return "youtube";
+	}
+	if (strstr(url, "facebook.com") || strstr(url, "fbcdn.net")) {
+		return "facebook";
+	}
+	if (strstr(url, "instagram.com")) {
+		return "instagram";
+	}
+	if (strstr(url, "tiktok")) {
+		return "tiktok";
+	}
+	return "custom";
+}
+
+/* A velocidade de vídeo que a pessoa usava na transmissão do OBS (0 se não souber). */
+static int obs_stream_kbps(void)
+{
+	config_t *profile = obs_frontend_get_profile_config();
+	if (!profile) {
+		return 0;
+	}
+	const char *mode = config_get_string(profile, "Output", "Mode");
+	if (mode && strcmp(mode, "Advanced") == 0) {
+		int kbps = 0;
+		char *dir = obs_frontend_get_current_profile_path();
+		if (dir) {
+			char path[1024];
+			snprintf(path, sizeof(path), "%s/streamEncoder.json", dir);
+			obs_data_t *settings = obs_data_create_from_json_file(path);
+			if (settings) {
+				kbps = (int)obs_data_get_int(settings, "bitrate");
+				obs_data_release(settings);
+			}
+			bfree(dir);
+		}
+		return kbps;
+	}
+	return (int)config_get_uint(profile, "SimpleOutput", "VBitrate");
+}
+
+/*
+ * Na primeira vez depois da parte G: a transmissão que estava em Configurações > Transmissão vira
+ * um destino horizontal no topo da lista (para nada parar de funcionar), e a velocidade dela vira a
+ * qualidade de todos. Só endereços RTMP/RTMPS entram (SRT, WHIP etc. ficam só no Modo OBS).
+ */
+static void migrate_obs_stream(void)
+{
+	needs_migration = false;
+
+	int kbps = obs_stream_kbps();
+	if (kbps >= MIN_KBPS && kbps <= MAX_KBPS) {
+		quality_kbps = kbps;
+	}
+
+	obs_service_t *service = obs_frontend_get_streaming_service();
+	const char *url = service ? obs_service_get_connect_info(service, OBS_SERVICE_CONNECT_INFO_SERVER_URL) : NULL;
+	const char *key = service ? obs_service_get_connect_info(service, OBS_SERVICE_CONNECT_INFO_STREAM_KEY) : NULL;
+	bool usable = url && key && *key && strncmp(url, "rtmp", 4) == 0;
+
+	for (size_t i = 0; usable && i < dests.num; i++) {
+		if (strcmp(dests.array[i]->info.server, url) == 0 && strcmp(dests.array[i]->info.key, key) == 0) {
+			usable = false; /* Já está na lista. */
+		}
+	}
+
+	if (usable) {
+		struct pl_dest_info info = {0};
+		const char *platform = guess_platform(url);
+		copy_text(info.platform, sizeof(info.platform), platform);
+		copy_text(info.name, sizeof(info.name),
+			  strcmp(platform, "youtube") == 0    ? "YouTube"
+			  : strcmp(platform, "facebook") == 0 ? "Facebook"
+							      : obs_module_text("Stream.MigratedName"));
+		copy_text(info.server, sizeof(info.server), url);
+		copy_text(info.key, sizeof(info.key), key);
+		info.enabled = true;
+		info.vertical = false;
+		today_text(info.key_date, sizeof(info.key_date));
+		struct dest *d = new_dest(&info);
+		da_insert(dests, 0, &d);
+		blog(LOG_INFO, "[projeto-live] a transmissão do OBS virou o destino '%s'", info.name);
+	}
+	save_dests();
 }
 
 /* ------------------------------------------------------------------------- */
@@ -544,6 +639,8 @@ void pl_multistream_unload(void)
 		dest_release(dests.array[i]);
 		bfree(dests.array[i]);
 	}
+	release_shared_encoders();
+	active = false;
 	da_free(dests);
 	pthread_mutex_destroy(&state_mutex);
 	loaded = false;
@@ -581,15 +678,15 @@ static bool same_info(const struct pl_dest_info *a, const struct pl_dest_info *b
 {
 	return strcmp(a->name, b->name) == 0 && strcmp(a->platform, b->platform) == 0 &&
 	       strcmp(a->server, b->server) == 0 && strcmp(a->key, b->key) == 0 && a->enabled == b->enabled &&
-	       a->own_quality == b->own_quality && a->bitrate_kbps == b->bitrate_kbps && a->vertical == b->vertical &&
-	       strcmp(a->encoder, b->encoder) == 0 && a->width == b->width && a->height == b->height;
+	       a->vertical == b->vertical;
 }
 
 void pl_multistream_set_all(const struct pl_dest_info *infos, size_t count)
 {
 	DARRAY(struct dest *) fresh;
 	da_init(fresh);
-	bool live = frontend_ready && obs_frontend_streaming_active();
+	char today[16];
+	today_text(today, sizeof(today));
 
 	for (size_t i = 0; i < count; i++) {
 		struct dest *d = NULL;
@@ -601,22 +698,28 @@ void pl_multistream_set_all(const struct pl_dest_info *infos, size_t count)
 			}
 		}
 
-		if (d && same_info(&d->info, &infos[i])) {
+		/* A data da chave ("chave de hoje" ou "chave velha") muda quando a chave muda. */
+		struct pl_dest_info info = infos[i];
+		bool new_key = d ? strcmp(d->info.key, info.key) != 0 : !*info.key_date;
+		if (new_key && *info.key) {
+			copy_text(info.key_date, sizeof(info.key_date), today);
+		}
+
+		if (d && same_info(&d->info, &info)) {
 			/* Nada mudou: continua como está (no ar, se estava). */
 		} else if (d) {
-			bool was_running = d->output != NULL;
 			dest_release(d);
-			struct dest *changed = new_dest(&infos[i]);
+			struct dest *changed = new_dest(&info);
 			d->info = changed->info;
 			bfree(changed);
-			if (d->info.enabled && (was_running || live)) {
+			if (d->info.enabled && active) {
 				dest_start(d);
 			} else {
 				set_state(d, d->info.enabled ? PL_DEST_WAITING : PL_DEST_OFF, NULL);
 			}
 		} else {
-			d = new_dest(&infos[i]);
-			if (d->info.enabled && live) {
+			d = new_dest(&info);
+			if (d->info.enabled && active) {
 				dest_start(d);
 			}
 		}
@@ -633,18 +736,79 @@ void pl_multistream_set_all(const struct pl_dest_info *infos, size_t count)
 	save_dests();
 }
 
-bool pl_multistream_main_live(void)
+/* ------------------------------------------------------------------------- */
+/* A transmissão                                                              */
+
+int pl_multistream_start(void)
 {
-	return frontend_ready && obs_frontend_streaming_active();
+	size_t enabled = 0;
+	for (size_t i = 0; i < dests.num; i++) {
+		if (dests.array[i]->info.enabled) {
+			enabled++;
+		}
+	}
+	if (!enabled || active) {
+		return (int)enabled;
+	}
+
+	/* Restos da live anterior saem antes; os codificadores nascem de novo com a qualidade de agora. */
+	for (size_t i = 0; i < dests.num; i++) {
+		dest_release(dests.array[i]);
+	}
+	release_shared_encoders();
+
+	active = true;
+	started_ns = os_gettime_ns();
+	blog(LOG_INFO, "[projeto-live] Transmitir: %zu destino(s), %d kbps", enabled, quality_kbps);
+	start_all();
+	return (int)enabled;
 }
 
-int pl_multistream_main_kbps(void)
+void pl_multistream_stop(void)
 {
-	if (!frontend_ready) {
-		return 0;
+	if (!active) {
+		return;
 	}
-	obs_output_t *main_output = obs_frontend_get_streaming_output();
-	int kbps = main_output ? encoder_kbps(obs_output_get_video_encoder(main_output)) : 0;
-	obs_output_release(main_output);
-	return kbps;
+	active = false;
+	blog(LOG_INFO, "[projeto-live] Parar a transmissão");
+	stop_all();
+}
+
+bool pl_multistream_active(void)
+{
+	return active;
+}
+
+uint64_t pl_multistream_seconds(void)
+{
+	return active ? (os_gettime_ns() - started_ns) / 1000000000ULL : 0;
+}
+
+int pl_multistream_quality_kbps(void)
+{
+	return quality_kbps;
+}
+
+void pl_multistream_set_quality_kbps(int kbps)
+{
+	if (kbps < MIN_KBPS) {
+		kbps = MIN_KBPS;
+	} else if (kbps > MAX_KBPS) {
+		kbps = MAX_KBPS;
+	}
+	if (kbps == quality_kbps) {
+		return;
+	}
+	quality_kbps = kbps;
+	/* No ar, os codificadores mudam a velocidade na hora (CBR aceita). */
+	obs_encoder_t *encoders[] = {shared_horizontal, shared_vertical};
+	for (size_t i = 0; i < 2; i++) {
+		if (encoders[i]) {
+			obs_data_t *settings = obs_data_create();
+			obs_data_set_int(settings, "bitrate", kbps);
+			obs_encoder_update(encoders[i], settings);
+			obs_data_release(settings);
+		}
+	}
+	save_dests();
 }

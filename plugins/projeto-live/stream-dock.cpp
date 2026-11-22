@@ -164,49 +164,6 @@ public:
 		help = new QLabel(this);
 		help->hide();
 
-		/* Qualidade: a mesma da principal ou própria (codificador e Mbps). */
-		auto *qualityBox = new QGroupBox(moduleText("Stream.Quality"), this);
-		auto *qualityLayout = new QVBoxLayout(qualityBox);
-		sameQuality = new QRadioButton(moduleText(start.vertical ? "Multistream.Quality.SameVertical"
-									 : "Stream.Quality.Same"),
-					       qualityBox);
-		ownQuality = new QRadioButton(moduleText("Stream.Quality.Own"), qualityBox);
-		qualityLayout->addWidget(sameQuality);
-		qualityLayout->addWidget(ownQuality);
-
-		auto *ownForm = new QFormLayout();
-		bitrate = new QDoubleSpinBox(qualityBox);
-		bitrate->setRange(0.5, 50.0);
-		bitrate->setSingleStep(0.5);
-		bitrate->setDecimals(1);
-		bitrate->setSuffix(" Mbps");
-		encoder = new QComboBox(qualityBox);
-		encoder->addItem(moduleText("Multistream.Encoder.Auto"), QString());
-		pl_multistream_enum_encoders(
-			[](void *param, const char *id, const char *label) {
-				static_cast<QComboBox *>(param)->addItem(QString::fromUtf8(label),
-									 QString::fromUtf8(id));
-			},
-			encoder);
-		ownForm->addRow(moduleText("Multistream.Bitrate"), bitrate);
-		ownForm->addRow(moduleText("Multistream.Encoder"), encoder);
-		qualityLayout->addLayout(ownForm);
-
-		size = new QComboBox(qualityBox);
-		size->addItem(moduleText("Multistream.Size.Full"), 1080);
-		size->addItem(moduleText("Multistream.Size.Small"), 720);
-		if (start.vertical) {
-			auto *sizeForm = new QFormLayout();
-			sizeForm->addRow(moduleText("Multistream.Size"), size);
-			qualityLayout->addLayout(sizeForm);
-		} else {
-			size->hide();
-		}
-
-		qualityBox->setToolTip(moduleText("Stream.Quality.Help"));
-		layout->addWidget(qualityBox);
-		connect(ownQuality, &QRadioButton::toggled, this, [this](bool) { updateQuality(); });
-
 		auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
 		connect(buttons, &QDialogButtonBox::accepted, this, [this]() { tryAccept(); });
 		connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -222,13 +179,6 @@ public:
 		if (!editing) {
 			applyPlatformDefaults(QString());
 		}
-		sameQuality->setChecked(!start.own_quality);
-		ownQuality->setChecked(start.own_quality);
-		bitrate->setValue(start.bitrate_kbps > 0 ? start.bitrate_kbps / 1000.0 : (start.vertical ? 4.0 : 4.5));
-		int encoderIndex = encoder->findData(QString::fromUtf8(start.encoder));
-		encoder->setCurrentIndex(encoderIndex < 0 ? 0 : encoderIndex);
-		size->setCurrentIndex(start.width > 0 && start.width < 1080 ? 1 : 0);
-		updateQuality();
 		updateHelp();
 
 		connect(platform, &QComboBox::currentIndexChanged, this, [this](int) {
@@ -245,28 +195,10 @@ public:
 		copyText(info.name, sizeof(info.name), name->text().trimmed());
 		copyText(info.server, sizeof(info.server), server->text().trimmed());
 		copyText(info.key, sizeof(info.key), key->text().trimmed());
-		info.own_quality = ownQuality->isChecked();
-		info.bitrate_kbps = (int)(bitrate->value() * 1000.0 + 0.5);
-		copyText(info.encoder, sizeof(info.encoder), encoder->currentData().toString());
-		if (info.vertical && size->currentData().toInt() == 720) {
-			info.width = 720;
-			info.height = 1280;
-		} else {
-			info.width = 0;
-			info.height = 0;
-		}
 		return info;
 	}
 
 private:
-	void updateQuality()
-	{
-		/* O vertical sempre tem codificador próprio: escolher o codificador vale nos dois casos. */
-		bool own = ownQuality->isChecked();
-		bitrate->setEnabled(own);
-		encoder->setEnabled(own || original.vertical);
-	}
-
 	/* Ao trocar de plataforma, troca o nome e o endereço se ainda eram os padrões da anterior. */
 	void applyPlatformDefaults(const QString &previous)
 	{
@@ -312,11 +244,6 @@ private:
 	QLineEdit *server = nullptr;
 	QLineEdit *key = nullptr;
 	QLabel *help = nullptr;
-	QRadioButton *sameQuality = nullptr;
-	QRadioButton *ownQuality = nullptr;
-	QDoubleSpinBox *bitrate = nullptr;
-	QComboBox *encoder = nullptr;
-	QComboBox *size = nullptr;
 	QString lastPlatform;
 };
 
@@ -376,15 +303,6 @@ public:
 			}
 			QString text = QString::fromUtf8(info.name) + QString::fromUtf8("  —  ") +
 				       moduleText(findPlatform(info.platform).textKey);
-			if (info.own_quality) {
-				text += QString::fromUtf8(" · ") +
-					moduleText("Stream.Row.Own").arg(mbps(info.bitrate_kbps));
-			} else if (!vertical) {
-				text += QString::fromUtf8(" · ") + moduleText("Stream.Row.Same");
-			}
-			if (vertical && info.width > 0 && info.width < 1080) {
-				text += QString::fromUtf8(" · 720x1280");
-			}
 			auto *item = new QListWidgetItem(text);
 			item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
 			item->setCheckState(info.enabled ? Qt::Checked : Qt::Unchecked);
@@ -408,7 +326,6 @@ private:
 		snprintf(start.platform, sizeof(start.platform), "%s", vertical ? "instagram" : "youtube");
 		start.vertical = vertical;
 		start.enabled = true;
-		start.bitrate_kbps = vertical ? 4000 : 4500;
 		DestinationDialog dialog(this, start, false);
 		if (dialog.exec() == QDialog::Accepted) {
 			dests.push_back(dialog.result());
@@ -453,14 +370,47 @@ private:
 	bool rebuilding = false;
 };
 
-/* Os destinos extras, embaixo da transmissão principal na aba Transmissão. */
+/*
+ * A transmissão do somun live, no alto da aba Transmissão (parte G): a qualidade de todos os
+ * destinos (um fader com o valor do lado) e as listas de destinos horizontais e verticais. O
+ * "Transmitir" da tela Operar liga todos os marcados. A transmissão do próprio OBS fica embaixo,
+ * valendo só no Modo OBS.
+ */
 class DestinationsSection : public QWidget {
 public:
 	DestinationsSection(QWidget *parent, std::function<void()> onChange) : QWidget(parent), changed(onChange)
 	{
 		auto *layout = new QVBoxLayout(this);
-		layout->setContentsMargins(0, 8, 0, 0);
+		layout->setContentsMargins(0, 0, 0, 8);
 		reload();
+
+		auto *title = new QLabel(moduleText("Multistream.Title"), this);
+		title->setTextFormat(Qt::RichText);
+		title->setWordWrap(true);
+		layout->addWidget(title);
+
+		/* Qualidade: fader de 1 a 12 Mb/s, de meio em meio, com o valor do lado. */
+		auto *qualityLine = new QHBoxLayout();
+		auto *qualityLabel = new QLabel(moduleText("Multistream.Quality"), this);
+		quality = new QSlider(Qt::Horizontal, this);
+		quality->setRange(2, 24);
+		quality->setPageStep(2);
+		quality->setValue(std::clamp((pl_multistream_quality_kbps() + 250) / 500, 2, 24));
+		qualityValue = new QLabel(this);
+		qualityValue->setMinimumWidth(70);
+		qualityLine->addWidget(qualityLabel);
+		qualityLine->addWidget(quality, 1);
+		qualityLine->addWidget(qualityValue);
+		layout->addLayout(qualityLine);
+		auto *qualityTip = new QLabel(moduleText("Multistream.QualityTip"), this);
+		qualityTip->setWordWrap(true);
+		qualityTip->setStyleSheet(QStringLiteral("color: #8C8C8C;"));
+		layout->addWidget(qualityTip);
+		updateQualityText();
+		connect(quality, &QSlider::valueChanged, this, [this](int) {
+			updateQualityText();
+			changed();
+		});
 
 		setToolTip(moduleText("Multistream.Help"));
 
@@ -468,10 +418,17 @@ public:
 		vertical = new DestinationsBox(this, moduleText("Multistream.Vertical"), true, dests, changed);
 		layout->addWidget(horizontal);
 		layout->addWidget(vertical);
+
+		auto *obsTitle = new QLabel(moduleText("Multistream.ObsOnly"), this);
+		obsTitle->setTextFormat(Qt::RichText);
+		obsTitle->setWordWrap(true);
+		obsTitle->setContentsMargins(0, 12, 0, 0);
+		layout->addWidget(obsTitle);
 	}
 
 	void commit()
 	{
+		pl_multistream_set_quality_kbps(quality->value() * 500);
 		pl_multistream_set_all(dests.data(), dests.size());
 		/* Os destinos novos ganharam identificador ao salvar: relê para o próximo "Aplicar". */
 		reload();
@@ -491,8 +448,16 @@ private:
 		}
 	}
 
+	void updateQualityText()
+	{
+		qualityValue->setText(QString::number(quality->value() / 2.0, 'f', 1).replace('.', ',') +
+				      QStringLiteral(" Mb/s"));
+	}
+
 	std::function<void()> changed;
 	std::vector<pl_dest_info> dests;
+	QSlider *quality = nullptr;
+	QLabel *qualityValue = nullptr;
 	DestinationsBox *horizontal = nullptr;
 	DestinationsBox *vertical = nullptr;
 };
@@ -733,6 +698,9 @@ private:
 		auto *content = new QWidget(scroll);
 		auto *layout = new QVBoxLayout(content);
 		layout->setContentsMargins(old->contentsMargins());
+		/* A nossa transmissão vem primeiro; a do OBS (só Modo OBS) fica embaixo. */
+		extra->setParent(content);
+		layout->addWidget(extra);
 		while (QLayoutItem *item = old->takeAt(0)) {
 			if (item->spacerItem()) {
 				/* As molas do fim empurravam tudo para cima: aqui a rolagem cuida disso. */
@@ -746,8 +714,6 @@ private:
 			}
 			delete item;
 		}
-		extra->setParent(content);
-		layout->addWidget(extra);
 		layout->addStretch(1);
 		scroll->setWidget(content);
 		old->setContentsMargins(0, 0, 0, 0);
@@ -809,7 +775,7 @@ public:
 
 	void refresh()
 	{
-		bool live = pl_multistream_main_live();
+		bool live = pl_multistream_active();
 		QStringList parts;
 		QStringList tips;
 		qint64 now = QDateTime::currentMSecsSinceEpoch();
