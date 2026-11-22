@@ -52,6 +52,10 @@ struct dest {
 	/* Com state_mutex (os avisos das saídas chegam em outras threads). */
 	enum pl_dest_state state;
 	char error[PL_DEST_ERROR_MAX];
+	/* Quantas vezes já tentou voltar desde a última queda (zera quando volta ao ar). */
+	int tries;
+	/* Tirado do ar à mão durante a live ("Tirar só este do ar"); volta no próximo Transmitir. */
+	bool paused;
 };
 
 static DARRAY(struct dest *) dests;
@@ -105,6 +109,9 @@ static void on_start(void *param, calldata_t *data)
 {
 	UNUSED_PARAMETER(data);
 	struct dest *d = param;
+	pthread_mutex_lock(&state_mutex);
+	d->tries = 0;
+	pthread_mutex_unlock(&state_mutex);
 	set_state(d, PL_DEST_LIVE, NULL);
 	blog(LOG_INFO, "[projeto-live] destino '%s' no ar", d->info.name);
 }
@@ -113,6 +120,9 @@ static void on_reconnect(void *param, calldata_t *data)
 {
 	UNUSED_PARAMETER(data);
 	struct dest *d = param;
+	pthread_mutex_lock(&state_mutex);
+	d->tries++;
+	pthread_mutex_unlock(&state_mutex);
 	set_state(d, PL_DEST_RECONNECTING, NULL);
 	blog(LOG_WARNING, "[projeto-live] destino '%s' caiu; tentando de novo", d->info.name);
 }
@@ -123,8 +133,11 @@ static void on_stop(void *param, calldata_t *data)
 	long long code = calldata_int(data, "code");
 	const char *last_error = calldata_string(data, "last_error");
 
-	if (code == OBS_OUTPUT_SUCCESS) {
-		set_state(d, d->info.enabled ? PL_DEST_WAITING : PL_DEST_OFF, NULL);
+	pthread_mutex_lock(&state_mutex);
+	bool paused = d->paused;
+	pthread_mutex_unlock(&state_mutex);
+	if (code == OBS_OUTPUT_SUCCESS || paused) {
+		set_state(d, paused ? PL_DEST_PAUSED : d->info.enabled ? PL_DEST_WAITING : PL_DEST_OFF, NULL);
 		blog(LOG_INFO, "[projeto-live] destino '%s' parou", d->info.name);
 		return;
 	}
@@ -485,20 +498,33 @@ static void dest_start(struct dest *d)
 	}
 }
 
+/* Tirado do ar à mão (ou não); zera as tentativas. */
+static void set_paused(struct dest *d, bool paused)
+{
+	pthread_mutex_lock(&state_mutex);
+	d->paused = paused;
+	d->tries = 0;
+	pthread_mutex_unlock(&state_mutex);
+}
+
 /* Para o destino; o aviso "stop" da saída muda o estado quando ela terminar. */
 static void dest_stop(struct dest *d)
 {
+	pthread_mutex_lock(&state_mutex);
+	bool paused = d->paused;
+	pthread_mutex_unlock(&state_mutex);
 	if (d->output && obs_output_active(d->output)) {
 		obs_output_stop(d->output);
 	} else {
 		dest_release(d);
-		set_state(d, d->info.enabled ? PL_DEST_WAITING : PL_DEST_OFF, NULL);
+		set_state(d, paused ? PL_DEST_PAUSED : d->info.enabled ? PL_DEST_WAITING : PL_DEST_OFF, NULL);
 	}
 }
 
 static void start_all(void)
 {
 	for (size_t i = 0; i < dests.num; i++) {
+		set_paused(dests.array[i], false);
 		if (dests.array[i]->info.enabled) {
 			dest_start(dests.array[i]);
 		}
@@ -508,6 +534,7 @@ static void start_all(void)
 static void stop_all(void)
 {
 	for (size_t i = 0; i < dests.num; i++) {
+		set_paused(dests.array[i], false);
 		dest_stop(dests.array[i]);
 	}
 }
@@ -776,8 +803,12 @@ void pl_multistream_get_status(size_t index, struct pl_dest_status *status)
 	pthread_mutex_lock(&state_mutex);
 	status->state = d->state;
 	snprintf(status->error, sizeof(status->error), "%s", d->error);
+	status->tries = d->tries;
+	status->max_tries = RECONNECT_TRIES;
 	pthread_mutex_unlock(&state_mutex);
 	status->total_bytes = d->output ? obs_output_get_total_bytes(d->output) : 0;
+	status->frames_dropped = d->output ? obs_output_get_frames_dropped(d->output) : 0;
+	status->frames_total = d->output ? obs_output_get_total_frames(d->output) : 0;
 }
 
 static bool same_info(const struct pl_dest_info *a, const struct pl_dest_info *b)
@@ -888,4 +919,46 @@ bool pl_multistream_active(void)
 uint64_t pl_multistream_seconds(void)
 {
 	return active ? (os_gettime_ns() - started_ns) / 1000000000ULL : 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Um destino só, durante a live (botão direito na Situação)                  */
+
+void pl_multistream_retry(size_t index)
+{
+	if (!active || index >= dests.num || !dests.array[index]->info.enabled) {
+		return;
+	}
+	struct dest *d = dests.array[index];
+	set_paused(d, false);
+	blog(LOG_INFO, "[projeto-live] destino '%s': tentar de novo agora", d->info.name);
+	dest_start(d);
+}
+
+void pl_multistream_take_off(size_t index)
+{
+	if (!active || index >= dests.num) {
+		return;
+	}
+	struct dest *d = dests.array[index];
+	set_paused(d, true);
+	blog(LOG_INFO, "[projeto-live] destino '%s' tirado do ar (os outros seguem)", d->info.name);
+	dest_stop(d);
+}
+
+int pl_multistream_down_count(void)
+{
+	if (!active) {
+		return 0;
+	}
+	int down = 0;
+	pthread_mutex_lock(&state_mutex);
+	for (size_t i = 0; i < dests.num; i++) {
+		struct dest *d = dests.array[i];
+		if (d->info.enabled && !d->paused && (d->state == PL_DEST_RECONNECTING || d->state == PL_DEST_ERROR)) {
+			down++;
+		}
+	}
+	pthread_mutex_unlock(&state_mutex);
+	return down;
 }

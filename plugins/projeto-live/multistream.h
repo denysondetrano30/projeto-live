@@ -22,8 +22,9 @@ extern "C" {
 #define PL_DEST_ERROR_MAX 256
 
 /*
- * OFF: desmarcado. WAITING: marcado, esperando "Iniciar transmissão". CONNECTING: ligando para a
+ * OFF: desmarcado. WAITING: marcado, esperando "Transmitir". CONNECTING: ligando para a
  * plataforma. LIVE: no ar. RECONNECTING: caiu e está tentando de novo. ERROR: parou com erro.
+ * PAUSED: tirado do ar à mão durante a live (os outros seguem).
  */
 enum pl_dest_state {
 	PL_DEST_OFF,
@@ -32,6 +33,7 @@ enum pl_dest_state {
 	PL_DEST_LIVE,
 	PL_DEST_RECONNECTING,
 	PL_DEST_ERROR,
+	PL_DEST_PAUSED,
 };
 
 /*
@@ -63,6 +65,12 @@ struct pl_dest_status {
 	char error[PL_DEST_ERROR_MAX];
 	/* Enviados desde que ligou (para calcular a velocidade). */
 	uint64_t total_bytes;
+	/* Tentativas de voltar desde a última queda, e o máximo antes de desistir. */
+	int tries;
+	int max_tries;
+	/* Quadros perdidos por este destino (internet fraca) e quadros enviados. */
+	int frames_dropped;
+	int frames_total;
 };
 
 /* Lê destinos.json. */
@@ -88,6 +96,13 @@ void pl_multistream_stop(void);
 bool pl_multistream_active(void);
 /* Segundos desde o "Transmitir" (0 parada). */
 uint64_t pl_multistream_seconds(void);
+
+/* Um destino só, com a live no ar (botão direito na Situação). retry liga de novo na hora (também
+ * o que foi tirado do ar); take_off para só ele, até o próximo Transmitir. */
+void pl_multistream_retry(size_t index);
+void pl_multistream_take_off(size_t index);
+/* Quantos destinos caíram (tentando voltar ou com erro) com a live no ar. */
+int pl_multistream_down_count(void);
 
 /* A taxa de bits de vídeo de todos os destinos (horizontal e vertical), em kbps: a da aba Saída
  * do OBS. Mudanças lá valem no próximo "Transmitir". */

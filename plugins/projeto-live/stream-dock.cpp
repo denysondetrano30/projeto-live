@@ -409,6 +409,8 @@ private:
 			case PL_DEST_ERROR:
 				red = true;
 				return QString::fromUtf8(status.error);
+			case PL_DEST_PAUSED:
+				return moduleText("Stream.State.Paused");
 			default:
 				return QString();
 			}

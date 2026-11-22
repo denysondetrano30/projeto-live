@@ -23,7 +23,10 @@
 
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QAction>
 #include <QLabel>
+#include <QMenu>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QString>
@@ -40,6 +43,7 @@
 #include "phone-video.h"
 #include "pl-sync.h"
 #include "projection-link.h"
+#include "somun-style.h"
 #include "studio-window.h"
 
 namespace {
@@ -76,26 +80,46 @@ public:
 		layout->addWidget(text);
 	}
 
-	void set(const QString &value, const char *color)
+	/*
+	 * hollow: bolinha vazada (só o contorno), usada no destino que caiu. textColor: cor do texto
+	 * (nullptr = a normal). destination: o destino desta linha (-1 = não é destino), para o botão
+	 * direito saber em quem mexer.
+	 */
+	void set(const QString &value, const char *color, bool hollow = false, const char *textColor = nullptr,
+		 int destination = -1)
 	{
+		destIndex = destination;
 		if (text->text() != value) {
 			text->setText(value);
+		}
+		std::string wantedText = textColor ? textColor : "";
+		if (shownTextColor != wantedText) {
+			shownTextColor = wantedText;
+			text->setStyleSheet(textColor ? QString("color: %1;").arg(textColor) : QString());
 		}
 		if (!color) {
 			dot->setVisible(false);
 			return;
 		}
 		dot->setVisible(true);
-		if (shownColor != color) {
-			shownColor = color;
-			dot->setStyleSheet(QString("background: %1; border-radius: 4px;").arg(color));
+		std::string wanted = std::string(color) + (hollow ? "/o" : "");
+		if (shownColor != wanted) {
+			shownColor = wanted;
+			dot->setStyleSheet(hollow ? QString("background: transparent; border: 2px solid %1;"
+							    " border-radius: 4px;")
+							    .arg(color)
+						  : QString("background: %1; border-radius: 4px;").arg(color));
 		}
 	}
+
+	int destination() const { return destIndex; }
 
 private:
 	QLabel *dot = nullptr;
 	QLabel *text = nullptr;
 	std::string shownColor;
+	std::string shownTextColor;
+	int destIndex = -1;
 };
 
 class StatsDock;
@@ -198,11 +222,65 @@ private:
 	{
 		while (items.size() <= index) {
 			auto *created = new Item(this);
+			created->setContextMenuPolicy(Qt::CustomContextMenu);
+			connect(created, &QWidget::customContextMenuRequested, this,
+				[this, created](const QPoint &pos) { destinationMenu(created, pos); });
 			/* Antes do espaçador, para a faixa encher da esquerda para a direita. */
 			row->insertWidget((int)items.size(), created);
 			items.push_back(created);
 		}
 		return items[index];
+	}
+
+	/*
+	 * Botão direito num destino da Situação, com a live no ar (parte G3): tentar de novo agora,
+	 * tirar só este do ar (pergunta antes; os outros seguem) e os quadros perdidos dele.
+	 */
+	void destinationMenu(Item *widget, const QPoint &pos)
+	{
+		int index = widget->destination();
+		if (index < 0 || !pl_multistream_active()) {
+			return;
+		}
+		struct pl_dest_info info;
+		struct pl_dest_status status;
+		if (!pl_multistream_get((size_t)index, &info)) {
+			return;
+		}
+		pl_multistream_get_status((size_t)index, &status);
+		bool paused = status.state == PL_DEST_PAUSED;
+
+		QMenu menu(this);
+		QAction *retry = menu.addAction(
+			QString::fromUtf8(obs_module_text(paused ? "Stats.DestBackOnAir" : "Stats.DestRetry")));
+		QAction *takeOff = nullptr;
+		if (!paused) {
+			takeOff = menu.addAction(QString::fromUtf8(obs_module_text("Stats.DestTakeOff")));
+		}
+		menu.addSeparator();
+		QString dropped = QString::fromUtf8(obs_module_text("Stats.DestDropped")).arg(status.frames_dropped);
+		if (status.frames_total > 0 && status.frames_dropped > 0) {
+			dropped += QString(" (%1%)").arg(
+				QString::number(status.frames_dropped * 100.0 / status.frames_total, 'f', 1)
+					.replace('.', ','));
+		}
+		menu.addAction(dropped)->setEnabled(false);
+
+		QAction *chosen = menu.exec(widget->mapToGlobal(pos));
+		if (!chosen) {
+			return;
+		}
+		if (chosen == retry) {
+			pl_multistream_retry((size_t)index);
+		} else if (takeOff && chosen == takeOff) {
+			QString question = QString::fromUtf8(obs_module_text("Stats.DestTakeOffConfirm"))
+						   .arg(QString::fromUtf8(info.name));
+			if (QMessageBox::question(this, QString::fromUtf8(obs_module_text("Stats.DestTakeOff")),
+						  question) == QMessageBox::Yes) {
+				pl_multistream_take_off((size_t)index);
+			}
+		}
+		refresh();
 	}
 
 	void refresh()
@@ -222,28 +300,67 @@ private:
 			}
 			struct pl_dest_status status;
 			pl_multistream_get_status(i, &status);
-			const char *color = "#6d6d78";
-			if (status.state == PL_DEST_LIVE) {
-				color = "#2fa84f";
-			} else if (status.state == PL_DEST_CONNECTING || status.state == PL_DEST_RECONNECTING) {
-				color = "#e8a33d";
-			} else if (status.state == PL_DEST_ERROR) {
-				color = "#e5352b";
-			}
+
 			/* Velocidade: o que saiu desde a última volta (1 s). */
 			if (lastBytes.size() <= i) {
 				lastBytes.resize(i + 1, 0);
 			}
-			QString text = QString::fromUtf8(info.name);
+			QString speed;
 			if (status.state == PL_DEST_LIVE && lastBytes[i] > 0 && status.total_bytes > lastBytes[i]) {
 				double mbps = (double)(status.total_bytes - lastBytes[i]) * 8.0 / 1000000.0 /
 					      (timer->interval() / 1000.0);
-				text += QString(" · %1 Mb/s").arg(QString::number(mbps, 'f', 1));
+				speed = QString::number(mbps, 'f', 1).replace('.', ',');
 			}
 			lastBytes[i] = status.total_bytes;
+
+			/*
+			 * Parte G3: vermelho só no ar e no erro. No ar = bolinha vermelha cheia + Mb/s; ligando,
+			 * esperando ou tirado do ar = bolinha cinza; caiu = bolinha vermelha vazada e texto
+			 * vermelho. O botão direito mexe só neste destino.
+			 */
+			QString name = QString::fromUtf8(info.name);
+			QString text = name;
+			const char *color = "#6d6d78";
+			bool hollow = false;
+			const char *textColor = nullptr;
+			QString tip;
+			switch (status.state) {
+			case PL_DEST_LIVE:
+				color = SOMUN_RED;
+				if (!speed.isEmpty()) {
+					text = QString::fromUtf8(obs_module_text("Stats.DestLive")).arg(name, speed);
+				}
+				break;
+			case PL_DEST_CONNECTING:
+				text = QString::fromUtf8(obs_module_text("Stats.DestConnecting")).arg(name);
+				break;
+			case PL_DEST_RECONNECTING:
+				color = SOMUN_RED;
+				hollow = true;
+				textColor = SOMUN_RED;
+				text = QString::fromUtf8(obs_module_text("Stats.DestRetrying"))
+					       .arg(name)
+					       .arg(std::max(status.tries, 1))
+					       .arg(status.max_tries);
+				tip = QString::fromUtf8(obs_module_text("Stats.DestRightClick"));
+				break;
+			case PL_DEST_ERROR:
+				color = SOMUN_RED;
+				hollow = true;
+				textColor = SOMUN_RED;
+				text = QString::fromUtf8(obs_module_text("Stats.DestDown")).arg(name);
+				tip = QString::fromUtf8(status.error) + "\n" +
+				      QString::fromUtf8(obs_module_text("Stats.DestRightClick"));
+				break;
+			case PL_DEST_PAUSED:
+				text = QString::fromUtf8(obs_module_text("Stats.DestPaused")).arg(name);
+				break;
+			default:
+				break;
+			}
 			Item *widget = item(used++);
-			widget->set(text, color);
-			widget->setToolTip(QString::fromUtf8(status.error));
+			widget->set(text, color, hollow, textColor, (int)i);
+			widget->setToolTip(tip);
 		}
 
 		/* Gravação. */

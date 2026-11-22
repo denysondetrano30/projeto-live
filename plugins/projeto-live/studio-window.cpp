@@ -1549,6 +1549,8 @@ private:
 	{
 		/* A transmissão é a nossa lista de destinos (parte G), não a do OBS. */
 		bool streaming = pl_multistream_active();
+		/* Parte G3: com destino caído, o topo diz quantos ("· 1 caiu") e a letra fica vermelha. */
+		int down = streaming ? pl_multistream_down_count() : 0;
 		QString streamText;
 		if (streaming) {
 			uint64_t seconds = pl_multistream_seconds();
@@ -1557,23 +1559,28 @@ private:
 						.arg(seconds / 60 % 60, 2, 10, QChar('0'))
 						.arg(seconds % 60, 2, 10, QChar('0'));
 			streamText = msg("Studio.OnAirClock").arg(clock);
+			if (down > 0) {
+				streamText += msg(down == 1 ? "Studio.OnAirDownOne" : "Studio.OnAirDownMany").arg(down);
+			}
 		} else {
 			streamText = msg("Studio.StreamStart");
 		}
 		if (streamButton->text() != streamText) {
 			streamButton->setText(streamText);
 		}
-		if (streamShownLive != (int)streaming) {
-			streamShownLive = (int)streaming;
+		int shown = streaming ? (down > 0 ? 2 : 1) : 0;
+		if (streamShownLive != shown) {
+			streamShownLive = shown;
 			if (streaming) {
 				streamButton->setIcon(redDot());
-				streamButton->setToolTip(msg("Studio.StreamStopHint"));
+				streamButton->setToolTip(
+					msg(down > 0 ? "Studio.StreamDownHint" : "Studio.StreamStopHint"));
 				streamButton->setStyleSheet(
 					QString("QPushButton { background: %1; color: %2; border: 1px"
 						" solid %3; border-radius: 6px; padding: 4px 12px;"
 						" font-weight: 600; }")
 						.arg(QString(SOMUN_PANEL2))
-						.arg(QString(SOMUN_TEXT))
+						.arg(QString(down > 0 ? SOMUN_RED : SOMUN_TEXT))
 						.arg(QString(SOMUN_RED)));
 			} else {
 				streamButton->setIcon(QIcon());
