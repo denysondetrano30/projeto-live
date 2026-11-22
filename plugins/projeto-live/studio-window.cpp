@@ -94,6 +94,7 @@
 #include "color-mode.h"
 #include "director-dock.h"
 #include "multistream.h"
+#include "stream-dock.h"
 #include "pl-account.h"
 #include "source-row.hpp"
 #include "somun-style.h"
@@ -1123,6 +1124,15 @@ public:
 		streamButton->setMinimumHeight(32);
 		streamButton->setFocusPolicy(Qt::NoFocus);
 		connect(streamButton, &QPushButton::clicked, this, [this]() { toggleStream(); });
+		/* Botão direito no Transmitir: a janela Destinos (parte G2). */
+		streamButton->setContextMenuPolicy(Qt::CustomContextMenu);
+		connect(streamButton, &QPushButton::customContextMenuRequested, this, [this](const QPoint &pos) {
+			QMenu menu(this);
+			QAction *open = menu.addAction(msg("Studio.Destinations"));
+			if (menu.exec(streamButton->mapToGlobal(pos)) == open) {
+				pl_destinations_window_open(this);
+			}
+		});
 		top->addWidget(streamButton);
 		moreButton = new QPushButton(QString::fromUtf8("⋯"), this);
 		moreButton->setMinimumSize(40, 32);
@@ -1362,6 +1372,7 @@ private:
 		studio->setToolTip(msg("Studio.StudioModeHint"));
 		menu.addSeparator();
 
+		QAction *destinations = menu.addAction(msg("Studio.Destinations"));
 		QAction *settings = menu.addAction(msg("Studio.Settings"));
 		QAction *toObs = menu.addAction(msg("Studio.ToObs"));
 		/* Os menus do OBS (Arquivo, Editar, Visualizar...): os mesmos, não uma cópia. */
@@ -1390,6 +1401,8 @@ private:
 			pl_transitions_dialog_show(this);
 		} else if (chosen == studio) {
 			obs_frontend_set_preview_program_mode(studio->isChecked());
+		} else if (chosen == destinations) {
+			pl_destinations_window_open(this);
 		} else if (chosen == settings) {
 			openSettings();
 		} else if (chosen == toObs) {
@@ -1596,7 +1609,7 @@ private:
 	void toggleStream()
 	{
 		if (!pl_multistream_active()) {
-			/* Sem destino marcado não há para onde transmitir: oferece abrir as Configurações. */
+			/* Sem destino marcado não há para onde transmitir: oferece abrir a janela Destinos. */
 			if (pl_multistream_start() == 0) {
 				QMessageBox box(QMessageBox::Information, msg("Studio.StreamStart"),
 						msg("Studio.NoDestinations"), QMessageBox::NoButton, this);
@@ -1605,7 +1618,7 @@ private:
 				box.addButton(QMessageBox::Cancel);
 				box.exec();
 				if (box.clickedButton() == open) {
-					openSettings();
+					pl_destinations_window_open(this);
 				}
 			}
 			return;

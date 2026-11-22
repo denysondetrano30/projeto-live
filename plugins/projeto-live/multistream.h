@@ -89,9 +89,9 @@ bool pl_multistream_active(void);
 /* Segundos desde o "Transmitir" (0 parada). */
 uint64_t pl_multistream_seconds(void);
 
-/* A qualidade de todos os destinos (horizontal e vertical), em kbps. Muda na hora, mesmo no ar. */
+/* A taxa de bits de vídeo de todos os destinos (horizontal e vertical), em kbps: a da aba Saída
+ * do OBS. Mudanças lá valem no próximo "Transmitir". */
 int pl_multistream_quality_kbps(void);
-void pl_multistream_set_quality_kbps(int kbps);
 
 /* Endereço padrão da plataforma ("" se a pessoa precisa colar o da plataforma). */
 const char *pl_multistream_default_server(const char *platform);

@@ -29,6 +29,10 @@
 #include <obs-module.h>
 
 #include <QAbstractButton>
+#include <QAbstractItemModel>
+#include <QAction>
+#include <QBrush>
+#include <QColor>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -48,11 +52,13 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMainWindow>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -72,6 +78,7 @@
 #include "intercom-audio.h"
 #include "intercom.h"
 #include "multistream.h"
+#include "somun-style.h"
 #include "vertical-record.h"
 #include "vertical.h"
 
@@ -138,10 +145,12 @@ public:
 
 		platform = new QComboBox(this);
 		for (const Platform &item : platforms) {
-			if (start.vertical ? item.vertical : item.horizontal) {
-				platform->addItem(moduleText(item.textKey), QString::fromUtf8(item.id));
-			}
+			platform->addItem(moduleText(item.textKey), QString::fromUtf8(item.id));
 		}
+		/* Horizontal recebe o No ar; vertical, o No ar vertical. */
+		format = new QComboBox(this);
+		format->addItem(moduleText("Stream.Format.Horizontal"), false);
+		format->addItem(moduleText("Stream.Format.Vertical"), true);
 		name = new QLineEdit(this);
 		name->setMaxLength(PL_DEST_NAME_MAX - 1);
 		server = new QLineEdit(this);
@@ -154,6 +163,7 @@ public:
 			[this](bool on) { key->setEchoMode(on ? QLineEdit::Normal : QLineEdit::Password); });
 
 		form->addRow(moduleText("Stream.Platform"), platform);
+		form->addRow(moduleText("Stream.Format"), format);
 		form->addRow(moduleText("Stream.Name"), name);
 		form->addRow(moduleText("Stream.Server"), server);
 		form->addRow(moduleText("Stream.Key"), key);
@@ -172,6 +182,7 @@ public:
 		/* Preenche com o destino atual. */
 		int index = platform->findData(QString::fromUtf8(start.platform));
 		platform->setCurrentIndex(index < 0 ? 0 : index);
+		format->setCurrentIndex(start.vertical ? 1 : 0);
 		lastPlatform = platform->currentData().toString();
 		name->setText(QString::fromUtf8(start.name));
 		server->setText(QString::fromUtf8(start.server));
@@ -195,11 +206,12 @@ public:
 		copyText(info.name, sizeof(info.name), name->text().trimmed());
 		copyText(info.server, sizeof(info.server), server->text().trimmed());
 		copyText(info.key, sizeof(info.key), key->text().trimmed());
+		info.vertical = format->currentData().toBool();
 		return info;
 	}
 
 private:
-	/* Ao trocar de plataforma, troca o nome e o endereço se ainda eram os padrões da anterior. */
+	/* Ao trocar de plataforma, troca o nome, o endereço e o formato se ainda eram os da anterior. */
 	void applyPlatformDefaults(const QString &previous)
 	{
 		QByteArray id = platform->currentData().toString().toUtf8();
@@ -217,6 +229,10 @@ private:
 		}
 		if (server->text().trimmed().isEmpty() || server->text() == previousServer) {
 			server->setText(QString::fromUtf8(pl_multistream_default_server(now.id)));
+		}
+		/* YouTube e Facebook são horizontais; Instagram e TikTok, verticais; "outro" fica como está. */
+		if (now.horizontal != now.vertical) {
+			format->setCurrentIndex(now.vertical ? 1 : 0);
 		}
 	}
 
@@ -240,6 +256,7 @@ private:
 
 	pl_dest_info original;
 	QComboBox *platform = nullptr;
+	QComboBox *format = nullptr;
 	QLineEdit *name = nullptr;
 	QLineEdit *server = nullptr;
 	QLineEdit *key = nullptr;
@@ -248,83 +265,200 @@ private:
 };
 
 /* ------------------------------------------------------------------------- */
-/* Aba "Multistream"                                                          */
+/* A lista de destinos (uma só, horizontais e verticais juntos)               */
 
-/* Uma das duas listas (horizontais ou verticais), mexendo na cópia de trabalho. */
-class DestinationsBox : public QGroupBox {
+/* "Qualidade: 6,0 Mb/s (a da aba Saída das Configurações)". */
+QString qualityText()
+{
+	QString value = QString::number(pl_multistream_quality_kbps() / 1000.0, 'f', 1).replace('.', ',');
+	return moduleText("Multistream.QualityFromObs").arg(value);
+}
+
+/*
+ * Mexe numa cópia de trabalho: nada vale até quem a usa chamar pl_multistream_set_all (o Salvar da
+ * janela Destinos ou o Aplicar das Configurações). Arrastar muda a ordem; botão direito na linha:
+ * Mudar e Remover; dois cliques: Mudar. Com `status`, cada linha mostra o estado do destino no ar.
+ */
+class DestinationsList : public QWidget {
 public:
-	DestinationsBox(QWidget *parent, const QString &title, bool isVertical, std::vector<pl_dest_info> &list,
-			std::function<void()> onChange)
-		: QGroupBox(title, parent),
-		  vertical(isVertical),
+	DestinationsList(QWidget *parent, std::vector<pl_dest_info> &list, std::function<void()> onChange, bool status)
+		: QWidget(parent),
 		  dests(list),
 		  changed(std::move(onChange))
 	{
 		auto *layout = new QVBoxLayout(this);
+		layout->setContentsMargins(0, 0, 0, 0);
 		view = new QListWidget(this);
-		view->setMinimumHeight(110);
+		view->setMinimumHeight(140);
+		view->setDragDropMode(QAbstractItemView::InternalMove);
+		view->setDefaultDropAction(Qt::MoveAction);
+		view->setContextMenuPolicy(Qt::CustomContextMenu);
 		layout->addWidget(view);
+
 		connect(view, &QListWidget::itemChanged, this, [this](QListWidgetItem *item) {
 			if (rebuilding) {
 				return;
 			}
-			int index = indexOfRow(view->row(item));
-			if (index >= 0) {
+			int index = item->data(Qt::UserRole).toInt();
+			if (index >= 0 && index < (int)dests.size()) {
 				dests[index].enabled = item->checkState() == Qt::Checked;
 				changed();
 			}
 		});
-		connect(view, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *) { edit(); });
+		connect(view, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) { edit(item); });
+		connect(view->model(), &QAbstractItemModel::rowsMoved, this, [this]() { syncOrder(); });
+		connect(view, &QListWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
+			QListWidgetItem *item = view->itemAt(pos);
+			QMenu menu(this);
+			QAction *editAction = nullptr;
+			QAction *removeAction = nullptr;
+			if (item && item->data(Qt::UserRole).toInt() >= 0) {
+				editAction = menu.addAction(moduleText("Stream.Edit"));
+				removeAction = menu.addAction(moduleText("Stream.Remove"));
+				menu.addSeparator();
+			}
+			QAction *addAction = menu.addAction(moduleText("Stream.Add"));
+			QAction *chosen = menu.exec(view->viewport()->mapToGlobal(pos));
+			if (!chosen) {
+				return;
+			}
+			if (chosen == editAction) {
+				edit(item);
+			} else if (chosen == removeAction) {
+				removeDestination(item);
+			} else if (chosen == addAction) {
+				addDestination();
+			}
+		});
 
-		auto *buttons = new QHBoxLayout();
 		auto *add = new QPushButton(moduleText("Stream.Add"), this);
-		auto *editButton = new QPushButton(moduleText("Stream.Edit"), this);
-		auto *remove = new QPushButton(moduleText("Stream.Remove"), this);
 		connect(add, &QPushButton::clicked, this, [this]() { addDestination(); });
-		connect(editButton, &QPushButton::clicked, this, [this]() { edit(); });
-		connect(remove, &QPushButton::clicked, this, [this]() { removeDestination(); });
+		auto *buttons = new QHBoxLayout();
 		buttons->addWidget(add);
-		buttons->addWidget(editButton);
-		buttons->addWidget(remove);
 		buttons->addStretch(1);
 		layout->addLayout(buttons);
 		rebuild();
+
+		if (status) {
+			auto *timer = new QTimer(this);
+			connect(timer, &QTimer::timeout, this, [this]() { refreshStatus(); });
+			timer->start(1000);
+		}
 	}
 
 	void rebuild()
 	{
 		rebuilding = true;
 		view->clear();
-		rows.clear();
 		for (size_t i = 0; i < dests.size(); i++) {
-			const pl_dest_info &info = dests[i];
-			if (info.vertical != vertical) {
-				continue;
-			}
-			QString text = QString::fromUtf8(info.name) + QString::fromUtf8("  —  ") +
-				       moduleText(findPlatform(info.platform).textKey);
-			auto *item = new QListWidgetItem(text);
-			item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-			item->setCheckState(info.enabled ? Qt::Checked : Qt::Unchecked);
+			auto *item = new QListWidgetItem(rowText(dests[i], QString()));
+			item->setFlags((item->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsDragEnabled) &
+				       ~Qt::ItemIsDropEnabled);
+			item->setCheckState(dests[i].enabled ? Qt::Checked : Qt::Unchecked);
+			item->setData(Qt::UserRole, (int)i);
 			view->addItem(item);
-			rows.push_back((int)i);
 		}
-		if (rows.empty()) {
+		if (dests.empty()) {
 			auto *item = new QListWidgetItem(moduleText("Multistream.EmptyList"));
 			item->setFlags(Qt::NoItemFlags);
+			item->setData(Qt::UserRole, -1);
 			view->addItem(item);
 		}
 		rebuilding = false;
+		refreshStatus();
 	}
 
 private:
-	int indexOfRow(int row) const { return row >= 0 && row < (int)rows.size() ? rows[row] : -1; }
+	static QString rowText(const pl_dest_info &info, const QString &state)
+	{
+		QString platformName = moduleText(findPlatform(info.platform).textKey);
+		QString text = QString::fromUtf8(info.name) + QStringLiteral("   ·   ") +
+			       moduleText(info.vertical ? "Stream.Format.VerticalTag" : "Stream.Format.HorizontalTag");
+		if (strcmp(info.platform, "custom") != 0 && QString::fromUtf8(info.name) != platformName) {
+			text += QStringLiteral("   ·   ") + platformName;
+		}
+		if (!state.isEmpty()) {
+			text += QStringLiteral("   ·   ") + state;
+		}
+		return text;
+	}
+
+	/* O estado de cada destino já salvo (os novos só ganham estado depois do Salvar). */
+	QString stateOf(const pl_dest_info &info, bool &red) const
+	{
+		red = false;
+		if (!pl_multistream_active() || !*info.id) {
+			return QString();
+		}
+		for (size_t i = 0; i < pl_multistream_count(); i++) {
+			pl_dest_info saved;
+			if (!pl_multistream_get(i, &saved) || strcmp(saved.id, info.id) != 0) {
+				continue;
+			}
+			pl_dest_status status;
+			pl_multistream_get_status(i, &status);
+			switch (status.state) {
+			case PL_DEST_LIVE:
+				red = true;
+				return moduleText("Stream.State.Live");
+			case PL_DEST_CONNECTING:
+				return moduleText("Stream.State.Connecting");
+			case PL_DEST_RECONNECTING:
+				red = true;
+				return moduleText("Stream.State.Reconnecting");
+			case PL_DEST_ERROR:
+				red = true;
+				return QString::fromUtf8(status.error);
+			default:
+				return QString();
+			}
+		}
+		return QString();
+	}
+
+	void refreshStatus()
+	{
+		for (int row = 0; row < view->count(); row++) {
+			QListWidgetItem *item = view->item(row);
+			int index = item->data(Qt::UserRole).toInt();
+			if (index < 0 || index >= (int)dests.size()) {
+				continue;
+			}
+			bool red = false;
+			QString state = stateOf(dests[index], red);
+			QString text = rowText(dests[index], state);
+			if (item->text() != text) {
+				QSignalBlocker block(view);
+				item->setText(text);
+				item->setToolTip(state);
+				item->setForeground(red ? QBrush(QColor(SOMUN_RED)) : QBrush());
+			}
+		}
+	}
+
+	/* Depois de arrastar: a ordem da lista na tela vira a ordem da cópia de trabalho. */
+	void syncOrder()
+	{
+		std::vector<pl_dest_info> ordered;
+		for (int row = 0; row < view->count(); row++) {
+			int index = view->item(row)->data(Qt::UserRole).toInt();
+			if (index >= 0 && index < (int)dests.size()) {
+				ordered.push_back(dests[index]);
+			}
+		}
+		if (ordered.size() != dests.size()) {
+			return;
+		}
+		dests = ordered;
+		QTimer::singleShot(0, this, [this]() { rebuild(); });
+		changed();
+	}
 
 	void addDestination()
 	{
 		pl_dest_info start = {};
-		snprintf(start.platform, sizeof(start.platform), "%s", vertical ? "instagram" : "youtube");
-		start.vertical = vertical;
+		snprintf(start.platform, sizeof(start.platform), "%s", "youtube");
+		start.vertical = false;
 		start.enabled = true;
 		DestinationDialog dialog(this, start, false);
 		if (dialog.exec() == QDialog::Accepted) {
@@ -334,10 +468,10 @@ private:
 		}
 	}
 
-	void edit()
+	void edit(QListWidgetItem *item)
 	{
-		int index = indexOfRow(view->currentRow());
-		if (index < 0) {
+		int index = item ? item->data(Qt::UserRole).toInt() : -1;
+		if (index < 0 || index >= (int)dests.size()) {
 			return;
 		}
 		DestinationDialog dialog(this, dests[index], true);
@@ -348,10 +482,10 @@ private:
 		}
 	}
 
-	void removeDestination()
+	void removeDestination(QListWidgetItem *item)
 	{
-		int index = indexOfRow(view->currentRow());
-		if (index < 0) {
+		int index = item ? item->data(Qt::UserRole).toInt() : -1;
+		if (index < 0 || index >= (int)dests.size()) {
 			return;
 		}
 		QString question = moduleText("Stream.RemoveQuestion").arg(QString::fromUtf8(dests[index].name));
@@ -362,19 +496,28 @@ private:
 		}
 	}
 
-	bool vertical;
 	std::vector<pl_dest_info> &dests;
 	std::function<void()> changed;
 	QListWidget *view = nullptr;
-	std::vector<int> rows;
 	bool rebuilding = false;
 };
 
+std::vector<pl_dest_info> savedDestinations()
+{
+	std::vector<pl_dest_info> list;
+	for (size_t i = 0; i < pl_multistream_count(); i++) {
+		pl_dest_info info;
+		if (pl_multistream_get(i, &info)) {
+			list.push_back(info);
+		}
+	}
+	return list;
+}
+
 /*
- * A transmissão do somun live, no alto da aba Transmissão (parte G): a qualidade de todos os
- * destinos (um fader com o valor do lado) e as listas de destinos horizontais e verticais. O
- * "Transmitir" da tela Operar liga todos os marcados. A transmissão do próprio OBS fica embaixo,
- * valendo só no Modo OBS.
+ * A transmissão do somun live, no alto da aba Transmissão (parte G): a qualidade (a da aba Saída,
+ * só mostrada aqui) e a lista de destinos. O "Transmitir" da tela Operar liga todos os marcados.
+ * A transmissão do próprio OBS fica embaixo, valendo só no Modo OBS.
  */
 class DestinationsSection : public QWidget {
 public:
@@ -382,42 +525,21 @@ public:
 	{
 		auto *layout = new QVBoxLayout(this);
 		layout->setContentsMargins(0, 0, 0, 8);
-		reload();
+		dests = savedDestinations();
 
 		auto *title = new QLabel(moduleText("Multistream.Title"), this);
 		title->setTextFormat(Qt::RichText);
 		title->setWordWrap(true);
 		layout->addWidget(title);
 
-		/* Qualidade: fader de 1 a 12 Mb/s, de meio em meio, com o valor do lado. */
-		auto *qualityLine = new QHBoxLayout();
-		auto *qualityLabel = new QLabel(moduleText("Multistream.Quality"), this);
-		quality = new QSlider(Qt::Horizontal, this);
-		quality->setRange(2, 24);
-		quality->setPageStep(2);
-		quality->setValue(std::clamp((pl_multistream_quality_kbps() + 250) / 500, 2, 24));
-		qualityValue = new QLabel(this);
-		qualityValue->setMinimumWidth(70);
-		qualityLine->addWidget(qualityLabel);
-		qualityLine->addWidget(quality, 1);
-		qualityLine->addWidget(qualityValue);
-		layout->addLayout(qualityLine);
-		auto *qualityTip = new QLabel(moduleText("Multistream.QualityTip"), this);
-		qualityTip->setWordWrap(true);
-		qualityTip->setStyleSheet(QStringLiteral("color: #8C8C8C;"));
-		layout->addWidget(qualityTip);
-		updateQualityText();
-		connect(quality, &QSlider::valueChanged, this, [this](int) {
-			updateQualityText();
-			changed();
-		});
+		quality = new QLabel(qualityText(), this);
+		quality->setWordWrap(true);
+		quality->setStyleSheet(QStringLiteral("color: #8C8C8C;"));
+		layout->addWidget(quality);
 
 		setToolTip(moduleText("Multistream.Help"));
-
-		horizontal = new DestinationsBox(this, moduleText("Multistream.Horizontal"), false, dests, changed);
-		vertical = new DestinationsBox(this, moduleText("Multistream.Vertical"), true, dests, changed);
-		layout->addWidget(horizontal);
-		layout->addWidget(vertical);
+		list = new DestinationsList(this, dests, changed, false);
+		layout->addWidget(list);
 
 		auto *obsTitle = new QLabel(moduleText("Multistream.ObsOnly"), this);
 		obsTitle->setTextFormat(Qt::RichText);
@@ -428,39 +550,88 @@ public:
 
 	void commit()
 	{
-		pl_multistream_set_quality_kbps(quality->value() * 500);
 		pl_multistream_set_all(dests.data(), dests.size());
 		/* Os destinos novos ganharam identificador ao salvar: relê para o próximo "Aplicar". */
-		reload();
-		horizontal->rebuild();
-		vertical->rebuild();
+		dests = savedDestinations();
+		list->rebuild();
+		/* A taxa de bits pode ter mudado na aba Saída no mesmo "Aplicar" (o OBS salva depois). */
+		QPointer<QLabel> label(quality);
+		QTimer::singleShot(500, this, [label]() {
+			if (label) {
+				label->setText(qualityText());
+			}
+		});
 	}
 
 private:
-	void reload()
-	{
-		dests.clear();
-		for (size_t i = 0; i < pl_multistream_count(); i++) {
-			pl_dest_info info;
-			if (pl_multistream_get(i, &info)) {
-				dests.push_back(info);
-			}
-		}
-	}
-
-	void updateQualityText()
-	{
-		qualityValue->setText(QString::number(quality->value() / 2.0, 'f', 1).replace('.', ',') +
-				      QStringLiteral(" Mb/s"));
-	}
-
 	std::function<void()> changed;
 	std::vector<pl_dest_info> dests;
-	QSlider *quality = nullptr;
-	QLabel *qualityValue = nullptr;
-	DestinationsBox *horizontal = nullptr;
-	DestinationsBox *vertical = nullptr;
+	QLabel *quality = nullptr;
+	DestinationsList *list = nullptr;
 };
+
+/*
+ * A janela "Destinos" do somun live (botão direito no Transmitir, ou "⋯ › Destinos..."): a mesma
+ * lista, com o estado de cada destino no ar. As mudanças só valem no Salvar.
+ */
+class DestinationsWindow : public QDialog {
+public:
+	explicit DestinationsWindow(QWidget *parent) : QDialog(parent)
+	{
+		setWindowTitle(moduleText("Destinations.Title"));
+		setAttribute(Qt::WA_DeleteOnClose);
+		setMinimumSize(560, 400);
+		dests = savedDestinations();
+
+		auto *layout = new QVBoxLayout(this);
+		layout->setContentsMargins(16, 16, 16, 16);
+		layout->setSpacing(10);
+
+		auto *help = new QLabel(moduleText("Destinations.Help"), this);
+		help->setWordWrap(true);
+		layout->addWidget(help);
+
+		auto *quality = new QLabel(qualityText(), this);
+		quality->setWordWrap(true);
+		quality->setStyleSheet(QStringLiteral("color: #8C8C8C;"));
+		layout->addWidget(quality);
+
+		list = new DestinationsList(this, dests, [this]() { dirty = true; }, true);
+		layout->addWidget(list, 1);
+
+		auto *buttons = new QHBoxLayout();
+		buttons->addStretch(1);
+		auto *cancel = new QPushButton(moduleText("Destinations.Cancel"), this);
+		auto *save = new QPushButton(moduleText("Destinations.Save"), this);
+		somun_make_primary(save);
+		buttons->addWidget(cancel);
+		buttons->addWidget(save);
+		layout->addLayout(buttons);
+
+		connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
+		connect(save, &QPushButton::clicked, this, [this]() {
+			pl_multistream_set_all(dests.data(), dests.size());
+			dirty = false;
+			accept();
+		});
+	}
+
+	void reject() override
+	{
+		if (dirty && QMessageBox::question(this, windowTitle(), moduleText("Destinations.Discard")) !=
+				     QMessageBox::Yes) {
+			return;
+		}
+		QDialog::reject();
+	}
+
+private:
+	std::vector<pl_dest_info> dests;
+	DestinationsList *list = nullptr;
+	bool dirty = false;
+};
+
+QPointer<DestinationsWindow> destinationsWindow;
 
 /* A caixa "Tela vertical" (gravação e transição do vertical), no fim da aba Saída. */
 class RecordSection : public QGroupBox {
@@ -895,4 +1066,15 @@ void pl_multistream_ui_load(void)
 	});
 	timer->start(1000);
 	obs_frontend_add_event_callback(frontendEvent, nullptr);
+}
+
+void pl_destinations_window_open(QWidget *parent)
+{
+	if (destinationsWindow) {
+		destinationsWindow->raise();
+		destinationsWindow->activateWindow();
+		return;
+	}
+	destinationsWindow = new DestinationsWindow(parent);
+	destinationsWindow->show();
 }

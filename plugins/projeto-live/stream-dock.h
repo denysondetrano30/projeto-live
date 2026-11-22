@@ -20,3 +20,9 @@ void pl_multistream_ui_load(void);
 #ifdef __cplusplus
 }
 #endif
+
+#ifdef __cplusplus
+class QWidget;
+/* A janela "Destinos" do somun live (uma só; se já estiver aberta, vem para a frente). */
+void pl_destinations_window_open(QWidget *parent);
+#endif

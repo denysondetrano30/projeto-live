@@ -9,10 +9,11 @@
  * Cada destino (YouTube, Facebook, Instagram, TikTok ou outro endereço RTMP) é uma saída
  * "rtmp_output" própria. Os horizontais dividem UM codificador (imagem do Programa) e os verticais
  * outro (tela vertical, vertical.c, 1080x1920); o áudio é um só para todos. Assim 3 destinos
- * horizontais custam quase o mesmo que 1. A qualidade (Mb/s) é uma só, para horizontal e vertical.
+ * horizontais custam quase o mesmo que 1. A qualidade é a da aba Saída do OBS (taxa de bits,
+ * codificador e predefinição), a mesma para horizontal e vertical.
  *
  * Se um destino cair, só ele tenta voltar sozinho (até 20 vezes, a cada 10 s); os outros seguem.
- * Os destinos e a qualidade ficam em destinos.json, na pasta de configuração do plugin. Na primeira
+ * Os destinos ficam em destinos.json, na pasta de configuração do plugin. Na primeira
  * vez, a transmissão que estava configurada no OBS vira um destino horizontal da lista.
  *
  * A lista é editada nas Configurações (stream-dock.cpp) e salva inteira com pl_multistream_set_all.
@@ -40,9 +41,6 @@
 #define RECONNECT_TRIES 20
 #define RECONNECT_SECONDS 10
 #define DEFAULT_KBPS 6000
-#define MIN_KBPS 1000
-#define MAX_KBPS 20000
-#define AUDIO_KBPS 160
 
 struct dest {
 	struct pl_dest_info info;
@@ -65,7 +63,6 @@ static bool frontend_ready;
 /* A transmissão (só na thread da interface). */
 static bool active;
 static uint64_t started_ns;
-static int quality_kbps = DEFAULT_KBPS;
 /* destinos.json ainda não tinha a qualidade: na primeira vez, traz a transmissão antiga do OBS. */
 static bool needs_migration;
 /* Codificadores divididos: um horizontal, um vertical e um de áudio para todos. */
@@ -219,42 +216,186 @@ void pl_multistream_enum_encoders(pl_encoder_cb callback, void *param)
 	}
 }
 
-static void encoder_settings(obs_data_t *settings, const char *id, int kbps)
+/* ------------------------------------------------------------------------- */
+/* Qualidade: a mesma da aba Saída do OBS (taxa de bits, codificador e predefinição)              */
+
+static bool encoder_exists(const char *wanted)
 {
-	obs_data_set_string(settings, "rate_control", "CBR");
-	obs_data_set_int(settings, "bitrate", kbps);
-	obs_data_set_int(settings, "keyint_sec", 2);
-	if (strcmp(id, "obs_x264") == 0) {
-		obs_data_set_string(settings, "preset", "veryfast");
+	const char *id;
+	for (size_t i = 0; wanted && *wanted && obs_enum_encoder_types(i, &id); i++) {
+		if (strcmp(id, wanted) == 0) {
+			return true;
+		}
 	}
+	return false;
 }
 
-static obs_encoder_t *create_video_encoder(const char *label, int kbps, video_t *video)
+static bool is_h264(const char *id)
 {
-	const char *id = pl_best_h264_encoder();
-	obs_data_t *settings = obs_data_create();
-	encoder_settings(settings, id, kbps);
+	const char *codec = id ? obs_get_encoder_codec(id) : NULL;
+	return codec && strcmp(codec, "h264") == 0;
+}
+
+/* Os nomes curtos do modo Simples ("x264", "nvenc", "qsv", "amd"...) viram o codificador de verdade. */
+static const char *simple_encoder_id(const char *name)
+{
+	if (!name) {
+		return NULL;
+	}
+	if (strcmp(name, "x264") == 0 || strcmp(name, "x264_lowcpu") == 0) {
+		return "obs_x264";
+	}
+	if (strcmp(name, "nvenc") == 0) {
+		static const char *nvenc[] = {"obs_nvenc_h264_tex", "jim_nvenc", "ffmpeg_nvenc"};
+		for (size_t i = 0; i < sizeof(nvenc) / sizeof(nvenc[0]); i++) {
+			if (encoder_exists(nvenc[i])) {
+				return nvenc[i];
+			}
+		}
+	}
+	if (strcmp(name, "qsv") == 0) {
+		return encoder_exists("obs_qsv11_v2") ? "obs_qsv11_v2" : "obs_qsv11";
+	}
+	if (strcmp(name, "amd") == 0) {
+		return "h264_texture_amf";
+	}
+	return NULL;
+}
+
+/*
+ * Lê a qualidade da transmissão na aba Saída do OBS. Devolve as configurações do codificador de
+ * vídeo (para soltar com obs_data_release) e preenche o codificador, a velocidade do áudio e a
+ * faixa de áudio. HEVC e AV1 não servem para todas as plataformas (Instagram, Facebook): nesses
+ * casos usa o melhor H.264 do PC com a mesma taxa de bits.
+ */
+static obs_data_t *obs_quality(const char **id_out, int *audio_kbps, size_t *audio_track)
+{
+	config_t *profile = obs_frontend_get_profile_config();
+	const char *mode = profile ? config_get_string(profile, "Output", "Mode") : NULL;
+	bool advanced = mode && strcmp(mode, "Advanced") == 0;
+	const char *id = NULL;
+	obs_data_t *settings = NULL;
+	*audio_kbps = 160;
+	*audio_track = 0;
+
+	if (advanced) {
+		id = config_get_string(profile, "AdvOut", "Encoder");
+		char *dir = obs_frontend_get_current_profile_path();
+		if (dir) {
+			char path[1024];
+			snprintf(path, sizeof(path), "%s/streamEncoder.json", dir);
+			settings = obs_data_create_from_json_file(path);
+			bfree(dir);
+		}
+		if (!settings) {
+			settings = obs_data_create();
+		}
+		if (id && *id) {
+			/* Os padrões do codificador (ex.: 2500 kbps) valem para o que a pessoa não mudou. */
+			obs_data_t *defaults = obs_encoder_defaults(id);
+			if (defaults) {
+				obs_data_apply(defaults, settings);
+				obs_data_release(settings);
+				settings = defaults;
+			}
+		}
+		int track = (int)config_get_int(profile, "AdvOut", "TrackIndex");
+		if (track < 1 || track > 6) {
+			track = 1;
+		}
+		*audio_track = (size_t)(track - 1);
+		char key[32];
+		snprintf(key, sizeof(key), "Track%dBitrate", track);
+		int kbps = (int)config_get_int(profile, "AdvOut", key);
+		if (kbps > 0) {
+			*audio_kbps = kbps;
+		}
+	} else {
+		settings = obs_data_create();
+		int kbps = profile ? (int)config_get_int(profile, "SimpleOutput", "VBitrate") : 0;
+		obs_data_set_int(settings, "bitrate", kbps > 0 ? kbps : 2500);
+		obs_data_set_string(settings, "rate_control", "CBR");
+		id = simple_encoder_id(profile ? config_get_string(profile, "SimpleOutput", "StreamEncoder") : NULL);
+		const char *preset = profile ? config_get_string(profile, "SimpleOutput", "Preset") : NULL;
+		if (id && strcmp(id, "obs_x264") == 0) {
+			obs_data_set_string(settings, "preset", preset && *preset ? preset : "veryfast");
+		}
+		const char *nvenc_preset = profile ? config_get_string(profile, "SimpleOutput", "NVENCPreset2") : NULL;
+		if (id && strstr(id, "nvenc") && nvenc_preset && *nvenc_preset) {
+			obs_data_set_string(settings, "preset2", nvenc_preset);
+		}
+		int audio = profile ? (int)config_get_int(profile, "SimpleOutput", "ABitrate") : 0;
+		if (audio > 0) {
+			*audio_kbps = audio;
+		}
+	}
+
+	if (!encoder_exists(id) || !is_h264(id)) {
+		/* Codificador que não existe ou não é H.264: o melhor H.264 com a mesma taxa de bits. */
+		int kbps = (int)obs_data_get_int(settings, "bitrate");
+		obs_data_release(settings);
+		id = pl_best_h264_encoder();
+		settings = obs_data_create();
+		obs_data_set_int(settings, "bitrate", kbps > 0 ? kbps : DEFAULT_KBPS);
+		obs_data_set_string(settings, "rate_control", "CBR");
+		if (strcmp(id, "obs_x264") == 0) {
+			obs_data_set_string(settings, "preset", "veryfast");
+		}
+	}
+	/* As plataformas pedem um quadro-chave a cada 2 s (sem isso o Instagram recusa). */
+	if (obs_data_get_int(settings, "keyint_sec") <= 0 || obs_data_get_int(settings, "keyint_sec") > 4) {
+		obs_data_set_int(settings, "keyint_sec", 2);
+	}
+	*id_out = id;
+	return settings;
+}
+
+static obs_encoder_t *create_video_encoder(const char *label, video_t *video)
+{
+	const char *id = NULL;
+	int audio_kbps;
+	size_t audio_track;
+	obs_data_t *settings = obs_quality(&id, &audio_kbps, &audio_track);
 	char name[64];
 	snprintf(name, sizeof(name), "somun live: video %s", label);
 	obs_encoder_t *encoder = obs_video_encoder_create(id, name, settings, NULL);
-	obs_data_release(settings);
 	if (encoder) {
 		obs_encoder_set_video(encoder, video);
-		blog(LOG_INFO, "[projeto-live] codificador %s (%s), %d kbps", label, id, kbps);
+		blog(LOG_INFO, "[projeto-live] codificador %s (%s), %d kbps", label, id,
+		     (int)obs_data_get_int(settings, "bitrate"));
 	}
+	obs_data_release(settings);
 	return encoder;
 }
 
 static obs_encoder_t *create_audio_encoder(void)
 {
+	const char *id = NULL;
+	int audio_kbps;
+	size_t audio_track;
+	obs_data_t *video_settings = obs_quality(&id, &audio_kbps, &audio_track);
+	obs_data_release(video_settings);
+
 	obs_data_t *settings = obs_data_create();
-	obs_data_set_int(settings, "bitrate", AUDIO_KBPS);
-	obs_encoder_t *encoder = obs_audio_encoder_create("ffmpeg_aac", "somun live: audio", settings, 0, NULL);
+	obs_data_set_int(settings, "bitrate", audio_kbps);
+	obs_encoder_t *encoder =
+		obs_audio_encoder_create("ffmpeg_aac", "somun live: audio", settings, audio_track, NULL);
 	obs_data_release(settings);
 	if (encoder) {
 		obs_encoder_set_audio(encoder, obs_get_audio());
 	}
 	return encoder;
+}
+
+int pl_multistream_quality_kbps(void)
+{
+	const char *id = NULL;
+	int audio_kbps;
+	size_t audio_track;
+	obs_data_t *settings = obs_quality(&id, &audio_kbps, &audio_track);
+	int kbps = (int)obs_data_get_int(settings, "bitrate");
+	obs_data_release(settings);
+	return kbps;
 }
 
 /* Solta os codificadores divididos (as saídas que ainda os usam seguram a parte delas). */
@@ -294,7 +435,7 @@ static void dest_start(struct dest *d)
 			set_state(d, PL_DEST_ERROR, obs_module_text("Stream.Error.NoVertical"));
 			return;
 		}
-		*shared = create_video_encoder(vertical ? "vertical" : "horizontal", quality_kbps, picture);
+		*shared = create_video_encoder(vertical ? "vertical" : "horizontal", picture);
 	}
 	if (!shared_audio) {
 		shared_audio = create_audio_encoder();
@@ -434,7 +575,7 @@ static void save_dests(void)
 			obs_data_release(item);
 		}
 		obs_data_set_array(data, "destinations", array);
-		obs_data_set_int(data, "quality_kbps", quality_kbps);
+		obs_data_set_int(data, "owner_version", 2);
 		obs_data_save_json_safe(data, path, "tmp", "bak");
 		obs_data_array_release(array);
 		obs_data_release(data);
@@ -473,14 +614,10 @@ static void load_dests(void)
 		return;
 	}
 
-	/* Sem a qualidade, o arquivo é de antes da parte G: traz a transmissão antiga do OBS. */
-	needs_migration = !obs_data_has_user_value(data, "quality_kbps");
-	if (!needs_migration) {
-		quality_kbps = (int)obs_data_get_int(data, "quality_kbps");
-		if (quality_kbps < MIN_KBPS || quality_kbps > MAX_KBPS) {
-			quality_kbps = DEFAULT_KBPS;
-		}
-	}
+	/* Sem a marca da parte G ("owner_version"; no G1 era "quality_kbps"), o arquivo é de antes:
+	 * traz a transmissão antiga do OBS. */
+	needs_migration = !obs_data_has_user_value(data, "owner_version") &&
+			  !obs_data_has_user_value(data, "quality_kbps");
 
 	obs_data_array_t *array = obs_data_get_array(data, "destinations");
 	size_t count = obs_data_array_count(array);
@@ -543,45 +680,14 @@ static const char *guess_platform(const char *url)
 	return "custom";
 }
 
-/* A velocidade de vídeo que a pessoa usava na transmissão do OBS (0 se não souber). */
-static int obs_stream_kbps(void)
-{
-	config_t *profile = obs_frontend_get_profile_config();
-	if (!profile) {
-		return 0;
-	}
-	const char *mode = config_get_string(profile, "Output", "Mode");
-	if (mode && strcmp(mode, "Advanced") == 0) {
-		int kbps = 0;
-		char *dir = obs_frontend_get_current_profile_path();
-		if (dir) {
-			char path[1024];
-			snprintf(path, sizeof(path), "%s/streamEncoder.json", dir);
-			obs_data_t *settings = obs_data_create_from_json_file(path);
-			if (settings) {
-				kbps = (int)obs_data_get_int(settings, "bitrate");
-				obs_data_release(settings);
-			}
-			bfree(dir);
-		}
-		return kbps;
-	}
-	return (int)config_get_uint(profile, "SimpleOutput", "VBitrate");
-}
-
 /*
  * Na primeira vez depois da parte G: a transmissão que estava em Configurações > Transmissão vira
- * um destino horizontal no topo da lista (para nada parar de funcionar), e a velocidade dela vira a
- * qualidade de todos. Só endereços RTMP/RTMPS entram (SRT, WHIP etc. ficam só no Modo OBS).
+ * um destino horizontal no topo da lista (para nada parar de funcionar).
+ * Só endereços RTMP/RTMPS entram (SRT, WHIP etc. ficam só no Modo OBS).
  */
 static void migrate_obs_stream(void)
 {
 	needs_migration = false;
-
-	int kbps = obs_stream_kbps();
-	if (kbps >= MIN_KBPS && kbps <= MAX_KBPS) {
-		quality_kbps = kbps;
-	}
 
 	obs_service_t *service = obs_frontend_get_streaming_service();
 	const char *url = service ? obs_service_get_connect_info(service, OBS_SERVICE_CONNECT_INFO_SERVER_URL) : NULL;
@@ -759,7 +865,7 @@ int pl_multistream_start(void)
 
 	active = true;
 	started_ns = os_gettime_ns();
-	blog(LOG_INFO, "[projeto-live] Transmitir: %zu destino(s), %d kbps", enabled, quality_kbps);
+	blog(LOG_INFO, "[projeto-live] Transmitir: %zu destino(s)", enabled);
 	start_all();
 	return (int)enabled;
 }
@@ -782,33 +888,4 @@ bool pl_multistream_active(void)
 uint64_t pl_multistream_seconds(void)
 {
 	return active ? (os_gettime_ns() - started_ns) / 1000000000ULL : 0;
-}
-
-int pl_multistream_quality_kbps(void)
-{
-	return quality_kbps;
-}
-
-void pl_multistream_set_quality_kbps(int kbps)
-{
-	if (kbps < MIN_KBPS) {
-		kbps = MIN_KBPS;
-	} else if (kbps > MAX_KBPS) {
-		kbps = MAX_KBPS;
-	}
-	if (kbps == quality_kbps) {
-		return;
-	}
-	quality_kbps = kbps;
-	/* No ar, os codificadores mudam a velocidade na hora (CBR aceita). */
-	obs_encoder_t *encoders[] = {shared_horizontal, shared_vertical};
-	for (size_t i = 0; i < 2; i++) {
-		if (encoders[i]) {
-			obs_data_t *settings = obs_data_create();
-			obs_data_set_int(settings, "bitrate", kbps);
-			obs_encoder_update(encoders[i], settings);
-			obs_data_release(settings);
-		}
-	}
-	save_dests();
 }
