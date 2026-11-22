@@ -37,11 +37,14 @@
 #include <QComboBox>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QAction>
 #include <QLabel>
+#include <QMenu>
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
+#include <QSlider>
 #include <QString>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -53,6 +56,7 @@
 #include <string>
 #include <vector>
 
+#include "audio-filters.h"
 #include "phone-source.h"
 #include "scene-audio.h"
 
@@ -134,11 +138,43 @@ public:
 		top->setSpacing(6);
 		name = new QLabel(this);
 		name->setStyleSheet("font-weight: 600;");
+		top->addWidget(name, 1);
+		outer->addLayout(top);
+
+		/* Parte H1: o fader de volume, com o valor em dB do lado (o mesmo do mixer do OBS). */
+		auto *faderRow = new QHBoxLayout();
+		faderRow->setContentsMargins(0, 0, 0, 0);
+		faderRow->setSpacing(6);
+		slider = new QSlider(Qt::Horizontal, this);
+		slider->setRange(0, 1000);
+		slider->setPageStep(50);
+		slider->setFocusPolicy(Qt::NoFocus);
 		volume = new QLabel(this);
 		volume->setStyleSheet("color: #8d8d98;");
-		top->addWidget(name, 1);
-		top->addWidget(volume);
-		outer->addLayout(top);
+		volume->setMinimumWidth(52);
+		volume->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+		faderRow->addWidget(slider, 1);
+		faderRow->addWidget(volume);
+		outer->addLayout(faderRow);
+		connect(slider, &QSlider::valueChanged, this, [this](int value) {
+			if (fader && !syncing) {
+				obs_fader_set_deflection(fader, (float)value / 1000.0f);
+			}
+		});
+
+		/* Botão direito no canal: os filtros do som (parte H1). */
+		setContextMenuPolicy(Qt::CustomContextMenu);
+		connect(this, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
+			QMenu menu(this);
+			QAction *filters = menu.addAction(QString::fromUtf8(obs_module_text("AudioFilters.Menu")));
+			if (menu.exec(mapToGlobal(pos)) == filters) {
+				obs_source_t *target = obs_weak_source_get_source(source);
+				if (target) {
+					pl_audio_filters_open(target, window());
+					obs_source_release(target);
+				}
+			}
+		});
 
 		meter = new Meter(this);
 		outer->addWidget(meter);
@@ -196,6 +232,8 @@ public:
 		volmeter = obs_volmeter_create(OBS_FADER_LOG);
 		obs_volmeter_attach_source(volmeter, target);
 		obs_volmeter_add_callback(volmeter, levelCallback, this);
+		fader = obs_fader_create(OBS_FADER_LOG);
+		obs_fader_attach_source(fader, target);
 		name->setText(QString::fromUtf8(obs_source_get_name(target)));
 		name->setToolTip(name->text());
 		isGlobal = global;
@@ -210,6 +248,11 @@ public:
 			obs_volmeter_detach_source(volmeter);
 			obs_volmeter_destroy(volmeter);
 			volmeter = nullptr;
+		}
+		if (fader) {
+			obs_fader_detach_source(fader);
+			obs_fader_destroy(fader);
+			fader = nullptr;
 		}
 		if (source) {
 			obs_weak_source_release(source);
@@ -249,6 +292,16 @@ public:
 			QSignalBlocker block(phone);
 			phone->setChecked(obs_source_get_monitoring_enabled(target));
 		}
+		/* O fader segue o volume de verdade (mudado aqui, no Modo OBS ou por atalho), menos enquanto
+		 * a pessoa está arrastando. */
+		if (fader && !slider->isSliderDown()) {
+			int wanted = (int)std::lround(obs_fader_get_deflection(fader) * 1000.0f);
+			if (slider->value() != wanted) {
+				syncing = true;
+				slider->setValue(wanted);
+				syncing = false;
+			}
+		}
 		float db = obs_mul_to_db(obs_source_get_volume(target));
 		if (!std::isfinite(db) || db < -95.0f) {
 			volume->setText(QString::fromUtf8("−∞"));
@@ -284,6 +337,9 @@ private:
 
 	obs_weak_source_t *source = nullptr;
 	obs_volmeter_t *volmeter = nullptr;
+	obs_fader_t *fader = nullptr;
+	QSlider *slider = nullptr;
+	bool syncing = false;
 	std::atomic<float> peakDb{-60.0f};
 	bool isGlobal = false;
 	QCheckBox *scenePlay = nullptr;

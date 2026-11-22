@@ -19,6 +19,8 @@ target_sources(
     control-server.h
     audio-dock.cpp
     audio-dock.h
+    audio-filters.cpp
+    audio-filters.h
     camera-dock.cpp
     camera-dock.h
     color-mode.cpp
