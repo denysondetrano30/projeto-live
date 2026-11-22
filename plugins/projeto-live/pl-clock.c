@@ -112,3 +112,20 @@ bool pl_clock_offset(struct pl_clock *clock, int64_t *offset_ns)
 	pthread_mutex_unlock(&clock->mutex);
 	return best >= 0;
 }
+
+/* Parte G5: ida e volta média das últimas medidas pelo canal de controle, em ms (-1 = nenhuma).
+ * No Wi-Fi da igreja fica perto de 5-20 ms; bem acima disso, o sinal do celular está fraco. */
+int pl_clock_round_trip_ms(struct pl_clock *clock)
+{
+	if (!clock) {
+		return -1;
+	}
+	pthread_mutex_lock(&clock->mutex);
+	int64_t total = 0;
+	int count = clock->count;
+	for (int i = 0; i < count; i++) {
+		total += clock->samples[i].round_trip;
+	}
+	pthread_mutex_unlock(&clock->mutex);
+	return count > 0 ? (int)(total / count / 1000000LL) : -1;
+}

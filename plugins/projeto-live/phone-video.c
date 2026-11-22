@@ -40,6 +40,10 @@
 #define MAX_WAIT_NS (3LL * SECOND_NS)
 #define RETRY_MS 1000
 #define PTS_WRAP (1ULL << 33)
+/* Pausa entre dois pacotes de imagem acima disto conta como engasgo do Wi-Fi. */
+#define GAP_NS (400LL * MS_NS)
+#define GAP_WINDOW_NS (30LL * SECOND_NS)
+#define GAP_SLOTS 16
 
 struct queued_frame {
 	struct obs_source_frame *frame;
@@ -73,6 +77,11 @@ struct pl_phone_video {
 	/* Hora (relógio do PC) do último quadro que apareceu; 0 = nenhum ainda. Serve para a
 	 * miniatura avisar que a câmera travou. */
 	volatile uint64_t last_frame_ns;
+
+	/* Parte G5 (Wi-Fi dos celulares): Mb/s que chegam (kbps, a cada segundo) e quantas pausas
+	 * acima de GAP_NS a imagem teve nos últimos 30 s (engasgos do Wi-Fi). */
+	volatile long kbps;
+	volatile long recent_gaps;
 };
 
 static volatile long synced_count;
@@ -463,7 +472,37 @@ static bool receive(struct pl_phone_video *video, const char *url)
 	     audio_index >= 0 ? " (com som)" : "");
 	AVRational time_base = format->streams[stream_index]->time_base;
 
+	/* Parte G5: quanto chega por segundo e as pausas entre pacotes de imagem (engasgos do Wi-Fi). */
+	uint64_t window_start = os_gettime_ns();
+	uint64_t window_bytes = 0;
+	uint64_t last_video_ns = 0;
+	uint64_t gaps[GAP_SLOTS] = {0};
+	int gap_next = 0;
+
 	while (!video->stop && !video->restart && av_read_frame(format, packet) >= 0) {
+		uint64_t arrived = os_gettime_ns();
+		window_bytes += (uint64_t)(packet->size > 0 ? packet->size : 0);
+		if (packet->stream_index == stream_index) {
+			if (last_video_ns && arrived - last_video_ns > (uint64_t)GAP_NS) {
+				gaps[gap_next++ % GAP_SLOTS] = arrived;
+			}
+			last_video_ns = arrived;
+		}
+		if (arrived - window_start >= (uint64_t)SECOND_NS) {
+			long kbps =
+				(long)(window_bytes * 8ULL * (uint64_t)SECOND_NS / (arrived - window_start) / 1000ULL);
+			long recent = 0;
+			for (int i = 0; i < GAP_SLOTS; i++) {
+				if (gaps[i] && arrived - gaps[i] < (uint64_t)GAP_WINDOW_NS) {
+					recent++;
+				}
+			}
+			os_atomic_set_long(&video->kbps, kbps);
+			os_atomic_set_long(&video->recent_gaps, recent);
+			window_start = arrived;
+			window_bytes = 0;
+		}
+
 		if (packet->stream_index == stream_index && avcodec_send_packet(decoder, packet) >= 0) {
 			while (avcodec_receive_frame(decoder, frame) >= 0) {
 				int64_t pts = frame->best_effort_timestamp;
@@ -516,6 +555,8 @@ static void *read_thread(void *data)
 		bool received = receive(video, url);
 		set_synced(video, false);
 		os_atomic_set_long(&video->latency_ms, -1);
+		os_atomic_set_long(&video->kbps, 0);
+		os_atomic_set_long(&video->recent_gaps, 0);
 		if (received) {
 			blog(LOG_INFO, "[projeto-live] '%s': a imagem do celular parou", video->name);
 			clear_output(video);
@@ -650,4 +691,14 @@ int pl_phone_video_max_latency_ms(void)
 	}
 	pthread_mutex_unlock(&receivers_mutex);
 	return worst;
+}
+
+int pl_phone_video_kbps(struct pl_phone_video *video)
+{
+	return video ? (int)os_atomic_load_long(&video->kbps) : 0;
+}
+
+int pl_phone_video_recent_gaps(struct pl_phone_video *video)
+{
+	return video ? (int)os_atomic_load_long(&video->recent_gaps) : 0;
 }

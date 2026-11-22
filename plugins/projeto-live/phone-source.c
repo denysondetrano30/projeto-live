@@ -493,6 +493,11 @@ bool pl_phone_get_status(obs_source_t *source, struct pl_phone_status *status)
 	status->latency_ms = pl_phone_video_latency_ms(ps->video);
 	status->stalled_ms = pl_phone_video_stalled_ms(ps->video);
 	status->has_image = status->stalled_ms >= 0 && status->stalled_ms < PL_PHONE_STALL_MS;
+	status->kbps = status->has_image ? pl_phone_video_kbps(ps->video) : 0;
+	status->rtt_ms = pl_clock_round_trip_ms(ps->clock);
+	status->recent_gaps = pl_phone_video_recent_gaps(ps->video);
+	status->weak = status->has_image && !status->usb &&
+		       (status->rtt_ms > PL_PHONE_WEAK_RTT_MS || status->recent_gaps >= PL_PHONE_WEAK_GAPS);
 	return true;
 }
 

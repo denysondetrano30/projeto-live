@@ -84,6 +84,7 @@
 #include "intercom-audio.h"
 #include "intercom.h"
 #include "multistream.h"
+#include "phone-source.h"
 #include "somun-style.h"
 #include "vertical-record.h"
 #include "vertical.h"
@@ -454,6 +455,81 @@ QString uploadText(double mbps)
 }
 
 /*
+ * Parte G5: o Wi-Fi dos celulares, para o Conferir. Cada fonte "Celular": sinal bom ou fraco (ping
+ * pelo canal de controle e pausas na imagem), Mb/s e o total que eles usam do roteador. Quantos o
+ * roteador aguenta é só estimado: vários celulares fracos ao mesmo tempo = Wi-Fi no limite.
+ */
+QString wifiText()
+{
+	struct Phone {
+		QString name;
+		pl_phone_status status;
+	};
+	std::vector<Phone> phones;
+	obs_enum_sources(
+		[](void *param, obs_source_t *source) {
+			if (pl_phone_is_source(source)) {
+				Phone phone;
+				phone.name = QString::fromUtf8(obs_source_get_name(source));
+				if (pl_phone_get_status(source, &phone.status)) {
+					static_cast<std::vector<Phone> *>(param)->push_back(phone);
+				}
+			}
+			return true;
+		},
+		&phones);
+
+	auto number = [](double value) {
+		return QString::number(value, 'f', 1).replace('.', ',');
+	};
+	auto red = [](const QString &text) {
+		return QStringLiteral("<span style='color:%1'>%2</span>").arg(QString(SOMUN_RED), text);
+	};
+
+	if (phones.empty()) {
+		return moduleText("Check.WifiNone");
+	}
+
+	QStringList lines;
+	int totalKbps = 0;
+	int weak = 0;
+	int onWifi = 0;
+	for (const Phone &phone : phones) {
+		QString name = phone.name.toHtmlEscaped();
+		const pl_phone_status &status = phone.status;
+		if (!status.has_image) {
+			lines.append(moduleText("Check.WifiOff").arg(name));
+			continue;
+		}
+		if (status.usb) {
+			lines.append(moduleText("Check.WifiCable").arg(name));
+			continue;
+		}
+		onWifi++;
+		totalKbps += status.kbps;
+		QString ping = status.rtt_ms >= 0 ? moduleText("Check.WifiPing").arg(status.rtt_ms) : QString();
+		if (status.weak) {
+			weak++;
+			QString detail = ping;
+			if (status.recent_gaps > 0) {
+				detail += (detail.isEmpty() ? QString() : QStringLiteral(" · ")) +
+					  moduleText("Check.WifiGaps").arg(status.recent_gaps);
+			}
+			lines.append(red(moduleText("Check.WifiWeak").arg(name, detail)));
+		} else {
+			lines.append(moduleText("Check.WifiGood").arg(name, number(status.kbps / 1000.0), ping));
+		}
+	}
+
+	QString text = moduleText("Check.WifiTitle").arg(number(totalKbps / 1000.0)).arg(onWifi);
+	text += QStringLiteral("<br>") + lines.join(QStringLiteral("<br>"));
+	if (weak >= 2) {
+		text += QStringLiteral("<br>") + red(moduleText("Check.WifiLimit"));
+	}
+	return text;
+}
+
+/*
  * Mexe numa cópia de trabalho: nada vale até quem a usa chamar pl_multistream_set_all (o Salvar da
  * janela Destinos ou o Aplicar das Configurações). Arrastar muda a ordem; botão direito na linha:
  * Mudar e Remover; dois cliques: Mudar. Com `status`, cada linha mostra o estado do destino no ar.
@@ -798,10 +874,12 @@ public:
 
 		connect(check, &QPushButton::clicked, this, [this, check, result]() {
 			check->setEnabled(false);
-			result->setText(moduleText("Check.Measuring"));
+			/* O Wi-Fi dos celulares é olhado antes: o teste de internet ocupa o roteador. */
+			QString wifi = wifiText();
+			result->setText(moduleText("Check.Measuring") + QStringLiteral("<br><br>") + wifi);
 			result->show();
-			measureUpload(this, [check, result](double mbps) {
-				result->setText(uploadText(mbps));
+			measureUpload(this, [check, result, wifi](double mbps) {
+				result->setText(uploadText(mbps) + QStringLiteral("<br><br>") + wifi);
 				check->setEnabled(true);
 			});
 		});

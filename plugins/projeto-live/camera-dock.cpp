@@ -754,6 +754,7 @@ public:
 		releaseItems(items);
 
 		Signal signal = Signal::Live;
+		bool weakWifi = false;
 		QString info;
 		if (cam) {
 			struct pl_phone_status status;
@@ -773,6 +774,11 @@ public:
 				if (signal == Signal::Live && status.usb) {
 					info = msg("Cameras.Cable");
 				}
+				/* Parte G5: Wi-Fi fraco (ping alto ou engasgando) em vermelho no lugar do atraso. */
+				if (signal == Signal::Live && status.weak) {
+					weakWifi = true;
+					info = msg("Cameras.WeakSignal");
+				}
 			}
 			obs_source_release(cam);
 		} else if (blank) {
@@ -781,6 +787,12 @@ public:
 		}
 
 		detail->setText(info);
+		if (weakWifi != shownWeak) {
+			shownWeak = weakWifi;
+			detail->setEnabled(weakWifi);
+			detail->setStyleSheet(weakWifi ? QString("color: #E5483B;") : QString());
+			detail->setToolTip(weakWifi ? msg("Cameras.WeakSignalHint") : QString());
+		}
 		applyColors(tally, signal);
 		updateLevel(src);
 
@@ -971,6 +983,7 @@ private:
 	obs_weak_source_t *weak = nullptr;
 	std::string shownBorder;
 	std::string shownBadge;
+	bool shownWeak = false;
 	std::string shownDot;
 	Thumb *thumb = nullptr;
 	QLabel *dot = nullptr;

@@ -53,6 +53,11 @@ int pl_phone_video_latency_ms(struct pl_phone_video *video);
  * ou nunca ligada). Acima de uns 2000 ms, a imagem no ar está congelada. */
 int pl_phone_video_stalled_ms(struct pl_phone_video *video);
 
+/* Parte G5 (Wi-Fi dos celulares): kbps que chegam do celular (0 = nada) e quantas pausas na
+ * imagem houve nos últimos 30 s (engasgos do Wi-Fi). */
+int pl_phone_video_kbps(struct pl_phone_video *video);
+int pl_phone_video_recent_gaps(struct pl_phone_video *video);
+
 /* Atraso medido da câmera mais lenta agora, em ms; -1 = nenhuma medida. */
 int pl_phone_video_max_latency_ms(void);
 

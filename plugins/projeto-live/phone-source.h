@@ -38,13 +38,23 @@ struct pl_phone_status {
 	bool talking;  /* o operador está falando no intercom agora */
 
 	/* Para as miniaturas do painel "Câmeras": */
-	int latency_ms;    /* atraso medido desta câmera; -1 = sem medida */
-	int stalled_ms;    /* há quanto tempo não aparece quadro novo; -1 = nenhum quadro ainda */
-	bool has_image;    /* está chegando imagem (nem travada nem parada) */
+	int latency_ms; /* atraso medido desta câmera; -1 = sem medida */
+	int stalled_ms; /* há quanto tempo não aparece quadro novo; -1 = nenhum quadro ainda */
+	bool has_image; /* está chegando imagem (nem travada nem parada) */
+
+	/* Parte G5 (Wi-Fi dos celulares): */
+	int kbps;        /* quanto chega do celular agora (0 = nada) */
+	int rtt_ms;      /* ida e volta pelo canal de controle; -1 = sem medida */
+	int recent_gaps; /* pausas na imagem nos últimos 30 s */
+	bool weak;       /* sinal fraco: ping alto ou engasgando (só no Wi-Fi, não no cabo) */
 };
 
 /* Acima disto a imagem no ar está congelada (a miniatura fica amarela). */
 #define PL_PHONE_STALL_MS 2000
+/* Parte G5: acima disto o ping do celular indica Wi-Fi fraco (no Wi-Fi da igreja fica perto de 5-20 ms). */
+#define PL_PHONE_WEAK_RTT_MS 80
+/* Parte G5: pausas na imagem em 30 s a partir das quais o Wi-Fi do celular conta como fraco. */
+#define PL_PHONE_WEAK_GAPS 2
 
 bool pl_phone_is_source(obs_source_t *source);
 

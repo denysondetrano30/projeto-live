@@ -41,6 +41,9 @@ bool pl_clock_handle_line(struct pl_clock *clock, const char *line);
 /* Diferença (relógio do celular - relógio do PC), em ns. false se ainda não houver medida. */
 bool pl_clock_offset(struct pl_clock *clock, int64_t *offset_ns);
 
+/* Parte G5: ida e volta média das últimas medidas, em ms (-1 = nenhuma). Mostra o Wi-Fi do celular. */
+int pl_clock_round_trip_ms(struct pl_clock *clock);
+
 #ifdef __cplusplus
 }
 #endif
