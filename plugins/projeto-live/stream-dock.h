@@ -25,4 +25,9 @@ void pl_multistream_ui_load(void);
 class QWidget;
 /* A janela "Destinos" do somun live (uma só; se já estiver aberta, vem para a frente). */
 void pl_destinations_window_open(QWidget *parent);
+
+class QString;
+/* Parte G4: os destinos marcados com problema de chave (sem chave, velha, parece endereço), um por
+ * linha; vazio = tudo certo. Usado pelo Transmitir. */
+QString pl_destinations_key_problems(void);
 #endif

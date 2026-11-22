@@ -598,6 +598,7 @@ static void save_dests(void)
 			obs_data_set_int(item, "width", info->width);
 			obs_data_set_int(item, "height", info->height);
 			obs_data_set_string(item, "key_date", info->key_date);
+			obs_data_set_bool(item, "key_fixed", info->key_fixed);
 			obs_data_array_push_back(array, item);
 			obs_data_release(item);
 		}
@@ -670,6 +671,9 @@ static void load_dests(void)
 		info.width = (int)obs_data_get_int(item, "width");
 		info.height = (int)obs_data_get_int(item, "height");
 		copy_text(info.key_date, sizeof(info.key_date), obs_data_get_string(item, "key_date"));
+		/* Antes do G4 não havia "chave fixa": a chave padrão do YouTube não muda, as outras sim. */
+		info.key_fixed = obs_data_has_user_value(item, "key_fixed") ? obs_data_get_bool(item, "key_fixed")
+									    : strcmp(info.platform, "youtube") == 0;
 		struct dest *d = new_dest(&info);
 		da_push_back(dests, &d);
 		obs_data_release(item);
@@ -740,6 +744,7 @@ static void migrate_obs_stream(void)
 		info.enabled = true;
 		info.vertical = false;
 		today_text(info.key_date, sizeof(info.key_date));
+		info.key_fixed = strcmp(platform, "youtube") == 0;
 		struct dest *d = new_dest(&info);
 		da_insert(dests, 0, &d);
 		blog(LOG_INFO, "[projeto-live] a transmissão do OBS virou o destino '%s'", info.name);
@@ -844,6 +849,9 @@ void pl_multistream_set_all(const struct pl_dest_info *infos, size_t count)
 
 		if (d && same_info(&d->info, &info)) {
 			/* Nada mudou: continua como está (no ar, se estava). */
+			/* Só a data e a "chave fixa" podem ter mudado: não precisam religar. */
+			d->info.key_fixed = info.key_fixed;
+			copy_text(d->info.key_date, sizeof(d->info.key_date), info.key_date);
 		} else if (d) {
 			dest_release(d);
 			struct dest *changed = new_dest(&info);
@@ -961,4 +969,28 @@ int pl_multistream_down_count(void)
 	}
 	pthread_mutex_unlock(&state_mutex);
 	return down;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Conferir a chave (parte G4)                                                */
+
+enum pl_key_state pl_multistream_key_state(const struct pl_dest_info *info)
+{
+	const char *key = info->key;
+	while (*key == ' ') {
+		key++;
+	}
+	if (!*key) {
+		return PL_KEY_EMPTY;
+	}
+	/* O endereço do servidor (ou o de backup do YouTube) colado no lugar da chave. */
+	if (strstr(key, "://") || strncmp(key, "rtmp", 4) == 0) {
+		return PL_KEY_ADDRESS;
+	}
+	if (info->key_fixed) {
+		return PL_KEY_FIXED;
+	}
+	char today[16];
+	today_text(today, sizeof(today));
+	return strcmp(info->key_date, today) == 0 ? PL_KEY_TODAY : PL_KEY_OLD;
 }

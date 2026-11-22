@@ -1616,6 +1616,29 @@ private:
 	void toggleStream()
 	{
 		if (!pl_multistream_active()) {
+			/*
+			 * Parte G4: antes de entrar no ar, confere as chaves (na hora, sem ligar para a
+			 * plataforma). Só aparece se houver problema: chave velha, sem chave ou endereço no
+			 * lugar da chave.
+			 */
+			QString problems = pl_destinations_key_problems();
+			if (!problems.isEmpty()) {
+				QMessageBox box(QMessageBox::Warning, msg("Studio.StreamStart"),
+						msg("Studio.KeyProblems").arg(problems), QMessageBox::NoButton, this);
+				QPushButton *anyway =
+					box.addButton(msg("Studio.StreamAnyway"), QMessageBox::AcceptRole);
+				QPushButton *fix =
+					box.addButton(msg("Studio.OpenDestinations"), QMessageBox::ActionRole);
+				box.addButton(QMessageBox::Cancel);
+				box.exec();
+				if (box.clickedButton() == fix) {
+					pl_destinations_window_open(this);
+					return;
+				}
+				if (box.clickedButton() != anyway) {
+					return;
+				}
+			}
 			/* Sem destino marcado não há para onde transmitir: oferece abrir a janela Destinos. */
 			if (pl_multistream_start() == 0) {
 				QMessageBox box(QMessageBox::Information, msg("Studio.StreamStart"),

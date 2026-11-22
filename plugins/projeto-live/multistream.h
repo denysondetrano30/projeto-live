@@ -51,6 +51,8 @@ struct pl_dest_info {
 	bool vertical;
 	/* Dia (AAAA-MM-DD) em que a chave foi colada: "chave de hoje" ou "chave velha". */
 	char key_date[16];
+	/* "Chave fixa": não muda a cada live (chave persistente); nunca fica velha. */
+	bool key_fixed;
 	/* Antigos (antes da parte G, 22/11): ficam no arquivo, mas não valem mais. A qualidade agora
 	 * é uma só para todos (pl_multistream_quality_kbps). */
 	bool own_quality;
@@ -103,6 +105,20 @@ void pl_multistream_retry(size_t index);
 void pl_multistream_take_off(size_t index);
 /* Quantos destinos caíram (tentando voltar ou com erro) com a live no ar. */
 int pl_multistream_down_count(void);
+
+/*
+ * Como está a chave (parte G4, "Conferir"): sem chave; parece um endereço (rtmp://...) colado no
+ * lugar da chave; fixa (marcada pela pessoa); de hoje (colada hoje); velha (colada antes de hoje,
+ * sem ser fixa). Não liga para a plataforma: confere só pela data e pelo jeito da chave.
+ */
+enum pl_key_state {
+	PL_KEY_EMPTY,
+	PL_KEY_ADDRESS,
+	PL_KEY_FIXED,
+	PL_KEY_TODAY,
+	PL_KEY_OLD,
+};
+enum pl_key_state pl_multistream_key_state(const struct pl_dest_info *info);
 
 /* A taxa de bits de vídeo de todos os destinos (horizontal e vertical), em kbps: a da aba Saída
  * do OBS. Mudanças lá valem no próximo "Transmitir". */

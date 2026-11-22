@@ -27,6 +27,9 @@
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
+#include <util/platform.h>
+
+#include <curl/curl.h>
 
 #include <QAbstractButton>
 #include <QAbstractItemModel>
@@ -36,6 +39,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDate>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -54,6 +58,7 @@
 #include <QMainWindow>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QPointer>
 #include <QPushButton>
 #include <QRadioButton>
@@ -73,6 +78,7 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "intercom-audio.h"
@@ -166,8 +172,15 @@ public:
 		form->addRow(moduleText("Stream.Format"), format);
 		form->addRow(moduleText("Stream.Name"), name);
 		form->addRow(moduleText("Stream.Server"), server);
+		/* Parte G4: chave persistente (YouTube, chave persistente do Instagram) nunca fica "velha". */
+		keyFixed = new QCheckBox(moduleText("Stream.KeyFixed"), this);
+		keyFixed->setToolTip(moduleText("Stream.KeyFixedHelp"));
+		keyFixed->setChecked(start.key_fixed);
+		connect(keyFixed, &QCheckBox::toggled, this, [this](bool) { keyFixedTouched = true; });
+
 		form->addRow(moduleText("Stream.Key"), key);
 		form->addRow(QString(), showKey);
+		form->addRow(QString(), keyFixed);
 		layout->addLayout(form);
 
 		/* A explicação de onde achar a chave fica na dica do mouse, no campo da chave. */
@@ -207,6 +220,7 @@ public:
 		copyText(info.server, sizeof(info.server), server->text().trimmed());
 		copyText(info.key, sizeof(info.key), key->text().trimmed());
 		info.vertical = format->currentData().toBool();
+		info.key_fixed = keyFixed->isChecked();
 		return info;
 	}
 
@@ -234,6 +248,11 @@ private:
 		if (now.horizontal != now.vertical) {
 			format->setCurrentIndex(now.vertical ? 1 : 0);
 		}
+		/* A chave padrão do YouTube não muda a cada live; as outras, em geral, sim. */
+		if (!keyFixedTouched) {
+			QSignalBlocker block(keyFixed);
+			keyFixed->setChecked(strcmp(now.id, "youtube") == 0);
+		}
 	}
 
 	void updateHelp()
@@ -251,6 +270,14 @@ private:
 			QMessageBox::warning(this, windowTitle(), moduleText("Stream.FillAll"));
 			return;
 		}
+		/* Parte G4: o endereço do servidor colado no lugar da chave (aconteceu no teste de 22/11). */
+		pl_dest_info check = result();
+		if (pl_multistream_key_state(&check) == PL_KEY_ADDRESS &&
+		    QMessageBox::warning(this, windowTitle(), moduleText("Stream.KeyLooksLikeAddress"),
+					 QMessageBox::Save | QMessageBox::Cancel,
+					 QMessageBox::Cancel) != QMessageBox::Save) {
+			return;
+		}
 		accept();
 	}
 
@@ -260,6 +287,8 @@ private:
 	QLineEdit *name = nullptr;
 	QLineEdit *server = nullptr;
 	QLineEdit *key = nullptr;
+	QCheckBox *keyFixed = nullptr;
+	bool keyFixedTouched = false;
 	QLabel *help = nullptr;
 	QString lastPlatform;
 };
@@ -272,6 +301,156 @@ QString qualityText()
 {
 	QString value = QString::number(pl_multistream_quality_kbps() / 1000.0, 'f', 1).replace('.', ',');
 	return moduleText("Multistream.QualityFromObs").arg(value);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Conferir (parte G4): a chave de cada destino e a internet                  */
+
+/*
+ * A marca da chave na lista ("chave de hoje", "chave velha", "chave fixa", "sem chave", "parece um
+ * endereço"). problem = true quando a live pode morrer por causa dela (fica em vermelho). Um
+ * destino novo, ainda sem data, conta como "de hoje" (a data entra no Salvar).
+ */
+QString keyTag(const pl_dest_info &info, bool &problem)
+{
+	pl_dest_info check = info;
+	if (!*check.key_date) {
+		QByteArray today = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd")).toUtf8();
+		copyText(check.key_date, sizeof(check.key_date), QString::fromUtf8(today));
+	}
+	switch (pl_multistream_key_state(&check)) {
+	case PL_KEY_EMPTY:
+		problem = true;
+		return moduleText("Check.KeyEmpty");
+	case PL_KEY_ADDRESS:
+		problem = true;
+		return moduleText("Check.KeyAddress");
+	case PL_KEY_FIXED:
+		return moduleText("Check.KeyFixed");
+	case PL_KEY_TODAY:
+		return moduleText("Check.KeyToday");
+	case PL_KEY_OLD:
+	default: {
+		problem = true;
+		QDate pasted = QDate::fromString(QString::fromUtf8(info.key_date), QStringLiteral("yyyy-MM-dd"));
+		return pasted.isValid() ? moduleText("Check.KeyOldDate").arg(pasted.toString(QStringLiteral("dd/MM")))
+					: moduleText("Check.KeyOld");
+	}
+	}
+}
+
+/* Os destinos marcados com problema de chave, um por linha ("Instagram: chave velha (21/11)"). */
+QStringList keyProblems()
+{
+	QStringList lines;
+	for (size_t i = 0; i < pl_multistream_count(); i++) {
+		pl_dest_info info;
+		if (!pl_multistream_get(i, &info) || !info.enabled) {
+			continue;
+		}
+		bool problem = false;
+		QString tag = keyTag(info, problem);
+		if (problem) {
+			lines.append(QString::fromUtf8(info.name) + QStringLiteral(": ") + tag);
+		}
+	}
+	return lines;
+}
+
+/*
+ * Teste de internet (upload): manda até 25 MB para o medidor gratuito da Cloudflare (no máximo 8 s) e
+ * mede quanto saiu. Roda numa linha de trabalho separada e devolve os Mb/s (0 = não conseguiu) na
+ * thread da interface. Nada da pessoa vai junto: só bytes sem significado.
+ */
+struct UploadTest {
+	uint64_t startNs = 0;
+	curl_off_t sent = 0;
+	double seconds = 0.0;
+};
+
+size_t uploadRead(char *buffer, size_t size, size_t count, void *)
+{
+	size_t bytes = size * count;
+	for (size_t i = 0; i < bytes; i++) {
+		buffer[i] = (char)(i * 131 + 7);
+	}
+	return bytes;
+}
+
+int uploadProgress(void *param, curl_off_t, curl_off_t, curl_off_t, curl_off_t ulnow)
+{
+	auto *test = static_cast<UploadTest *>(param);
+	uint64_t now = os_gettime_ns();
+	if (!test->startNs) {
+		test->startNs = now;
+	}
+	test->sent = ulnow;
+	test->seconds = (double)(now - test->startNs) / 1e9;
+	return test->seconds >= 8.0 ? 1 : 0;
+}
+
+void measureUpload(QPointer<QObject> receiver, std::function<void(double)> done)
+{
+	std::thread([receiver, done]() {
+		UploadTest test;
+		CURL *curl = curl_easy_init();
+		if (curl) {
+			curl_easy_setopt(curl, CURLOPT_URL, "https://speed.cloudflare.com/__up");
+			curl_easy_setopt(curl, CURLOPT_POST, 1L);
+			curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)25 * 1024 * 1024);
+			curl_easy_setopt(curl, CURLOPT_READFUNCTION, uploadRead);
+			curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+			curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, uploadProgress);
+			curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &test);
+			curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 8L);
+			curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
+			curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+#if defined(_WIN32) && defined(CURLSSLOPT_NATIVE_CA)
+			curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, (long)CURLSSLOPT_NATIVE_CA);
+#endif
+			curl_easy_perform(curl);
+			curl_easy_cleanup(curl);
+		}
+		double mbps = test.seconds >= 0.3 && test.sent > 0 ? (double)test.sent * 8.0 / 1e6 / test.seconds : 0.0;
+		blog(LOG_INFO, "[projeto-live] Conferir: upload %.1f Mb/s (%.1f s)", mbps, test.seconds);
+		QMetaObject::invokeMethod(
+			qApp,
+			[receiver, done, mbps]() {
+				if (receiver) {
+					done(mbps);
+				}
+			},
+			Qt::QueuedConnection);
+	}).detach();
+}
+
+/* "Internet: envia 18,4 Mb/s · dá para 2 destinos a 6,0 Mb/s" (+ aviso se marcou mais que isso). */
+QString uploadText(double mbps)
+{
+	if (mbps <= 0.0) {
+		return QStringLiteral("<span style='color:%1'>%2</span>")
+			.arg(QString(SOMUN_RED), moduleText("Check.InternetFailed"));
+	}
+	double quality = pl_multistream_quality_kbps() / 1000.0;
+	/* Cada destino manda a própria cópia (vídeo + áudio); deixa 25% de folga para a internet oscilar. */
+	double perDest = quality + 0.2;
+	int fits = perDest > 0.0 ? (int)(mbps * 0.75 / perDest) : 0;
+	int marked = 0;
+	for (size_t i = 0; i < pl_multistream_count(); i++) {
+		pl_dest_info info;
+		if (pl_multistream_get(i, &info) && info.enabled) {
+			marked++;
+		}
+	}
+	auto number = [](double value) {
+		return QString::number(value, 'f', 1).replace('.', ',');
+	};
+	QString text = moduleText("Check.Internet").arg(number(mbps)).arg(fits).arg(number(quality));
+	if (marked > fits) {
+		text += QStringLiteral("<br><span style='color:%1'>%2</span>")
+				.arg(QString(SOMUN_RED), moduleText("Check.TooMany").arg(marked));
+	}
+	return text;
 }
 
 /*
@@ -379,6 +558,9 @@ private:
 		}
 		if (!state.isEmpty()) {
 			text += QStringLiteral("   ·   ") + state;
+		} else {
+			bool problem = false;
+			text += QStringLiteral("   ·   ") + keyTag(info, problem);
 		}
 		return text;
 	}
@@ -428,12 +610,16 @@ private:
 			}
 			bool red = false;
 			QString state = stateOf(dests[index], red);
+			if (state.isEmpty()) {
+				keyTag(dests[index], red);
+			}
 			QString text = rowText(dests[index], state);
-			if (item->text() != text) {
+			QBrush brush = red ? QBrush(QColor(SOMUN_RED)) : QBrush();
+			if (item->text() != text || item->foreground() != brush) {
 				QSignalBlocker block(view);
 				item->setText(text);
 				item->setToolTip(state);
-				item->setForeground(red ? QBrush(QColor(SOMUN_RED)) : QBrush());
+				item->setForeground(brush);
 			}
 		}
 	}
@@ -589,14 +775,36 @@ public:
 		layout->setContentsMargins(16, 16, 16, 16);
 		layout->setSpacing(10);
 
+		/* No alto: a explicação e o botão Conferir (parte G4); embaixo deles, o resultado. */
+		auto *top = new QHBoxLayout();
 		auto *help = new QLabel(moduleText("Destinations.Help"), this);
 		help->setWordWrap(true);
-		layout->addWidget(help);
+		top->addWidget(help, 1);
+		auto *check = new QPushButton(moduleText("Check.Button"), this);
+		check->setToolTip(moduleText("Check.ButtonHelp"));
+		top->addWidget(check, 0, Qt::AlignTop);
+		layout->addLayout(top);
 
 		auto *quality = new QLabel(qualityText(), this);
 		quality->setWordWrap(true);
 		quality->setStyleSheet(QStringLiteral("color: #8C8C8C;"));
 		layout->addWidget(quality);
+
+		auto *result = new QLabel(this);
+		result->setWordWrap(true);
+		result->setTextFormat(Qt::RichText);
+		result->hide();
+		layout->addWidget(result);
+
+		connect(check, &QPushButton::clicked, this, [this, check, result]() {
+			check->setEnabled(false);
+			result->setText(moduleText("Check.Measuring"));
+			result->show();
+			measureUpload(this, [check, result](double mbps) {
+				result->setText(uploadText(mbps));
+				check->setEnabled(true);
+			});
+		});
 
 		list = new DestinationsList(this, dests, [this]() { dirty = true; }, true);
 		layout->addWidget(list, 1);
@@ -1079,4 +1287,9 @@ void pl_destinations_window_open(QWidget *parent)
 	}
 	destinationsWindow = new DestinationsWindow(parent);
 	destinationsWindow->show();
+}
+
+QString pl_destinations_key_problems(void)
+{
+	return keyProblems().join(QStringLiteral("\n"));
 }
