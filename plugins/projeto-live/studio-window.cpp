@@ -26,6 +26,7 @@
  */
 
 #include "studio-window.h"
+#include "media-bar.h"
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
@@ -462,14 +463,19 @@ public:
 			view = screen;
 		}
 		frame->setChild(view);
-		setLook(title, color);
 		outer->addWidget(frame, 1);
+		/* A faixa do vídeo no ar (tocar/pausar, recomeçar, quanto falta): só aparece quando esta
+		 * tela é o No ar e tem vídeo no ar. */
+		mediaBar = pl_media_bar_create(this);
+		outer->addWidget(mediaBar);
+		setLook(title, color);
 	}
 
 	/* Título e cor da moldura (a Prévia vira "No ar" vermelha no modo normal). */
 	void setLook(const QString &title, const char *color)
 	{
 		frame->refit();
+		pl_media_bar_set_allowed(mediaBar, title == msg("Studio.Program"));
 		if (look == title) {
 			return;
 		}
@@ -493,6 +499,7 @@ private:
 	QLabel *sceneName = nullptr;
 	QLabel *label = nullptr;
 	AspectFrame *frame = nullptr;
+	QWidget *mediaBar = nullptr;
 	QString look;
 };
 

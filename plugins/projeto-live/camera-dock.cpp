@@ -28,6 +28,7 @@
  */
 
 #include "camera-dock.h"
+#include "media-bar.h"
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
@@ -1847,6 +1848,8 @@ void showCardMenu(Card *card, const QPoint &where)
 	}
 
 	QMenu menu;
+	/* Se a entrada tem vídeo: tocar/pausar e recomeçar, logo no começo. */
+	pl_media_menu(&menu, scene);
 	QAction *addAction = menu.addAction(msg("Entries.AddSource"));
 	QAction *organizeAction = menu.addAction(msg(sourcesOpener ? "Entries.Sources" : "Entries.Organize"));
 	pl_entry_transition_menu(&menu, scene);

@@ -59,6 +59,8 @@ target_sources(
     sha256.h
     layout.cpp
     layout.h
+    media-bar.cpp
+    media-bar.h
     scene-audio.cpp
     scene-audio.h
     somun-style.cpp
