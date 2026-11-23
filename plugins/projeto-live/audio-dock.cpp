@@ -56,7 +56,6 @@
 #include <string>
 #include <vector>
 
-#include "audio-filters.h"
 #include "phone-source.h"
 #include "scene-audio.h"
 
@@ -162,16 +161,29 @@ public:
 			}
 		});
 
-		/* Botão direito no canal: os filtros do som (parte H1). */
+		/*
+		 * Botão direito no canal (parte H1, ajustado em 23/11 a pedido dela): abre direto a janela
+		 * de filtros do próprio OBS, com todos os filtros (ela preferiu uma janela só à nossa
+		 * janela simplificada). Mono, balanço e atraso ficam nos ajustes avançados do OBS.
+		 */
 		setContextMenuPolicy(Qt::CustomContextMenu);
 		connect(this, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
 			QMenu menu(this);
 			QAction *filters = menu.addAction(QString::fromUtf8(obs_module_text("AudioFilters.Menu")));
-			if (menu.exec(mapToGlobal(pos)) == filters) {
+			QAction *advanced =
+				menu.addAction(QString::fromUtf8(obs_module_text("AudioFilters.AdvancedMenu")));
+			QAction *chosen = menu.exec(mapToGlobal(pos));
+			if (chosen == filters) {
 				obs_source_t *target = obs_weak_source_get_source(source);
 				if (target) {
-					pl_audio_filters_open(target, window());
+					obs_frontend_open_source_filters(target);
 					obs_source_release(target);
+				}
+			} else if (chosen == advanced) {
+				auto *main = static_cast<QWidget *>(obs_frontend_get_main_window());
+				QAction *open = main ? main->findChild<QAction *>("actionAdvAudioProperties") : nullptr;
+				if (open) {
+					open->trigger();
 				}
 			}
 		});
