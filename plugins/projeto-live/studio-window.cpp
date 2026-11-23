@@ -27,6 +27,7 @@
 
 #include "studio-window.h"
 #include "media-bar.h"
+#include "photo.h"
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
@@ -837,8 +838,8 @@ private:
 
 void openSourcesDialog(); /* abre a janelinha "Fontes desta entrada" (mais embaixo) */
 
-/* O item "Fontes desta entrada..." que entra no alto do menu do OBS na Prévia. */
 QAction *sourcesMenuAction = nullptr;
+QAction *photoMenuAction = nullptr;
 
 /* Seleciona (no OBS) a fonte que está debaixo do mouse e abre o menu da prévia do OBS, que age
  * sobre a fonte selecionada (Transformar, Modo de mescla, Filtros...). Fora de qualquer fonte,
@@ -889,6 +890,15 @@ void previewMenuAt(QWidget *view, const QPoint &pos)
 		QObject::connect(sourcesMenuAction, &QObject::destroyed, []() { sourcesMenuAction = nullptr; });
 	}
 	main->setProperty("plPreviewExtra", QVariant::fromValue<QObject *>(sourcesMenuAction));
+	/* Parte H3: sem modo estúdio a Prévia é o No ar, então a foto do No ar entra aqui também. */
+	if (!photoMenuAction) {
+		photoMenuAction = new QAction(msg("Photo.ProgramMenu"), main);
+		QObject::connect(photoMenuAction, &QAction::triggered, main, []() { pl_photo_program(); });
+		QObject::connect(photoMenuAction, &QObject::destroyed, []() { photoMenuAction = nullptr; });
+	}
+	main->setProperty("plPreviewExtra2", obs_frontend_preview_program_mode_active()
+						     ? QVariant()
+						     : QVariant::fromValue<QObject *>(photoMenuAction));
 	main->setProperty("plPreviewExtraOnce", true);
 	/* Na fila: o OBS atualiza a seleção dele antes de montar o menu. */
 	QMetaObject::invokeMethod(main, "on_preview_customContextMenuRequested", Qt::QueuedConnection);
@@ -916,9 +926,20 @@ void attachScreenMenus(QObject *owner, QWidget *previewView, QWidget *programVie
 	QObject::connect(previewView, &QWidget::customContextMenuRequested, owner,
 			 [previewView](const QPoint &pos) { previewMenuAt(previewView, pos); });
 	programView->setContextMenuPolicy(Qt::CustomContextMenu);
-	QObject::connect(programView, &QWidget::customContextMenuRequested, owner, []() {
-		if (QWidget *main = obsWindow()) {
-			QMetaObject::invokeMethod(main, "ProgramViewContextMenuRequested", Qt::QueuedConnection);
+	QObject::connect(programView, &QWidget::customContextMenuRequested, owner, [programView](const QPoint &pos) {
+		/* Parte H3: a foto do No ar primeiro; o resto (abrir em outra tela) continua
+				  * o mesmo de antes. */
+		QMenu menu;
+		QAction *photo = menu.addAction(msg("Photo.ProgramMenu"));
+		QAction *more = menu.addAction(msg("Studio.ProgramMore"));
+		QAction *chosen = menu.exec(programView->mapToGlobal(pos));
+		if (chosen == photo) {
+			pl_photo_program();
+		} else if (chosen == more) {
+			if (QWidget *main = obsWindow()) {
+				QMetaObject::invokeMethod(main, "ProgramViewContextMenuRequested",
+							  Qt::QueuedConnection);
+			}
 		}
 	});
 }
@@ -1122,11 +1143,28 @@ public:
 			top->addWidget(badge);
 		}
 		top->addStretch(1);
+		/* Parte H3: aviso de câmera virtual ligada (liga e desliga no "⋯"). */
+		virtualCamLabel = new QLabel(msg("Studio.VirtualCamOn"), this);
+		virtualCamLabel->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY2));
+		virtualCamLabel->setToolTip(msg("Studio.VirtualCamOnHint"));
+		virtualCamLabel->setVisible(false);
+		top->addWidget(virtualCamLabel);
 		recordButton = new QPushButton(this);
 		recordButton->setMinimumHeight(32);
 		recordButton->setFocusPolicy(Qt::NoFocus);
 		connect(recordButton, &QPushButton::clicked, this, []() { toggleRecord(); });
 		top->addWidget(recordButton);
+		/* Parte H3: pausar a gravação, ao lado do Gravar (só aparece gravando). */
+		pauseButton = new QPushButton(this);
+		pauseButton->setMinimumHeight(32);
+		pauseButton->setFocusPolicy(Qt::NoFocus);
+		pauseButton->setVisible(false);
+		connect(pauseButton, &QPushButton::clicked, this, []() {
+			if (obs_frontend_recording_active()) {
+				obs_frontend_recording_pause(!obs_frontend_recording_paused());
+			}
+		});
+		top->addWidget(pauseButton);
 		streamButton = new QPushButton(this);
 		streamButton->setMinimumHeight(32);
 		streamButton->setFocusPolicy(Qt::NoFocus);
@@ -1377,6 +1415,11 @@ private:
 		studio->setCheckable(true);
 		studio->setChecked(obs_frontend_preview_program_mode_active());
 		studio->setToolTip(msg("Studio.StudioModeHint"));
+		QAction *virtualCam = menu.addAction(msg("Studio.VirtualCam"));
+		virtualCam->setCheckable(true);
+		virtualCam->setChecked(obs_frontend_virtualcam_active());
+		virtualCam->setToolTip(msg("Studio.VirtualCamHint"));
+		menu.setToolTipsVisible(true);
 		menu.addSeparator();
 
 		QAction *destinations = menu.addAction(msg("Studio.Destinations"));
@@ -1408,6 +1451,12 @@ private:
 			pl_transitions_dialog_show(this);
 		} else if (chosen == studio) {
 			obs_frontend_set_preview_program_mode(studio->isChecked());
+		} else if (chosen == virtualCam) {
+			if (virtualCam->isChecked()) {
+				obs_frontend_start_virtualcam();
+			} else {
+				obs_frontend_stop_virtualcam();
+			}
 		} else if (chosen == destinations) {
 			pl_destinations_window_open(this);
 		} else if (chosen == settings) {
@@ -1604,11 +1653,20 @@ private:
 			obs_output_release(output);
 			recordText = clock.isEmpty() ? msg("Studio.Recording")
 						     : msg("Studio.RecordingClock").arg(clock);
+			if (obs_frontend_recording_paused()) {
+				recordText = clock.isEmpty() ? msg("Studio.RecordPausedShort")
+							     : msg("Studio.RecordPaused").arg(clock);
+			}
 		} else {
 			recordText = msg("Studio.RecordStart");
 		}
 		if (recordButton->text() != recordText) {
 			recordButton->setText(recordText);
+		}
+		updatePause(recording);
+		bool virtualCam = obs_frontend_virtualcam_active();
+		if (virtualCamLabel->isHidden() == virtualCam) {
+			virtualCamLabel->setVisible(virtualCam);
 		}
 		if (recordShown != (int)recording) {
 			recordShown = (int)recording;
@@ -1616,6 +1674,30 @@ private:
 			recordButton->setStyleSheet(
 				recording ? QString("QPushButton { border: 1px solid %1; }").arg(QString(SOMUN_WHITE))
 					  : QString());
+		}
+	}
+
+	/* O botão Pausar: some sem gravação; "Continuar" quando pausado; apagado quando o jeito de gravar
+	 * escolhido não deixa pausar. */
+	void updatePause(bool recording)
+	{
+		if (pauseButton->isHidden() == recording) {
+			pauseButton->setVisible(recording);
+		}
+		if (!recording) {
+			return;
+		}
+		bool paused = obs_frontend_recording_paused();
+		QString label = msg(paused ? "Studio.RecordResume" : "Studio.RecordPause");
+		if (pauseButton->text() != label) {
+			pauseButton->setText(label);
+		}
+		obs_output_t *output = obs_frontend_get_recording_output();
+		bool canPause = output && obs_output_can_pause(output);
+		obs_output_release(output);
+		if (pauseButton->isEnabled() != canPause) {
+			pauseButton->setEnabled(canPause);
+			pauseButton->setToolTip(canPause ? QString() : msg("Studio.RecordPauseCant"));
 		}
 	}
 
@@ -1744,6 +1826,8 @@ private:
 	QWidget *verticalPreviewHolder = nullptr;
 	QPushButton *streamButton = nullptr;
 	QPushButton *recordButton = nullptr;
+	QPushButton *pauseButton = nullptr;
+	QLabel *virtualCamLabel = nullptr;
 	QTimer *timer = nullptr;
 
 	std::mutex previewMutex;

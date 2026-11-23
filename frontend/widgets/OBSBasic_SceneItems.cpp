@@ -608,6 +608,11 @@ void OBSBasic::CreateSourcePopupMenu(int idx, bool preview)
 			popup.addAction(extra);
 			popup.addSeparator();
 		}
+		// A second optional item (the photo of the live output).
+		if (QAction *extra2 = qobject_cast<QAction *>(property("plPreviewExtra2").value<QObject *>())) {
+			popup.addAction(extra2);
+			popup.addSeparator();
+		}
 	}
 
 	// Add new source

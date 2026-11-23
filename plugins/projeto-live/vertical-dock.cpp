@@ -22,6 +22,7 @@
  */
 
 #include "vertical-dock.h"
+#include "photo.h"
 #include "source-row.hpp"
 
 #include <obs-frontend-api.h>
@@ -48,6 +49,7 @@
 #include <QFont>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QContextMenuEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
@@ -1948,6 +1950,21 @@ public:
 	}
 
 protected:
+	/* Parte H3: botão direito no vertical do ar tira a foto dele. */
+	void contextMenuEvent(QContextMenuEvent *event) override
+	{
+		if (previewMode) {
+			QWidget::contextMenuEvent(event);
+			return;
+		}
+		QMenu menu;
+		QAction *photo = menu.addAction(moduleText("Photo.VerticalMenu"));
+		if (menu.exec(event->globalPos()) == photo) {
+			pl_photo_vertical();
+		}
+		event->accept();
+	}
+
 	bool eventFilter(QObject *object, QEvent *event) override
 	{
 		if (embeddedMode && object == parentWidget() && event->type() == QEvent::Resize) {

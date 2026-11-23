@@ -18,6 +18,10 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenu>
+#include <QMouseEvent>
+#include <QSignalBlocker>
+#include <QSize>
+#include <QSlider>
 #include <QStyle>
 #include <QTimer>
 #include <QToolButton>
@@ -90,22 +94,6 @@ void releaseAll(std::vector<obs_source_t *> &list)
 	list.clear();
 }
 
-/* "0:42" ou "1:02:03". */
-QString clockText(int64_t ms)
-{
-	if (ms < 0) {
-		ms = 0;
-	}
-	int64_t total = (ms + 999) / 1000;
-	int64_t h = total / 3600;
-	int64_t m = (total / 60) % 60;
-	int64_t s = total % 60;
-	if (h > 0) {
-		return QString("%1:%2:%3").arg(h).arg(m, 2, 10, QChar('0')).arg(s, 2, 10, QChar('0'));
-	}
-	return QString("%1:%2").arg(m).arg(s, 2, 10, QChar('0'));
-}
-
 bool isPlaying(obs_source_t *source)
 {
 	return obs_source_media_get_state(source) == OBS_MEDIA_STATE_PLAYING;
@@ -124,41 +112,117 @@ void togglePlay(obs_source_t *source)
 	}
 }
 
+/* A barra da linha do tempo: clicar em qualquer ponto pula direto para lá (como no OBS), e
+ * arrastar a bolinha vai mostrando o ponto. */
+class TimeSlider : public QSlider {
+public:
+	explicit TimeSlider(QWidget *parent) : QSlider(Qt::Horizontal, parent)
+	{
+		setRange(0, 1000);
+		setFocusPolicy(Qt::NoFocus);
+		setStyleSheet(QString("QSlider::groove:horizontal { height: 4px; background: %1; border-radius: 2px; }"
+				      "QSlider::sub-page:horizontal { background: %2; border-radius: 2px; }"
+				      "QSlider::handle:horizontal { background: %2; width: 14px; margin: -5px 0;"
+				      " border-radius: 7px; }")
+				      .arg(SOMUN_LINE2, SOMUN_WHITE));
+	}
+
+protected:
+	int valueAt(QMouseEvent *event) const
+	{
+		return QStyle::sliderValueFromPosition(minimum(), maximum(), (int)event->position().x(), width());
+	}
+
+	void mousePressEvent(QMouseEvent *event) override
+	{
+		if (event->button() == Qt::LeftButton) {
+			int value = valueAt(event);
+			setSliderDown(true);
+			setValue(value);
+			emit sliderMoved(value);
+			event->accept();
+			return;
+		}
+		QSlider::mousePressEvent(event);
+	}
+
+	void mouseMoveEvent(QMouseEvent *event) override
+	{
+		if (isSliderDown()) {
+			int value = valueAt(event);
+			setValue(value);
+			emit sliderMoved(value);
+			event->accept();
+			return;
+		}
+		QSlider::mouseMoveEvent(event);
+	}
+
+	void mouseReleaseEvent(QMouseEvent *event) override
+	{
+		if (isSliderDown()) {
+			setSliderDown(false);
+			emit sliderReleased();
+			event->accept();
+			return;
+		}
+		QSlider::mouseReleaseEvent(event);
+	}
+};
+
+/* "00:00:38", como o OBS mostra. */
+QString longClock(int64_t ms)
+{
+	if (ms < 0) {
+		ms = 0;
+	}
+	int64_t total = ms / 1000;
+	return QString("%1:%2:%3")
+		.arg(total / 3600, 2, 10, QChar('0'))
+		.arg((total / 60) % 60, 2, 10, QChar('0'))
+		.arg(total % 60, 2, 10, QChar('0'));
+}
+
 class MediaBar : public QWidget {
 public:
 	explicit MediaBar(QWidget *parent) : QWidget(parent)
 	{
 		setObjectName("plMediaBar");
 		auto *row = new QHBoxLayout(this);
-		row->setContentsMargins(2, 0, 2, 0);
+		row->setContentsMargins(2, 2, 2, 2);
 		row->setSpacing(6);
 
 		play = new QToolButton(this);
-		play->setAutoRaise(true);
 		play->setFocusPolicy(Qt::NoFocus);
+		play->setIconSize(QSize(18, 18));
 		connect(play, &QToolButton::clicked, this, [this]() { act(togglePlay); });
 		row->addWidget(play);
 
-		restart = new QToolButton(this);
-		restart->setAutoRaise(true);
-		restart->setFocusPolicy(Qt::NoFocus);
-		restart->setIcon(style()->standardIcon(QStyle::SP_MediaSkipBackward));
-		restart->setToolTip(text("Media.Restart"));
-		connect(restart, &QToolButton::clicked, this,
-			[this]() { act([](obs_source_t *source) { obs_source_media_restart(source); }); });
-		row->addWidget(restart);
+		stop = new QToolButton(this);
+		stop->setFocusPolicy(Qt::NoFocus);
+		stop->setIconSize(QSize(18, 18));
+		stop->setIcon(style()->standardIcon(QStyle::SP_MediaStop));
+		stop->setToolTip(text("Media.Stop"));
+		connect(stop, &QToolButton::clicked, this,
+			[this]() { act([](obs_source_t *source) { obs_source_media_stop(source); }); });
+		row->addWidget(stop);
 
 		name = new QLabel(this);
 		name->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY));
-		name->setMinimumWidth(20);
-		row->addWidget(name, 1);
+		name->setVisible(false);
+		row->addWidget(name);
 
-		left = new QLabel(this);
-		row->addWidget(left);
+		slider = new TimeSlider(this);
+		connect(slider, &QSlider::sliderMoved, this, [this](int value) { seek(value); });
+		connect(slider, &QSlider::sliderReleased, this, [this]() { seek(slider->value()); });
+		row->addWidget(slider, 1);
+
+		times = new QLabel(this);
+		row->addWidget(times);
 
 		setVisible(false);
 		auto *timer = new QTimer(this);
-		timer->setInterval(250);
+		timer->setInterval(200);
 		connect(timer, &QTimer::timeout, this, [this]() { refresh(); });
 		timer->start();
 	}
@@ -172,7 +236,7 @@ public:
 	}
 
 private:
-	/* O vídeo que a faixa mostra: o primeiro tocando; se nenhum, o primeiro pausado; se nenhum, o
+	/* O vídeo que a barra mostra: o primeiro tocando; se nenhum, o primeiro pausado; se nenhum, o
 	 * primeiro. Volta com referência (ou nullptr). */
 	obs_source_t *pick()
 	{
@@ -214,6 +278,31 @@ private:
 		refresh();
 	}
 
+	/* Pula para o ponto da barra (0 a 1000). */
+	void seek(int value)
+	{
+		obs_source_t *source = obs_weak_source_get_source(current.get());
+		if (!source) {
+			return;
+		}
+		int64_t duration = obs_source_media_get_duration(source);
+		if (duration > 0) {
+			int64_t ms = duration * value / 1000;
+			obs_source_media_set_time(source, ms);
+			showTimes(ms, duration);
+		}
+		obs_source_release(source);
+	}
+
+	void showTimes(int64_t time, int64_t duration)
+	{
+		QString label = duration > 0 ? QString("%1 / -%2").arg(longClock(time), longClock(duration - time))
+					     : longClock(time);
+		if (times->text() != label) {
+			times->setText(label);
+		}
+	}
+
 	void refresh()
 	{
 		/* Tela escondida (ex.: as telas foram para o monitor 2): nem procura. */
@@ -236,29 +325,32 @@ private:
 			play->setToolTip(text(playing ? "Media.Pause" : "Media.Play"));
 		}
 
-		QString title = QString::fromUtf8(obs_source_get_name(source));
+		/* Com mais de um vídeo no ar, mostra de qual é a barra. */
+		QString title;
 		if (count > 1) {
-			title = text("Media.OneOfMany").arg(title).arg(count);
+			title = text("Media.OneOfMany").arg(QString::fromUtf8(obs_source_get_name(source))).arg(count);
 		}
 		if (name->text() != title) {
 			name->setText(title);
+			name->setVisible(!title.isEmpty());
 		}
+		slider->setToolTip(QString::fromUtf8(obs_source_get_name(source)));
 
-		QString status;
-		int64_t duration = obs_source_media_get_duration(source);
-		int64_t time = obs_source_media_get_time(source);
-		if (state == OBS_MEDIA_STATE_ENDED || state == OBS_MEDIA_STATE_STOPPED) {
-			status = text("Media.Ended");
-		} else if (duration > 0) {
-			status = text("Media.Left").arg(clockText(duration - time));
-			if (state == OBS_MEDIA_STATE_PAUSED) {
-				status = text("Media.PausedLeft").arg(status);
+		/* Enquanto a pessoa arrasta, a barra é dela. */
+		if (!slider->isSliderDown()) {
+			int64_t duration = obs_source_media_get_duration(source);
+			bool stopped = state == OBS_MEDIA_STATE_STOPPED || state == OBS_MEDIA_STATE_NONE;
+			int64_t time = stopped ? 0 : obs_source_media_get_time(source);
+			if (state == OBS_MEDIA_STATE_ENDED) {
+				time = duration;
 			}
-		} else if (state == OBS_MEDIA_STATE_PAUSED) {
-			status = text("Media.Paused");
-		}
-		if (left->text() != status) {
-			left->setText(status);
+			int value = duration > 0 ? (int)(time * 1000 / duration) : 0;
+			slider->setEnabled(duration > 0);
+			if (slider->value() != value) {
+				QSignalBlocker block(slider);
+				slider->setValue(value);
+			}
+			showTimes(time, duration);
 		}
 
 		obs_source_release(source);
@@ -268,9 +360,10 @@ private:
 	}
 
 	QToolButton *play = nullptr;
-	QToolButton *restart = nullptr;
+	QToolButton *stop = nullptr;
 	QLabel *name = nullptr;
-	QLabel *left = nullptr;
+	TimeSlider *slider = nullptr;
+	QLabel *times = nullptr;
 	WeakPtr current;
 	int count = 0;
 	bool allowed = true;

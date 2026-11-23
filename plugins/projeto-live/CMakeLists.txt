@@ -41,6 +41,8 @@ target_sources(
     phone-source.h
     phone-video.c
     phone-video.h
+    photo.cpp
+    photo.h
     pl-clock.c
     pl-account.cpp
     pl-account.h
