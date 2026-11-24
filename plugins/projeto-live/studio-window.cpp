@@ -35,6 +35,7 @@
 #endif
 
 #include <util/config-file.h>
+#include <util/dstr.h>
 #include <util/platform.h>
 #include <graphics/matrix4.h>
 #include <graphics/vec3.h>
