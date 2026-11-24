@@ -46,11 +46,13 @@ extern "C" {
 #include <QPainter>
 #include <QString>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -432,6 +434,34 @@ private:
 
 struct WebCam;
 
+/* Guarda o "enviar" da trilha para mandar NACK (pedido de reenvio de pacote) ao celular. A trilha só
+ * recebe vídeo, então o NACK precisa sair como mensagem de controle, como o pedido de quadro inteiro. */
+class RtcpSender : public rtc::MediaHandler {
+public:
+	void incoming(rtc::message_vector &, const rtc::message_callback &send) override
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		callback = send;
+	}
+
+	void sendRtcp(const std::vector<uint8_t> &packet)
+	{
+		rtc::message_callback send;
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			send = callback;
+		}
+		if (send) {
+			const std::byte *begin = reinterpret_cast<const std::byte *>(packet.data());
+			send(rtc::make_message(begin, begin + packet.size(), rtc::Message::Control));
+		}
+	}
+
+private:
+	std::mutex mutex;
+	rtc::message_callback callback;
+};
+
 struct Session {
 	std::mutex mutex;
 	bool dead = false;
@@ -452,6 +482,19 @@ struct Session {
 	uint64_t statsStart = 0;
 	uint32_t statsFrames = 0;
 	uint64_t statsBytes = 0;
+	uint32_t statsLost = 0;      /* pacotes que não chegaram nem com reenvio */
+	uint32_t statsRecovered = 0; /* pacotes que chegaram depois do NACK */
+	uint32_t statsDropped = 0;   /* quadros jogados fora esperando um quadro inteiro */
+
+	/* Fila de reordenação: segura os pacotes por número; se faltar um, pede reenvio (NACK) e espera
+	 * um pouco (até 150 ms) antes de desistir dele. */
+	std::shared_ptr<RtcpSender> rtcp;
+	std::map<int64_t, rtc::binary> pending;
+	std::map<int64_t, std::pair<uint64_t, int>> nacked; /* número -> (último pedido, vezes) */
+	int64_t expected = -1;
+	int64_t highest = -1;
+	uint64_t gapSince = 0;
+	uint32_t mediaSsrc = 0;
 };
 
 enum class Status { Waiting, NoAccount, Network, Connecting, Connected, Left, Failed };
@@ -636,13 +679,9 @@ void closeSession(const std::shared_ptr<Session> &session)
 	}
 }
 
-/* Recebe um pacote do celular (na linha da libdatachannel). */
-void onRtp(WebCam *cam, Session *session, const rtc::binary &message)
+/* Um pacote na ordem certa: vira quadro e imagem. */
+void feedPacket(WebCam *cam, Session *session, const rtc::binary &message)
 {
-	std::lock_guard<std::mutex> lock(session->mutex);
-	if (session->dead) {
-		return;
-	}
 	auto askKeyframe = [session]() {
 		uint64_t now = os_gettime_ns();
 		if (session->track && now - session->lastKeyframeAsk > 300000000ULL) {
@@ -653,6 +692,75 @@ void onRtp(WebCam *cam, Session *session, const rtc::binary &message)
 			}
 		}
 	};
+	session->depacketizer.push(reinterpret_cast<const uint8_t *>(message.data()), message.size(),
+				   [&](std::vector<uint8_t> &frame, bool keyframe) {
+					   if (frame.empty()) {
+						   session->needKeyframe = true;
+						   session->statsDropped++;
+						   askKeyframe();
+						   return;
+					   }
+					   if (session->needKeyframe && !keyframe) {
+						   session->statsDropped++;
+						   askKeyframe();
+						   return;
+					   }
+					   session->needKeyframe = false;
+					   if (!session->decoder.decode(frame, cam->source)) {
+						   session->needKeyframe = true;
+						   askKeyframe();
+						   return;
+					   }
+					   session->gotVideo = true;
+					   session->statsFrames++;
+				   });
+}
+
+/* Pede ao celular para reenviar estes pacotes (RTCP NACK genérico, RFC 4585). */
+void sendNack(Session *session, std::vector<int64_t> missing)
+{
+	if (missing.empty() || !session->rtcp) {
+		return;
+	}
+	std::sort(missing.begin(), missing.end());
+	std::vector<uint8_t> packet = {0x81, 205, 0, 0, 0, 0, 0, 1};
+	for (int shift = 24; shift >= 0; shift -= 8) {
+		packet.push_back((uint8_t)(session->mediaSsrc >> shift));
+	}
+	size_t i = 0;
+	while (i < missing.size()) {
+		int64_t pid = missing[i];
+		uint16_t blp = 0;
+		size_t j = i + 1;
+		while (j < missing.size() && missing[j] - pid <= 16) {
+			if (missing[j] > pid) {
+				blp |= (uint16_t)(1u << (missing[j] - pid - 1));
+			}
+			j++;
+		}
+		uint16_t seq = (uint16_t)pid;
+		packet.push_back((uint8_t)(seq >> 8));
+		packet.push_back((uint8_t)seq);
+		packet.push_back((uint8_t)(blp >> 8));
+		packet.push_back((uint8_t)blp);
+		i = j;
+	}
+	size_t words = packet.size() / 4 - 1;
+	packet[2] = (uint8_t)(words >> 8);
+	packet[3] = (uint8_t)words;
+	try {
+		session->rtcp->sendRtcp(packet);
+	} catch (...) {
+	}
+}
+
+/* Recebe um pacote do celular (na linha da libdatachannel). */
+void onRtp(WebCam *cam, Session *session, const rtc::binary &message)
+{
+	std::lock_guard<std::mutex> lock(session->mutex);
+	if (session->dead) {
+		return;
+	}
 	uint64_t now = os_gettime_ns();
 	session->statsBytes += message.size();
 	if (session->track && now - session->lastBitrateAsk > 1000000000ULL) {
@@ -666,32 +774,99 @@ void onRtp(WebCam *cam, Session *session, const rtc::binary &message)
 		session->statsStart = now;
 	} else if (now - session->statsStart >= 10000000000ULL) {
 		double seconds = (double)(now - session->statsStart) / 1e9;
-		blog(LOG_INFO, "[somun live] celular sem app: %.1f quadros/s, %.0f kb/s",
-		     session->statsFrames / seconds, session->statsBytes * 8.0 / 1000.0 / seconds);
+		blog(LOG_INFO,
+		     "[somun live] celular sem app: %.1f quadros/s, %.0f kb/s, reenviados %u, perdidos %u, "
+		     "quadros jogados fora %u",
+		     session->statsFrames / seconds, session->statsBytes * 8.0 / 1000.0 / seconds,
+		     session->statsRecovered, session->statsLost, session->statsDropped);
 		session->statsStart = now;
 		session->statsFrames = 0;
 		session->statsBytes = 0;
+		session->statsRecovered = 0;
+		session->statsLost = 0;
+		session->statsDropped = 0;
 	}
-	session->depacketizer.push(reinterpret_cast<const uint8_t *>(message.data()), message.size(),
-				   [&](std::vector<uint8_t> &frame, bool keyframe) {
-					   if (frame.empty()) {
-						   session->needKeyframe = true;
-						   askKeyframe();
-						   return;
-					   }
-					   if (session->needKeyframe && !keyframe) {
-						   askKeyframe();
-						   return;
-					   }
-					   session->needKeyframe = false;
-					   if (!session->decoder.decode(frame, cam->source)) {
-						   session->needKeyframe = true;
-						   askKeyframe();
-						   return;
-					   }
-					   session->gotVideo = true;
-					   session->statsFrames++;
-				   });
+
+	const uint8_t *data = reinterpret_cast<const uint8_t *>(message.data());
+	if (message.size() < 12 || (data[0] >> 6) != 2 || (data[1] & 0x7f) != VIDEO_PT) {
+		return;
+	}
+	uint16_t seq16 = (uint16_t)((data[2] << 8) | data[3]);
+	session->mediaSsrc = ((uint32_t)data[8] << 24) | ((uint32_t)data[9] << 16) | ((uint32_t)data[10] << 8) |
+			     data[11];
+
+	/* Número "esticado" (o de 16 bits dá a volta a cada 65536 pacotes). */
+	int64_t seq = seq16;
+	if (session->highest >= 0) {
+		seq = (session->highest & ~0xffffLL) | seq16;
+		if (seq < session->highest - 32768) {
+			seq += 65536;
+		} else if (seq > session->highest + 32768) {
+			seq -= 65536;
+		}
+	}
+	if (session->expected < 0) {
+		session->expected = seq;
+		session->highest = seq - 1;
+	}
+	if (seq < session->expected) {
+		return; /* chegou tarde demais (já desistimos dele) ou repetido */
+	}
+	auto asked = session->nacked.find(seq);
+	if (asked != session->nacked.end()) {
+		session->statsRecovered++;
+		session->nacked.erase(asked);
+	}
+
+	std::vector<int64_t> missing;
+	if (seq > session->highest) {
+		int64_t from = std::max(session->highest + 1, seq - 300);
+		for (int64_t n = from; n < seq; n++) {
+			if (!session->pending.count(n)) {
+				missing.push_back(n);
+				session->nacked[n] = {now, 1};
+			}
+		}
+		session->highest = seq;
+	}
+	session->pending.emplace(seq, message);
+
+	/* Pede de novo o que continua faltando (até 3 vezes, a cada 40 ms). */
+	for (auto &entry : session->nacked) {
+		if (entry.first >= session->expected && entry.second.second < 3 &&
+		    now - entry.second.first > 40000000ULL &&
+		    std::find(missing.begin(), missing.end(), entry.first) == missing.end()) {
+			entry.second = {now, entry.second.second + 1};
+			missing.push_back(entry.first);
+		}
+	}
+	sendNack(session, missing);
+
+	/* Entrega o que já está na ordem; se faltar um há mais de 150 ms, desiste dele. */
+	for (;;) {
+		while (!session->pending.empty() && session->pending.begin()->first == session->expected) {
+			feedPacket(cam, session, session->pending.begin()->second);
+			session->pending.erase(session->pending.begin());
+			session->expected++;
+			session->gapSince = 0;
+		}
+		if (session->pending.empty()) {
+			break;
+		}
+		if (!session->gapSince) {
+			session->gapSince = now;
+		}
+		if (now - session->gapSince > 150000000ULL || session->pending.size() > 2000) {
+			session->statsLost += (uint32_t)(session->pending.begin()->first - session->expected);
+			session->expected = session->pending.begin()->first;
+			session->gapSince = 0;
+			continue;
+		}
+		break;
+	}
+	while (!session->nacked.empty() && session->nacked.begin()->first < session->expected) {
+		session->nacked.erase(session->nacked.begin());
+	}
 }
 
 /* Monta a oferta para um pedido novo do celular. Devolve o texto da oferta (vazio se falhou). */
@@ -735,7 +910,10 @@ std::string startSession(WebCam *cam)
 		rtc::Description::Video media("video", rtc::Description::Direction::RecvOnly);
 		media.addH264Codec(VIDEO_PT);
 		session->track = session->pc->addTrack(media);
-		session->track->setMediaHandler(std::make_shared<rtc::RtcpReceivingSession>());
+		auto receiving = std::make_shared<rtc::RtcpReceivingSession>();
+		session->rtcp = std::make_shared<RtcpSender>();
+		receiving->addToChain(session->rtcp);
+		session->track->setMediaHandler(receiving);
 		session->track->onMessage(
 			[cam, weak](rtc::binary message) {
 				if (auto s = weak.lock()) {
