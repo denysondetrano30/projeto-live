@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.28...3.30)
 find_package(Qt6 REQUIRED Widgets)
 find_package(CURL REQUIRED)
 find_package(FFmpeg REQUIRED avcodec avformat avutil)
+find_package(LibDataChannel 0.20 REQUIRED)
 
 add_library(projeto-live MODULE)
 add_library(OBS::projeto-live ALIAS projeto-live)
@@ -88,6 +89,7 @@ target_sources(
     vertical-pan.h
     vertical-record.c
     vertical-record.h
+    webcam-source.cpp
     vertical.c
     vertical.h
     watch-window.cpp
@@ -104,6 +106,7 @@ target_link_libraries(
     FFmpeg::avcodec
     FFmpeg::avformat
     FFmpeg::avutil
+    LibDataChannel::LibDataChannel
     $<$<PLATFORM_ID:Windows>:OBS::w32-pthreads>
     $<$<PLATFORM_ID:Windows>:ws2_32>
     $<$<PLATFORM_ID:Windows>:iphlpapi>

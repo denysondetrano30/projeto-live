@@ -34,6 +34,7 @@ OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("projeto-live", "en-US")
 
 extern struct obs_source_info projeto_live_phone_source;
+extern struct obs_source_info pl_webcam_source;
 extern struct obs_source_info pl_caption_source;
 extern struct obs_source_info pl_mirror_source;
 extern struct obs_source_info pl_mirror_vertical_source;
@@ -49,6 +50,7 @@ bool obs_module_load(void)
 	pl_sync_load();
 	pl_phone_video_register();
 	obs_register_source(&projeto_live_phone_source);
+	obs_register_source(&pl_webcam_source);
 	obs_register_source(&pl_caption_source);
 	obs_register_source(&pl_mirror_source);
 	obs_register_source(&pl_mirror_vertical_source);
