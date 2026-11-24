@@ -766,7 +766,7 @@ void onRtp(WebCam *cam, Session *session, const rtc::binary &message)
 	if (session->track && now - session->lastBitrateAsk > 1000000000ULL) {
 		session->lastBitrateAsk = now;
 		try {
-			session->track->requestBitrate(8000000);
+			session->track->requestBitrate(20000000);
 		} catch (...) {
 		}
 	}
