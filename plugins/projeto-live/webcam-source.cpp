@@ -545,8 +545,8 @@ void showScreen(WebCam *cam, Status status, const std::string &code)
 	QFont big("Outfit");
 	big.setPixelSize(38);
 	big.setWeight(QFont::DemiBold);
-	QFont small("Outfit");
-	small.setPixelSize(24);
+	QFont note("Outfit");
+	note.setPixelSize(24);
 	QFont word("Outfit");
 	word.setPixelSize(44);
 	word.setWeight(QFont::ExtraBold);
@@ -589,7 +589,7 @@ void showScreen(WebCam *cam, Status status, const std::string &code)
 	default:
 		break;
 	}
-	painter.setFont(small);
+	painter.setFont(note);
 	painter.setPen(QColor(alert ? "#E5483B" : "#A8A8A8"));
 	painter.drawText(QRect(textLeft, top + 215, width, 120), Qt::AlignLeft | Qt::TextWordWrap, text(key));
 	painter.setPen(QColor("#8C8C8C"));
