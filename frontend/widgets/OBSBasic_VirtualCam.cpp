@@ -42,6 +42,16 @@ void OBSBasic::StartVirtualCam()
 	outputHandler->StartVirtualCam();
 }
 
+void OBSBasic::StartVirtualCamProgram()
+{
+	if (!outputHandler || !outputHandler->virtualCam || outputHandler->VirtualCamActive()) {
+		return;
+	}
+	vcamConfig.type = VCamOutputType::ProgramView;
+	outputHandler->UpdateVirtualCamOutputSource();
+	StartVirtualCam();
+}
+
 void OBSBasic::StopVirtualCam()
 {
 	if (!outputHandler || !outputHandler->virtualCam) {

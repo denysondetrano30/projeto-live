@@ -27,7 +27,6 @@
 
 #include "studio-window.h"
 #include "media-bar.h"
-#include "photo.h"
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
@@ -35,6 +34,7 @@
 #include <obs-nix-platform.h>
 #endif
 
+#include <util/config-file.h>
 #include <util/platform.h>
 #include <graphics/matrix4.h>
 #include <graphics/vec3.h>
@@ -839,7 +839,6 @@ private:
 void openSourcesDialog(); /* abre a janelinha "Fontes desta entrada" (mais embaixo) */
 
 QAction *sourcesMenuAction = nullptr;
-QAction *photoMenuAction = nullptr;
 
 /* Seleciona (no OBS) a fonte que está debaixo do mouse e abre o menu da prévia do OBS, que age
  * sobre a fonte selecionada (Transformar, Modo de mescla, Filtros...). Fora de qualquer fonte,
@@ -890,15 +889,6 @@ void previewMenuAt(QWidget *view, const QPoint &pos)
 		QObject::connect(sourcesMenuAction, &QObject::destroyed, []() { sourcesMenuAction = nullptr; });
 	}
 	main->setProperty("plPreviewExtra", QVariant::fromValue<QObject *>(sourcesMenuAction));
-	/* Parte H3: sem modo estúdio a Prévia é o No ar, então a foto do No ar entra aqui também. */
-	if (!photoMenuAction) {
-		photoMenuAction = new QAction(msg("Photo.ProgramMenu"), main);
-		QObject::connect(photoMenuAction, &QAction::triggered, main, []() { pl_photo_program(); });
-		QObject::connect(photoMenuAction, &QObject::destroyed, []() { photoMenuAction = nullptr; });
-	}
-	main->setProperty("plPreviewExtra2", obs_frontend_preview_program_mode_active()
-						     ? QVariant()
-						     : QVariant::fromValue<QObject *>(photoMenuAction));
 	main->setProperty("plPreviewExtraOnce", true);
 	/* Na fila: o OBS atualiza a seleção dele antes de montar o menu. */
 	QMetaObject::invokeMethod(main, "on_preview_customContextMenuRequested", Qt::QueuedConnection);
@@ -926,20 +916,9 @@ void attachScreenMenus(QObject *owner, QWidget *previewView, QWidget *programVie
 	QObject::connect(previewView, &QWidget::customContextMenuRequested, owner,
 			 [previewView](const QPoint &pos) { previewMenuAt(previewView, pos); });
 	programView->setContextMenuPolicy(Qt::CustomContextMenu);
-	QObject::connect(programView, &QWidget::customContextMenuRequested, owner, [programView](const QPoint &pos) {
-		/* Parte H3: a foto do No ar primeiro; o resto (abrir em outra tela) continua
-				  * o mesmo de antes. */
-		QMenu menu;
-		QAction *photo = menu.addAction(msg("Photo.ProgramMenu"));
-		QAction *more = menu.addAction(msg("Studio.ProgramMore"));
-		QAction *chosen = menu.exec(programView->mapToGlobal(pos));
-		if (chosen == photo) {
-			pl_photo_program();
-		} else if (chosen == more) {
-			if (QWidget *main = obsWindow()) {
-				QMetaObject::invokeMethod(main, "ProgramViewContextMenuRequested",
-							  Qt::QueuedConnection);
-			}
+	QObject::connect(programView, &QWidget::customContextMenuRequested, owner, []() {
+		if (QWidget *main = obsWindow()) {
+			QMetaObject::invokeMethod(main, "ProgramViewContextMenuRequested", Qt::QueuedConnection);
 		}
 	});
 }
@@ -1159,10 +1138,24 @@ public:
 		pauseButton->setMinimumHeight(32);
 		pauseButton->setFocusPolicy(Qt::NoFocus);
 		pauseButton->setVisible(false);
-		connect(pauseButton, &QPushButton::clicked, this, []() {
-			if (obs_frontend_recording_active()) {
-				obs_frontend_recording_pause(!obs_frontend_recording_paused());
+		connect(pauseButton, &QPushButton::clicked, this, [this]() {
+			if (!obs_frontend_recording_active()) {
+				return;
 			}
+			if (!obs_frontend_recording_paused() && !recordingPausable()) {
+				QMessageBox box(this);
+				box.setWindowTitle(msg("Studio.RecordPause"));
+				box.setText(msg("Studio.RecordPauseCant"));
+				QPushButton *settings =
+					box.addButton(msg("Studio.RecordPauseSettings"), QMessageBox::AcceptRole);
+				box.addButton(msg("Studio.RecordPauseOk"), QMessageBox::RejectRole);
+				box.exec();
+				if (box.clickedButton() == settings) {
+					openSettings();
+				}
+				return;
+			}
+			obs_frontend_recording_pause(!obs_frontend_recording_paused());
 		});
 		top->addWidget(pauseButton);
 		streamButton = new QPushButton(this);
@@ -1453,7 +1446,9 @@ private:
 			obs_frontend_set_preview_program_mode(studio->isChecked());
 		} else if (chosen == virtualCam) {
 			if (virtualCam->isChecked()) {
-				obs_frontend_start_virtualcam();
+				if (QWidget *main = obsWindow()) {
+					QMetaObject::invokeMethod(main, "StartVirtualCamProgram", Qt::QueuedConnection);
+				}
 			} else {
 				obs_frontend_stop_virtualcam();
 			}
@@ -1692,13 +1687,27 @@ private:
 		if (pauseButton->text() != label) {
 			pauseButton->setText(label);
 		}
-		obs_output_t *output = obs_frontend_get_recording_output();
-		bool canPause = output && obs_output_can_pause(output);
-		obs_output_release(output);
-		if (pauseButton->isEnabled() != canPause) {
-			pauseButton->setEnabled(canPause);
-			pauseButton->setToolTip(canPause ? QString() : msg("Studio.RecordPauseCant"));
+	}
+
+	/* A mesma regra do OBS (OBSBasic::UpdateIsRecordingPausable): gravando com a mesma qualidade da
+	 * transmissão, a gravação divide o codificador com a live e não pode pausar. */
+	static bool recordingPausable()
+	{
+		config_t *profile = obs_frontend_get_profile_config();
+		if (!profile) {
+			return false;
 		}
+		const char *mode = config_get_string(profile, "Output", "Mode");
+		if (mode && astrcmpi(mode, "Advanced") == 0) {
+			const char *type = config_get_string(profile, "AdvOut", "RecType");
+			if (type && astrcmpi(type, "FFmpeg") == 0) {
+				return !config_get_bool(profile, "AdvOut", "FFOutputToFile");
+			}
+			const char *encoder = config_get_string(profile, "AdvOut", "RecEncoder");
+			return !(encoder && astrcmpi(encoder, "none") == 0);
+		}
+		const char *quality = config_get_string(profile, "SimpleOutput", "RecQuality");
+		return !(quality && strcmp(quality, "Stream") == 0);
 	}
 
 	/* Parar a transmissão pergunta antes (um clique sem querer derrubaria a live). */

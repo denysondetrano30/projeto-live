@@ -142,11 +142,6 @@ void takePhoto(video_t *video, const QString &label)
 
 } // namespace
 
-void pl_photo_program(void)
-{
-	takePhoto(obs_get_video(), text("Photo.ProgramName"));
-}
-
 void pl_photo_vertical(void)
 {
 	takePhoto(pl_vertical_get_video(), text("Photo.VerticalName"));

@@ -1640,6 +1640,8 @@ private:
 
 public slots:
 	void StartVirtualCam();
+	/* somun live: liga a câmera virtual sempre com o No ar (o programa), não uma cena ou fonte. */
+	void StartVirtualCamProgram();
 	void StopVirtualCam();
 
 	void OnVirtualCamStart();
