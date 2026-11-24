@@ -445,6 +445,13 @@ struct Session {
 	bool needKeyframe = true;
 	uint64_t lastKeyframeAsk = 0;
 	bool gotVideo = false;
+	/* Avisa o celular (REMB) de quanto o Wi-Fi aguenta; sem isso ele fica na velocidade de partida
+	 * e derruba os quadros por segundo. */
+	uint64_t lastBitrateAsk = 0;
+	/* Conta quadros e bytes para anotar no log a cada 10 s (para ver os quadros por segundo). */
+	uint64_t statsStart = 0;
+	uint32_t statsFrames = 0;
+	uint64_t statsBytes = 0;
 };
 
 enum class Status { Waiting, NoAccount, Network, Connecting, Connected, Left, Failed };
@@ -646,6 +653,25 @@ void onRtp(WebCam *cam, Session *session, const rtc::binary &message)
 			}
 		}
 	};
+	uint64_t now = os_gettime_ns();
+	session->statsBytes += message.size();
+	if (session->track && now - session->lastBitrateAsk > 1000000000ULL) {
+		session->lastBitrateAsk = now;
+		try {
+			session->track->requestBitrate(8000000);
+		} catch (...) {
+		}
+	}
+	if (!session->statsStart) {
+		session->statsStart = now;
+	} else if (now - session->statsStart >= 10000000000ULL) {
+		double seconds = (double)(now - session->statsStart) / 1e9;
+		blog(LOG_INFO, "[somun live] celular sem app: %.1f quadros/s, %.0f kb/s",
+		     session->statsFrames / seconds, session->statsBytes * 8.0 / 1000.0 / seconds);
+		session->statsStart = now;
+		session->statsFrames = 0;
+		session->statsBytes = 0;
+	}
 	session->depacketizer.push(reinterpret_cast<const uint8_t *>(message.data()), message.size(),
 				   [&](std::vector<uint8_t> &frame, bool keyframe) {
 					   if (frame.empty()) {
@@ -664,6 +690,7 @@ void onRtp(WebCam *cam, Session *session, const rtc::binary &message)
 						   return;
 					   }
 					   session->gotVideo = true;
+					   session->statsFrames++;
 				   });
 }
 
