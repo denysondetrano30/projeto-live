@@ -758,6 +758,15 @@ std::string startSession(WebCam *cam)
 			}
 			sendHello(cam);
 		});
+		/* O celular conta, a cada 10 s, o que a câmera e o codificador dele estão fazendo
+		 * ("info:{...}"): vai para o log, para achar onde os quadros se perdem. */
+		session->channel->onMessage([](rtc::binary) {},
+					    [](rtc::string text) {
+						    if (text.rfind("info:", 0) == 0 && text.size() < 600) {
+							    blog(LOG_INFO, "[somun live] celular sem app (celular): %s",
+								 text.c_str() + 5);
+						    }
+					    });
 
 		session->pc->setLocalDescription(rtc::Description::Type::Offer);
 	} catch (const std::exception &error) {
