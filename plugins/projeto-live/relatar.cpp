@@ -38,6 +38,7 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
+#include <QScreen>
 #include <QSysInfo>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -328,7 +329,21 @@ private:
 void pl_relatar_open(QWidget *window)
 {
 	/* O print vem antes de a janela abrir (mostra o problema, não a própria janela). */
-	QString print = window ? jpegDataUrl(window->grab()) : QString();
+	/* Print do que está no monitor (a Prévia e o No ar são desenhados pela placa de vídeo, fora do
+	 * Qt: o grab() da janela sai preto nelas). Sem tela, cai para o grab(). */
+	QPixmap shot;
+	if (window) {
+		QScreen *screen = window->screen();
+		if (screen) {
+			QRect area = window->frameGeometry();
+			shot = screen->grabWindow(0, area.x() - screen->geometry().x(),
+						  area.y() - screen->geometry().y(), area.width(), area.height());
+		}
+		if (shot.isNull()) {
+			shot = window->grab();
+		}
+	}
+	QString print = jpegDataUrl(shot);
 	auto *dialog = new RelatarDialog(window, print);
 	dialog->setAttribute(Qt::WA_DeleteOnClose);
 	dialog->show();
