@@ -205,9 +205,9 @@ public:
 			withPrint = new QCheckBox(msg("Relatar.WithPrint"), this);
 			withPrint->setChecked(true);
 			auto *thumb = new QLabel(this);
-			QPixmap small;
-			small.loadFromData(QByteArray::fromBase64(print.mid(print.indexOf(',') + 1).toLatin1()));
-			thumb->setPixmap(small.scaledToWidth(120, Qt::SmoothTransformation));
+			QPixmap thumbImage;
+			thumbImage.loadFromData(QByteArray::fromBase64(print.mid(print.indexOf(',') + 1).toLatin1()));
+			thumb->setPixmap(thumbImage.scaledToWidth(120, Qt::SmoothTransformation));
 			thumb->setStyleSheet(QString("border: 1px solid %1;").arg(SOMUN_LINE2));
 			row->addWidget(thumb);
 			row->addWidget(withPrint, 1);
