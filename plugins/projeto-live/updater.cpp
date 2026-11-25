@@ -169,6 +169,14 @@ bool check()
 	if (mine <= 0) {
 		return true;
 	}
+	/* Apaga os instaladores já usados (até a versão instalada), ~400 MB cada. */
+	QDir temp(QStandardPaths::writableLocation(QStandardPaths::TempLocation));
+	for (const QString &old : temp.entryList({"somun-atualizacao-*"}, QDir::Files)) {
+		int n = old.mid(18).section('.', 0, 0).toInt();
+		if (n > 0 && n <= mine) {
+			temp.remove(old);
+		}
+	}
 	int numero = 0;
 	qint64 tamanho = 0;
 	if (!fetchInfo(numero, tamanho) || numero <= mine) {
