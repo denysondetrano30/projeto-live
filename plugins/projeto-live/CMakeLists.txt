@@ -90,6 +90,7 @@ target_sources(
     vertical-record.c
     vertical-record.h
     webcam-source.cpp
+    webcam-source.h
     vertical.c
     vertical.h
     watch-window.cpp

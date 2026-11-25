@@ -23,6 +23,7 @@
  */
 
 #include "qrcodegen.h"
+#include "webcam-source.h"
 
 #include <obs-module.h>
 #include <util/bmem.h>
@@ -495,7 +496,27 @@ struct Session {
 	int64_t highest = -1;
 	uint64_t gapSince = 0;
 	uint32_t mediaSsrc = 0;
+	bool counted = false; /* entra na conta de celulares mandando imagem (para dividir o Wi-Fi) */
 };
+
+/* Quantos celulares estão mandando imagem agora (em todas as entradas): o Wi-Fi é dividido entre eles. */
+std::atomic<int> sendingPhones{0};
+
+/* Quanto cada celular pode mandar: um sozinho usa até 20 Mb/s; com mais, cada um usa menos. */
+unsigned int phoneBitrate()
+{
+	int phones = sendingPhones.load();
+	if (phones <= 1) {
+		return 20000000;
+	}
+	if (phones == 2) {
+		return 14000000;
+	}
+	if (phones == 3) {
+		return 10000000;
+	}
+	return 8000000;
+}
 
 enum class Status { Waiting, NoAccount, Network, Connecting, Connected, Left, Failed };
 
@@ -512,6 +533,10 @@ struct WebCam {
 	Status shown = Status::Waiting;
 	std::string shownCode;
 	bool screenValid = false;
+	/* Quando chegou o último quadro do celular (0 = nenhum desde que a entrada abriu ou trocou de
+	 * código). Depois do primeiro quadro, se o celular cair, a última imagem fica parada (sem texto
+	 * na transmissão) e a mesa avisa "celular sumiu". */
+	std::atomic<uint64_t> lastFrame{0};
 };
 
 void sendToPhone(WebCam *cam, const std::string &message)
@@ -667,6 +692,10 @@ void closeSession(const std::shared_ptr<Session> &session)
 	{
 		std::lock_guard<std::mutex> lock(session->mutex);
 		session->dead = true;
+		if (session->counted) {
+			session->counted = false;
+			sendingPhones--;
+		}
 		pc = session->pc;
 		session->channel.reset();
 		session->track.reset();
@@ -713,6 +742,12 @@ void feedPacket(WebCam *cam, Session *session, const rtc::binary &message)
 					   }
 					   session->gotVideo = true;
 					   session->statsFrames++;
+					   cam->lastFrame = os_gettime_ns();
+					   if (!session->counted) {
+						   session->counted = true;
+						   sendingPhones++;
+						   session->lastBitrateAsk = 0; /* avisa a banda nova já */
+					   }
 				   });
 }
 
@@ -766,7 +801,7 @@ void onRtp(WebCam *cam, Session *session, const rtc::binary &message)
 	if (session->track && now - session->lastBitrateAsk > 1000000000ULL) {
 		session->lastBitrateAsk = now;
 		try {
-			session->track->requestBitrate(20000000);
+			session->track->requestBitrate(phoneBitrate());
 		} catch (...) {
 		}
 	}
@@ -1112,7 +1147,11 @@ void work(WebCam *cam)
 				status = Status::Connecting;
 			}
 		}
-		showScreen(cam, status, code);
+		if (cam->lastFrame) {
+			cam->screenValid = false; /* a última imagem do celular fica (mesmo se ele caiu) */
+		} else {
+			showScreen(cam, status, code);
+		}
 
 		int seconds = status == Status::Connected ? 20 : (waitingAnswer ? 1 : 3);
 		std::mutex sleepMutex;
@@ -1148,6 +1187,7 @@ void webcamUpdate(void *data, obs_data_t *settings)
 		}
 		cam->code = code;
 	}
+	cam->lastFrame = 0; /* código novo: volta a tela de espera com o QR novo */
 	cam->wake.notify_all();
 }
 
@@ -1228,6 +1268,24 @@ void webcamDeactivate(void *data)
 }
 
 } // namespace
+
+extern "C" bool pl_webcam_get_status(obs_source_t *source, int *stalled_ms)
+{
+	*stalled_ms = -1;
+	if (!source || strcmp(obs_source_get_id(source), WEBCAM_SOURCE_ID) != 0) {
+		return false;
+	}
+	WebCam *cam = static_cast<WebCam *>(obs_obj_get_data(source));
+	if (!cam) {
+		return false;
+	}
+	uint64_t last = cam->lastFrame;
+	if (last) {
+		uint64_t now = os_gettime_ns();
+		*stalled_ms = now > last ? (int)std::min<uint64_t>((now - last) / 1000000ULL, 1000000000ULL) : 0;
+	}
+	return true;
+}
 
 extern "C" struct obs_source_info pl_webcam_source;
 

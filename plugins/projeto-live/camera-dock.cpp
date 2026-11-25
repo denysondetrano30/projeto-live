@@ -92,6 +92,7 @@
 #include <vector>
 
 #include "phone-source.h"
+#include "webcam-source.h"
 #include "transitions-dialog.h"
 #include "vertical-pan.h"
 
@@ -319,6 +320,19 @@ obs_source_t *firstPhone(const ItemList &items)
 	for (obs_sceneitem_t *item : items) {
 		obs_source_t *src = obs_sceneitem_get_source(item);
 		if (src && pl_phone_is_source(src)) {
+			return obs_source_get_ref(src);
+		}
+	}
+	return nullptr;
+}
+
+/* O primeiro "Celular sem app" (navegador) desta cena, com referência; nulo se não houver. */
+obs_source_t *firstWebcam(const ItemList &items)
+{
+	for (obs_sceneitem_t *item : items) {
+		obs_source_t *src = obs_sceneitem_get_source(item);
+		int stalled;
+		if (src && pl_webcam_get_status(src, &stalled)) {
 			return obs_source_get_ref(src);
 		}
 	}
@@ -752,10 +766,12 @@ public:
 		ItemList items = sceneItems(src);
 		bool blank = items.empty();
 		obs_source_t *cam = firstPhone(items);
+		obs_source_t *web = cam ? nullptr : firstWebcam(items);
 		releaseItems(items);
 
 		Signal signal = Signal::Live;
 		bool weakWifi = false;
+		bool phoneGone = false;
 		QString info;
 		if (cam) {
 			struct pl_phone_status status;
@@ -782,17 +798,34 @@ public:
 				}
 			}
 			obs_source_release(cam);
+		} else if (web) {
+			/* Celular sem app: caiu = a última imagem fica parada e o aviso vermelho aparece aqui. */
+			int stalled = -1;
+			pl_webcam_get_status(web, &stalled);
+			if (stalled < 0) {
+				signal = Signal::None;
+				info = msg("WebCam.WaitingShort");
+			} else if (stalled >= PL_PHONE_STALL_MS) {
+				signal = Signal::Stalled;
+				weakWifi = true;
+				phoneGone = true;
+				info = msg("WebCam.Gone");
+			}
+			obs_source_release(web);
 		} else if (blank) {
 			signal = Signal::None;
 			info = msg("Entries.Blank");
 		}
 
 		detail->setText(info);
-		if (weakWifi != shownWeak) {
+		if (weakWifi != shownWeak || phoneGone != shownGone) {
 			shownWeak = weakWifi;
+			shownGone = phoneGone;
 			detail->setEnabled(weakWifi);
 			detail->setStyleSheet(weakWifi ? QString("color: #E5483B;") : QString());
-			detail->setToolTip(weakWifi ? msg("Cameras.WeakSignalHint") : QString());
+			detail->setToolTip(phoneGone  ? msg("WebCam.GoneHint")
+					   : weakWifi ? msg("Cameras.WeakSignalHint")
+						      : QString());
 		}
 		applyColors(tally, signal);
 		updateLevel(src);
@@ -985,6 +1018,7 @@ private:
 	std::string shownBorder;
 	std::string shownBadge;
 	bool shownWeak = false;
+	bool shownGone = false;
 	std::string shownDot;
 	Thumb *thumb = nullptr;
 	QLabel *dot = nullptr;
