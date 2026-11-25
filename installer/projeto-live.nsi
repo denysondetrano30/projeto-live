@@ -157,7 +157,7 @@ Function .onInstSuccess
 	nsExec::Exec 'sc query "Apple Mobile Device Service"'
 	Pop $0
 	${If} $0 != 0
-		MessageBox MB_YESNO|MB_ICONINFORMATION /SD IDNO "Para usar o iPhone como câmera pelo CABO USB, o Windows precisa do app $\"Dispositivos Apple$\" (da Microsoft Store).$\r$\n$\r$\nPelo Wi-Fi funciona sem ele.$\r$\n$\r$\nAbrir a página para instalar agora?" IDNO skip
+		MessageBox MB_YESNO|MB_ICONINFORMATION "Para usar o iPhone como câmera pelo CABO USB, o Windows precisa do app $\"Dispositivos Apple$\" (da Microsoft Store).$\r$\n$\r$\nPelo Wi-Fi funciona sem ele.$\r$\n$\r$\nAbrir a página para instalar agora?" /SD IDNO IDNO skip
 		ExecShell "open" "${APPLE_DEVICES_URL}"
 	skip:
 	${EndIf}
