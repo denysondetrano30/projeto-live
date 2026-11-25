@@ -32,7 +32,10 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDateTime>
+#include <QDir>
+#include <QFile>
 #include <QDialog>
 #include <QEvent>
 #include <QFont>
@@ -498,10 +501,53 @@ public:
 
 	/* ---- cultos ---- */
 
+	/*
+	 * somun hub (25/11): "sinal de vida" — uma vez por abertura, grava em sinais/<conta> quando o
+	 * somun live foi usado e a versão instalada (o painel de administração mostra as igrejas). Só os
+	 * campos "live" e "email" (o tela e o Diretor gravam os deles).
+	 */
+	bool signalSent = false;
+	void sendSignal()
+	{
+		signalSent = true;
+		QFile numberFile(QDir(QCoreApplication::applicationDirPath()).filePath("../../../somun-versao.txt"));
+		QString number = numberFile.open(QIODevice::ReadOnly)
+					 ? QString::fromUtf8(numberFile.readAll()).trimmed()
+					 : QString();
+		QJsonObject when;
+		when["timestampValue"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+		QJsonObject liveFields;
+		liveFields["versao"] = text(number);
+		liveFields["em"] = when;
+		QJsonObject liveMap;
+		liveMap["fields"] = liveFields;
+		QJsonObject live;
+		live["mapValue"] = liveMap;
+		QJsonObject fields;
+		fields["email"] = text(email);
+		fields["live"] = live;
+		QJsonObject document;
+		document["fields"] = fields;
+		QByteArray body = toJson(document);
+		std::string url = documents() + "/sinais/" + uid.toStdString() +
+				  "?updateMask.fieldPaths=email&updateMask.fieldPaths=live";
+		std::string refreshToken = refresh.toStdString();
+		worker.push([url, body, refreshToken]() {
+			std::string access, next;
+			if (accessToken(refreshToken, access, next) == Fail::None) {
+				Http http = request("PATCH", url, body, "application/json", access);
+				blog(LOG_INFO, "[projeto-live] sinal de vida: %ld", http.status);
+			}
+		});
+	}
+
 	void fetchCultos()
 	{
 		if (!loggedIn()) {
 			return;
+		}
+		if (!signalSent) {
+			sendSignal();
 		}
 		QPointer<Hub> self(this);
 		std::string refreshToken = refresh.toStdString();
