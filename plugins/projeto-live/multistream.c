@@ -74,6 +74,23 @@ static obs_encoder_t *shared_horizontal;
 static obs_encoder_t *shared_vertical;
 static obs_encoder_t *shared_audio;
 
+/*
+ * Internet piorou (decidido com ela em 25/11): em vez de travar, a qualidade baixa sozinha e volta
+ * aos poucos quando a internet melhora. Um controle por codificador dividido (horizontal e vertical),
+ * olhando o congestionamento (fila de envio) dos destinos dele: congestionado → -20% (a cada 4 s, no
+ * mínimo 30% da qualidade escolhida e nunca abaixo de 800 kbps); 20 s calmo → +15% (a cada 15 s) até
+ * voltar ao normal. Só com codificador que aceita mudar a taxa no meio (x264, NVENC, QSV, AMF).
+ * A mesa mostra "internet fraca, qualidade menor" em cinza na linha do destino.
+ */
+struct adapt {
+	int base;
+	int current;
+	uint64_t last_change_ns;
+	uint64_t calm_since_ns;
+};
+static struct adapt adapt_horizontal;
+static struct adapt adapt_vertical;
+
 /* ------------------------------------------------------------------------- */
 /* Plataformas                                                                */
 
@@ -414,6 +431,8 @@ int pl_multistream_quality_kbps(void)
 /* Solta os codificadores divididos (as saídas que ainda os usam seguram a parte delas). */
 static void release_shared_encoders(void)
 {
+	memset(&adapt_horizontal, 0, sizeof(adapt_horizontal));
+	memset(&adapt_vertical, 0, sizeof(adapt_vertical));
 	obs_encoder_release(shared_horizontal);
 	obs_encoder_release(shared_vertical);
 	obs_encoder_release(shared_audio);
@@ -922,6 +941,95 @@ void pl_multistream_stop(void)
 bool pl_multistream_active(void)
 {
 	return active;
+}
+
+static void adapt_apply(obs_encoder_t *encoder, struct adapt *a, bool vertical, uint64_t now)
+{
+	obs_data_t *settings = obs_data_create();
+	obs_data_set_int(settings, "bitrate", a->current);
+	obs_encoder_update(encoder, settings);
+	obs_data_release(settings);
+	a->last_change_ns = now;
+	blog(LOG_INFO, "[projeto-live] internet: qualidade %s em %d kbps (normal %d)",
+	     vertical ? "vertical" : "horizontal", a->current, a->base);
+}
+
+static void adapt_encoder(obs_encoder_t *encoder, struct adapt *a, bool vertical, uint64_t now)
+{
+	if (!encoder || !active) {
+		return;
+	}
+	if (!(obs_get_encoder_caps(obs_encoder_get_id(encoder)) & OBS_ENCODER_CAP_DYN_BITRATE)) {
+		return;
+	}
+	if (a->base <= 0) {
+		obs_data_t *settings = obs_encoder_get_settings(encoder);
+		a->base = (int)obs_data_get_int(settings, "bitrate");
+		obs_data_release(settings);
+		a->current = a->base;
+		if (a->base <= 0) {
+			return;
+		}
+	}
+	float worst = 0.0f;
+	bool any = false;
+	for (size_t i = 0; i < dests.num; i++) {
+		struct dest *d = dests.array[i];
+		if (!d->output || d->info.vertical != vertical || !obs_output_active(d->output)) {
+			continue;
+		}
+		pthread_mutex_lock(&state_mutex);
+		bool live = d->state == PL_DEST_LIVE;
+		pthread_mutex_unlock(&state_mutex);
+		if (!live) {
+			continue;
+		}
+		float congestion = obs_output_get_congestion(d->output);
+		if (congestion > worst) {
+			worst = congestion;
+		}
+		any = true;
+	}
+	if (!any) {
+		return;
+	}
+	int floor = a->base * 30 / 100;
+	if (floor < 800) {
+		floor = a->base < 800 ? a->base : 800;
+	}
+	if (worst > 0.35f) {
+		a->calm_since_ns = 0;
+		if (a->current > floor && now - a->last_change_ns > 4000000000ULL) {
+			int lower = a->current * 80 / 100;
+			a->current = lower < floor ? floor : lower;
+			adapt_apply(encoder, a, vertical, now);
+		}
+	} else if (worst < 0.10f) {
+		if (!a->calm_since_ns) {
+			a->calm_since_ns = now;
+		}
+		if (a->current < a->base && now - a->calm_since_ns > 20000000000ULL &&
+		    now - a->last_change_ns > 15000000000ULL) {
+			int higher = a->current * 115 / 100 + 1;
+			a->current = higher > a->base ? a->base : higher;
+			adapt_apply(encoder, a, vertical, now);
+		}
+	} else {
+		a->calm_since_ns = 0;
+	}
+}
+
+void pl_multistream_tick(void)
+{
+	uint64_t now = os_gettime_ns();
+	adapt_encoder(shared_horizontal, &adapt_horizontal, false, now);
+	adapt_encoder(shared_vertical, &adapt_vertical, true, now);
+}
+
+bool pl_multistream_reduced(bool vertical)
+{
+	const struct adapt *a = vertical ? &adapt_vertical : &adapt_horizontal;
+	return active && a->base > 0 && a->current < a->base;
 }
 
 uint64_t pl_multistream_seconds(void)

@@ -660,6 +660,7 @@ private:
 
 	void refresh()
 	{
+		pl_multistream_tick();
 		const char *off = SOMUN_GRAY;
 		QString offText = QString::fromUtf8(obs_module_text("Transmission.Off"));
 		bool streaming = pl_multistream_active();
@@ -692,7 +693,15 @@ private:
 			lastBytes[i] = status.total_bytes;
 			switch (status.state) {
 			case PL_DEST_LIVE:
-				line->set(name, speed, SOMUN_RED, false, nullptr, nullptr);
+				if (pl_multistream_reduced(info.vertical)) {
+					/* Internet piorou: cinza (vermelho é só para "caiu"). */
+					line->set(name, QString::fromUtf8(obs_module_text("Transmission.Weak")),
+						  SOMUN_RED, false, nullptr, SOMUN_GRAY);
+					line->setToolTip(QString::fromUtf8(obs_module_text("Transmission.WeakHint"))
+								 .arg(speed.isEmpty() ? QString("-") : speed));
+				} else {
+					line->set(name, speed, SOMUN_RED, false, nullptr, nullptr);
+				}
 				break;
 			case PL_DEST_RECONNECTING:
 				line->set(name,

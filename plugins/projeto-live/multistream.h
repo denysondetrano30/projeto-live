@@ -105,6 +105,10 @@ void pl_multistream_retry(size_t index);
 void pl_multistream_take_off(size_t index);
 /* Quantos destinos caíram (tentando voltar ou com erro) com a live no ar. */
 int pl_multistream_down_count(void);
+/* Internet piorou (25/11): chamado ~1 vez por segundo pela mesa; baixa/sobe a qualidade sozinho. */
+void pl_multistream_tick(void);
+/* A qualidade (horizontal ou vertical) está menor que a escolhida por causa da internet. */
+bool pl_multistream_reduced(bool vertical);
 
 /*
  * Como está a chave (parte G4, "Conferir"): sem chave; parece um endereço (rtmp://...) colado no
