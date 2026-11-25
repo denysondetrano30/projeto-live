@@ -93,6 +93,8 @@ target_sources(
     webcam-source.h
     roteiro-strip.cpp
     roteiro-strip.h
+    relatar.cpp
+    relatar.h
     updater.cpp
     updater.h
     vertical.c

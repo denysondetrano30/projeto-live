@@ -101,6 +101,7 @@
 #include "pl-account.h"
 #include "roteiro-strip.h"
 #include "updater.h"
+#include "relatar.h"
 #include "source-row.hpp"
 #include "somun-style.h"
 #include "stats-dock.h"
@@ -1456,6 +1457,8 @@ private:
 		QAction *destinations = menu.addAction(msg("Studio.Destinations"));
 		QAction *settings = menu.addAction(msg("Studio.Settings"));
 		QAction *toObs = menu.addAction(msg("Studio.ToObs"));
+		menu.addSeparator();
+		QAction *report = menu.addAction(msg("Relatar.Menu"));
 		/* Os menus do OBS (Arquivo, Editar, Visualizar...): os mesmos, não uma cópia. */
 		if (auto *main = qobject_cast<QMainWindow *>(obsWindow())) {
 			QMenu *obsMenus = menu.addMenu(msg("Studio.ObsMenus"));
@@ -1466,6 +1469,10 @@ private:
 
 		QAction *chosen = menu.exec(moreButton->mapToGlobal(QPoint(0, moreButton->height())));
 		if (!chosen) {
+			return;
+		}
+		if (chosen == report) {
+			pl_relatar_open(this);
 			return;
 		}
 		if (chosen == watch) {
