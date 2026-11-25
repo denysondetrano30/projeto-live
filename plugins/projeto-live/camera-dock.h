@@ -42,4 +42,8 @@ void pl_entries_show_sources(struct obs_source *scene);
 
 /* "Vai limpa": esta entrada ignora o que está "No programa" (o telão já vem marcado). */
 bool pl_entry_goes_clean(struct obs_source *scene);
+#include <string>
+#include <vector>
+/* Deck pelo celular: os nomes das entradas na ordem da fileira, sem as escondidas. */
+std::vector<std::string> pl_entries_visible();
 #endif

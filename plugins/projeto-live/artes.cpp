@@ -2524,6 +2524,25 @@ void frontendEvent(enum obs_frontend_event event, void *)
 
 } // namespace
 
+/* Deck pelo celular (25/11): as artes "à mão" (as da grade da mesa) e ligar/desligar uma. */
+std::vector<PLDeckArt> pl_artes_deck_list()
+{
+	std::vector<PLDeckArt> list;
+	for (auto &piece : pieces) {
+		if (piece->pinned) {
+			list.push_back({piece->id, piece->name, piece->on});
+		}
+	}
+	return list;
+}
+
+void pl_artes_deck_toggle(const std::string &id)
+{
+	if (Piece *piece = findPiece(id)) {
+		setOn(piece, !piece->on);
+	}
+}
+
 void pl_artes_load(void)
 {
 	ticker = new QTimer();

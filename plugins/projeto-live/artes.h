@@ -36,6 +36,16 @@ void pl_look_set_amount(int amount);
 QWidget *pl_artes_bar_create(QWidget *parent);
 /* As Artes da mesa em grade de botões grandes (duas colunas e o "+" tracejado). */
 QWidget *pl_artes_grid_create(QWidget *parent);
+#include <string>
+#include <vector>
+/* Deck pelo celular: as artes da grade (id, nome, no ar) e ligar/desligar uma. */
+struct PLDeckArt {
+	std::string id;
+	std::string name;
+	bool on;
+};
+std::vector<PLDeckArt> pl_artes_deck_list();
+void pl_artes_deck_toggle(const std::string &id);
 
 /* Abre a tela "No programa" (configurar as peças). */
 void pl_artes_open_editor(QWidget *parent);

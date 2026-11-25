@@ -25,6 +25,7 @@
 #include "pl-account.h"
 #include "studio-window.h"
 #include "updater.h"
+#include "deck.h"
 #include "stream-dock.h"
 #include "vertical-dock.h"
 #include "vertical-pan.h"
@@ -74,12 +75,14 @@ bool obs_module_load(void)
 	pl_vertical_pan_load();
 	pl_projection_start();
 	pl_updater_load();
+	pl_deck_load();
 	return true;
 }
 
 void obs_module_unload(void)
 {
 	pl_updater_unload();
+	pl_deck_unload();
 	pl_projection_stop();
 	pl_vertical_pan_unload();
 	pl_artes_unload();

@@ -2056,6 +2056,12 @@ void frontendEvent(enum obs_frontend_event event, void *)
 
 } // namespace
 
+/* Deck pelo celular: o mesmo "Cortar" da mesa. */
+void pl_studio_cut()
+{
+	cutFromAnywhere();
+}
+
 void pl_studio_window_enter_live(void)
 {
 	enterLive();

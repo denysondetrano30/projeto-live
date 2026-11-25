@@ -52,6 +52,10 @@ int pl_projection_status(char *names, size_t size);
 /* Texto do telão agora (para a legenda). Devolve um número que muda a cada texto novo. */
 uint64_t pl_projection_caption(char *text, size_t size);
 
+/* Deck pelo celular (25/11): o estado em JSON (só manda quando muda) e os toques que chegaram. */
+void pl_projection_set_deck(const char *json);
+bool pl_projection_take_deck(char *out, size_t size);
+
 /* Porta onde a fonte "Telão (projeção)" escuta o telão (0 = nenhuma fonte, não mandar). */
 void pl_projection_set_mirror(int port);
 

@@ -1998,6 +1998,27 @@ void showEntryAgain(const QString &name)
 
 } // namespace
 
+/* Deck pelo celular (25/11): os nomes das entradas na ordem da fileira, sem as escondidas. */
+std::vector<std::string> pl_entries_visible()
+{
+	std::vector<obs_source_t *> list;
+	struct obs_frontend_source_list scenes = {};
+	obs_frontend_get_scenes(&scenes);
+	for (size_t i = 0; i < scenes.sources.num; i++) {
+		list.push_back(obs_source_get_ref(scenes.sources.array[i]));
+	}
+	obs_frontend_source_list_free(&scenes);
+	sortByOrder(list);
+	std::vector<std::string> names;
+	for (obs_source_t *scene : list) {
+		if (!entryFlag(scene, KEY_HIDDEN)) {
+			names.emplace_back(obs_source_get_name(scene));
+		}
+		obs_source_release(scene);
+	}
+	return names;
+}
+
 bool pl_entry_goes_clean(obs_source_t *scene)
 {
 	return scene && entryGoesClean(scene);
