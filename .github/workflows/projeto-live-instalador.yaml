@@ -163,7 +163,7 @@ jobs:
           } else {
             $makensis = $makensis.Source
           }
-          & $makensis /V2 "/DVERSION=${{ steps.obs.outputs.short }}" installer/projeto-live.nsi
+          & $makensis /V2 "/DVERSION=${{ steps.obs.outputs.short }}" "/DNUMERO=${{ github.run_number }}" installer/projeto-live.nsi
           if ($LASTEXITCODE -ne 0) { throw "makensis falhou" }
 
       - name: Guarda o instalador
@@ -192,3 +192,10 @@ jobs:
           }
           gh release upload $tag installer/ProjetoLive-Instalador.exe -R $repo --clobber
           if ($LASTEXITCODE -ne 0) { throw "nao deu para enviar o instalador" }
+          # Atualizacao automatica (25/11): o numero e o tamanho desta versao. Vai DEPOIS do
+          # instalador, para ninguem ver o numero novo antes de o arquivo novo estar la.
+          $size = (Get-Item installer/ProjetoLive-Instalador.exe).Length
+          $json = '{"numero":${{ github.run_number }},"tamanho":' + $size + ',"commit":"${{ steps.obs.outputs.short }}"}'
+          [System.IO.File]::WriteAllText("$PWD/installer/somun-versao.json", $json)
+          gh release upload $tag installer/somun-versao.json -R $repo --clobber
+          if ($LASTEXITCODE -ne 0) { throw "nao deu para enviar o somun-versao.json" }

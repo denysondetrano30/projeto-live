@@ -24,6 +24,12 @@ SetCompressor /SOLID lzma
 !define VERSION "0.0.0"
 !endif
 
+; Número da montagem (sempre maior que a anterior): a atualização automática compara com o
+; somun-versao.json das Releases (veja plugins/projeto-live/updater.cpp).
+!ifndef NUMERO
+!define NUMERO "0"
+!endif
+
 !define PRODUCT "Projeto Live"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\ProjetoLive"
 !define OBS_EXE "$INSTDIR\OBS\bin\64bit\obs64.exe"
@@ -67,6 +73,30 @@ Function un.onInit
 	SetShellVarContext all
 FunctionEnd
 
+; Atualização automática (instalador rodando escondido, /S): fecha o programa com calma (como o X
+; da janela) e espera até 30 s; só força no fim.
+!macro CloseApp IMAGE
+	nsExec::Exec 'taskkill /IM ${IMAGE}'
+	Pop $0
+	StrCpy $1 0
+	${Do}
+		nsExec::ExecToStack 'cmd /d /c tasklist /FI "IMAGENAME eq ${IMAGE}" /NH | find /I "${IMAGE}"'
+		Pop $0
+		Pop $2
+		${If} $0 != 0
+			${Break}
+		${EndIf}
+		${If} $1 >= 30
+			nsExec::Exec 'taskkill /F /IM ${IMAGE}'
+			Pop $0
+			Sleep 1000
+			${Break}
+		${EndIf}
+		Sleep 1000
+		IntOp $1 $1 + 1
+	${Loop}
+!macroend
+
 ; Regra do firewall: entrada liberada só em redes privadas e de domínio (a rede da igreja).
 !macro FirewallRule NAME EXE
 	nsExec::Exec 'netsh advfirewall firewall delete rule name="${NAME}"'
@@ -77,6 +107,11 @@ FunctionEnd
 
 Section "Projeto Live" SecMain
 	SectionIn RO
+
+	${If} ${Silent}
+		!insertmacro CloseApp "obs64.exe"
+		!insertmacro CloseApp "FreeShow.exe"
+	${EndIf}
 
 	; Versões antigas saem antes (arquivos que não existem mais na versão nova).
 	RMDir /r "$INSTDIR\OBS"
@@ -100,6 +135,11 @@ Section "Projeto Live" SecMain
 	!insertmacro FirewallRule "Projeto Live (OBS)" "${OBS_EXE}"
 	!insertmacro FirewallRule "Projeto Live (Projeção)" "${PROJECTION_EXE}"
 
+	; Número desta versão (a atualização automática compara com o das Releases).
+	FileOpen $0 "$INSTDIR\somun-versao.txt" w
+	FileWrite $0 "${NUMERO}"
+	FileClose $0
+
 	WriteUninstaller "$INSTDIR\Desinstalar.exe"
 	WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "${PRODUCT}"
 	WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
@@ -117,7 +157,7 @@ Function .onInstSuccess
 	nsExec::Exec 'sc query "Apple Mobile Device Service"'
 	Pop $0
 	${If} $0 != 0
-		MessageBox MB_YESNO|MB_ICONINFORMATION "Para usar o iPhone como câmera pelo CABO USB, o Windows precisa do app $\"Dispositivos Apple$\" (da Microsoft Store).$\r$\n$\r$\nPelo Wi-Fi funciona sem ele.$\r$\n$\r$\nAbrir a página para instalar agora?" IDNO skip
+		MessageBox MB_YESNO|MB_ICONINFORMATION /SD IDNO "Para usar o iPhone como câmera pelo CABO USB, o Windows precisa do app $\"Dispositivos Apple$\" (da Microsoft Store).$\r$\n$\r$\nPelo Wi-Fi funciona sem ele.$\r$\n$\r$\nAbrir a página para instalar agora?" IDNO skip
 		ExecShell "open" "${APPLE_DEVICES_URL}"
 	skip:
 	${EndIf}
@@ -135,6 +175,7 @@ Section "Uninstall"
 	RMDir /r "$INSTDIR\OBS"
 	RMDir /r "$INSTDIR\Projecao"
 	Delete "$INSTDIR\Desinstalar.exe"
+	Delete "$INSTDIR\somun-versao.txt"
 	RMDir "$INSTDIR"
 	DeleteRegKey HKLM "${UNINSTALL_KEY}"
 	; As configurações (cenas, perfis, músicas) ficam na pasta do usuário e não são apagadas.

@@ -93,6 +93,8 @@ target_sources(
     webcam-source.h
     roteiro-strip.cpp
     roteiro-strip.h
+    updater.cpp
+    updater.h
     vertical.c
     vertical.h
     watch-window.cpp

@@ -100,6 +100,7 @@
 #include "stream-dock.h"
 #include "pl-account.h"
 #include "roteiro-strip.h"
+#include "updater.h"
 #include "source-row.hpp"
 #include "somun-style.h"
 #include "stats-dock.h"
@@ -1172,6 +1173,26 @@ public:
 			}
 		});
 		top->addWidget(streamButton);
+		/* Atualização (25/11): "versão nova" discreto, só fora do ar; Atualizar agora ou Depois. */
+		updateButton = new QPushButton(msg("Update.Button"), this);
+		updateButton->setMinimumHeight(32);
+		updateButton->setFocusPolicy(Qt::NoFocus);
+		updateButton->setToolTip(msg("Update.Hint"));
+		updateButton->setStyleSheet(QString("QPushButton { color: %1; }").arg(SOMUN_GRAY2));
+		updateButton->setVisible(false);
+		connect(updateButton, &QPushButton::clicked, this, [this]() {
+			QMenu menu(this);
+			QAction *now = menu.addAction(msg("Update.Now"));
+			QAction *later = menu.addAction(msg("Update.Later"));
+			QAction *chosen = menu.exec(updateButton->mapToGlobal(QPoint(0, updateButton->height())));
+			if (chosen == now) {
+				pl_updater_install_now();
+			} else if (chosen == later) {
+				updateLater = true;
+				updateButton->setVisible(false);
+			}
+		});
+		top->addWidget(updateButton);
 		moreButton = new QPushButton(QString::fromUtf8("⋯"), this);
 		moreButton->setMinimumSize(40, 32);
 		moreButton->setFocusPolicy(Qt::NoFocus);
@@ -1649,6 +1670,13 @@ private:
 	{
 		/* A transmissão é a nossa lista de destinos (parte G), não a do OBS. */
 		bool streaming = pl_multistream_active();
+		/* Atualização: não baixa nem oferece no ar. */
+		bool onAir = streaming || obs_frontend_recording_active() || obs_frontend_streaming_active();
+		pl_updater_set_busy(onAir);
+		bool offerUpdate = !onAir && !updateLater && pl_updater_ready();
+		if (updateButton->isHidden() == offerUpdate) {
+			updateButton->setVisible(offerUpdate);
+		}
 		/* Parte G3: com destino caído, o topo diz quantos ("· 1 caiu") e a letra fica vermelha. */
 		int down = streaming ? pl_multistream_down_count() : 0;
 		QString streamText;
@@ -1866,6 +1894,8 @@ private:
 	QPushButton *cutButton = nullptr;
 	QPushButton *transitionButton = nullptr;
 	QPushButton *moreButton = nullptr;
+	QPushButton *updateButton = nullptr;
+	bool updateLater = false;
 	QLabel *transitionInfo = nullptr;
 	QWidget *entries = nullptr;
 	QDialog *sourcesDialog = nullptr;
