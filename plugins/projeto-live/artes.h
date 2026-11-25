@@ -34,6 +34,8 @@ void pl_look_set_amount(int amount);
 
 /* A barra "Artes" da mesa: "+" e um botão por peça alfinetada (liga e desliga). */
 QWidget *pl_artes_bar_create(QWidget *parent);
+/* As Artes da mesa em grade de botões grandes (duas colunas e o "+" tracejado). */
+QWidget *pl_artes_grid_create(QWidget *parent);
 
 /* Abre a tela "No programa" (configurar as peças). */
 void pl_artes_open_editor(QWidget *parent);

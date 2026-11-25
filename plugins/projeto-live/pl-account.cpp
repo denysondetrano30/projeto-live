@@ -52,6 +52,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -162,6 +163,16 @@ QJsonObject text(const QString &value)
 QString field(const QJsonObject &fields, const char *key)
 {
 	return fields.value(key).toObject().value("stringValue").toString();
+}
+
+/* Número de um campo do Firestore (inteiro ou com vírgula); 0 quando não tem. */
+int number(const QJsonObject &fields, const char *key)
+{
+	QJsonObject value = fields.value(key).toObject();
+	if (value.contains("integerValue")) {
+		return value.value("integerValue").toString().toInt();
+	}
+	return (int)value.value("doubleValue").toDouble();
 }
 
 QJsonObject path(const char *name)
@@ -303,8 +314,9 @@ void onUi(std::function<void()> work)
 struct Culto {
 	QString id;
 	QString nome;
-	QString data; /* AAAA-MM-DD */
-	QString hora; /* HH:MM */
+	QString data;                     /* AAAA-MM-DD */
+	QString hora;                     /* HH:MM */
+	std::vector<PLRoteiroItem> itens; /* o roteiro da última versão publicada */
 };
 
 struct Recado {
@@ -317,8 +329,10 @@ class Hub : public QObject {
 public:
 	QString email, uid, refresh;
 	std::vector<Culto> cultos;
-	QString cultoId;     /* o culto que está sendo ouvido */
-	QString manualCulto; /* escolhido no selo; vazio = automático */
+	QString cultoId;              /* o culto que está sendo ouvido */
+	QString manualCulto;          /* escolhido no selo; vazio = automático */
+	QString agoraId, agoraTitulo; /* o item que a Projeção diz que está no telão */
+	QDateTime agoraEm;
 	std::vector<Recado> recados;
 	QString problem; /* o que mostrar quando algo deu errado */
 	std::vector<std::function<void()>> listeners;
@@ -496,6 +510,7 @@ public:
 		fields.append(path("data"));
 		fields.append(path("hora"));
 		fields.append(path("ultima.n"));
+		fields.append(path("ultima.retrato.itens"));
 		QJsonObject select;
 		select["fields"] = fields;
 		QJsonObject query;
@@ -530,6 +545,37 @@ public:
 					culto.nome = field(fields, "nome");
 					culto.data = field(fields, "data");
 					culto.hora = field(fields, "hora");
+					QJsonObject retrato = fields.value("ultima")
+								      .toObject()
+								      .value("mapValue")
+								      .toObject()
+								      .value("fields")
+								      .toObject()
+								      .value("retrato")
+								      .toObject()
+								      .value("mapValue")
+								      .toObject()
+								      .value("fields")
+								      .toObject();
+					QJsonArray itens = retrato.value("itens")
+								   .toObject()
+								   .value("arrayValue")
+								   .toObject()
+								   .value("values")
+								   .toArray();
+					for (const QJsonValue each : itens) {
+						QJsonObject f = each.toObject()
+									.value("mapValue")
+									.toObject()
+									.value("fields")
+									.toObject();
+						PLRoteiroItem item;
+						item.id = field(f, "id");
+						item.titulo = field(f, "titulo");
+						item.tipo = field(f, "tipo");
+						item.minutos = std::max(number(f, "min"), 0);
+						culto.itens.push_back(item);
+					}
 					list.push_back(culto);
 				}
 			}
@@ -598,6 +644,9 @@ public:
 			return;
 		}
 		cultoId = id;
+		agoraId.clear();
+		agoraTitulo.clear();
+		agoraEm = QDateTime();
 		recados.clear();
 		seen.clear();
 		since = isoNow(-SLACK_MS);
@@ -650,10 +699,12 @@ public:
 		wrapper["structuredQuery"] = query;
 		QByteArray body = toJson(wrapper);
 		std::string url = documents() + "/aoVivo/" + id.toStdString() + ":runQuery";
-		worker.push([self, id, refreshToken, url, body]() {
+		std::string docUrl = documents() + "/aoVivo/" + id.toStdString() + "?mask.fieldPaths=agora";
+		worker.push([self, id, refreshToken, url, docUrl, body]() {
 			std::string access, next;
 			Fail fail = accessToken(refreshToken, access, next);
 			QJsonArray rows;
+			QJsonObject agora;
 			if (fail == Fail::None) {
 				Http http = request("POST", url, body, "application/json", access);
 				if (http.network) {
@@ -662,9 +713,25 @@ public:
 					rows = QJsonDocument::fromJson(http.body).array();
 				}
 				/* 403 aqui costuma ser o aoVivo ainda sem dono: o claim resolve na próxima. */
+				/* O item que está no telão agora (a Projeção escreve em aoVivo/<culto>.agora). */
+				if (fail == Fail::None) {
+					Http doc = request("GET", docUrl, QByteArray(), "application/json", access);
+					if (doc.status == 200) {
+						agora = QJsonDocument::fromJson(doc.body)
+								.object()
+								.value("fields")
+								.toObject()
+								.value("agora")
+								.toObject()
+								.value("mapValue")
+								.toObject()
+								.value("fields")
+								.toObject();
+					}
+				}
 			}
 			QString nextRefresh = QString::fromStdString(next);
-			onUi([self, id, fail, rows, nextRefresh]() {
+			onUi([self, id, fail, rows, agora, nextRefresh]() {
 				if (!self) {
 					return;
 				}
@@ -676,6 +743,12 @@ public:
 				self->ok(nextRefresh);
 				if (id == self->cultoId) {
 					self->received(rows);
+					self->agoraId = field(agora, "itemId");
+					self->agoraTitulo = field(agora, "titulo");
+					self->agoraEm = QDateTime::fromString(field(agora, "em"), Qt::ISODateWithMs);
+					if (!self->agoraEm.isValid()) {
+						self->agoraEm = QDateTime::fromString(field(agora, "em"), Qt::ISODate);
+					}
 				}
 			});
 		});
@@ -1120,6 +1193,25 @@ void frontendEvent(enum obs_frontend_event event, void *)
 }
 
 } // namespace
+
+bool pl_account_roteiro(PLRoteiro &out)
+{
+	out = PLRoteiro();
+	if (!hub || !hub->loggedIn()) {
+		return false;
+	}
+	const Culto *c = hub->culto();
+	if (!c) {
+		return false;
+	}
+	out.nome = c->nome;
+	out.hora = c->hora;
+	out.itens = c->itens;
+	out.agoraId = hub->agoraId;
+	out.agoraTitulo = hub->agoraTitulo;
+	out.agoraEm = hub->agoraEm;
+	return true;
+}
 
 QWidget *pl_account_badge_create(QWidget *parent)
 {

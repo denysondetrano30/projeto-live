@@ -67,7 +67,7 @@ QString somun_window_style()
 		       "QWidget#somunWindow QScrollArea { background: transparent; }"
 		       "QWidget#somunWindow QScrollArea > QWidget > QWidget { background: transparent; }"
 		       "QFrame#somunPanel { background: %8; border: 1px solid %9; border-radius: 8px; }"
-		       "QLabel#somunPanelTitle { color: %10; font-weight: 600; letter-spacing: 1px; }")
+		       "QLabel#somunPanelTitle { color: %10; }")
 		.arg(QString(SOMUN_BLACK))
 		.arg(font)
 		.arg(QString(SOMUN_TEXT))

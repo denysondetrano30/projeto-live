@@ -60,6 +60,7 @@
 #include <QComboBox>
 #include <QFileInfo>
 #include <QFontMetrics>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHideEvent>
 #include <QInputDialog>
@@ -1257,11 +1258,19 @@ void addMenu(QWidget *parent, const QPoint &where)
  * barrinha do tempo que falta. Clique liga/desliga; botão direito abre o menu; arrastar reordena. */
 class ArtButton : public QWidget {
 public:
-	ArtButton(QWidget *parent, const std::string &id) : QWidget(parent), id(id)
+	ArtButton(QWidget *parent, const std::string &id, bool big = false) : QWidget(parent), id(id), big(big)
 	{
 		setCursor(Qt::PointingHandCursor);
 		setAcceptDrops(true);
-		setMinimumHeight(34);
+		setMinimumHeight(big ? 56 : 34);
+		if (big) {
+			/* Grade da mesa: botão grande (com o culto rodando, alvo grande é menos erro). */
+			setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+			setFixedHeight(56);
+			QFont larger = font();
+			larger.setPointSizeF(larger.pointSizeF() + 1.5);
+			setFont(larger);
+		}
 		setToolTip(msg("Artes.ButtonHint"));
 	}
 
@@ -1270,7 +1279,7 @@ public:
 		Piece *piece = findPiece(id);
 		QFontMetrics metrics(font());
 		int text = piece ? metrics.horizontalAdvance(QString::fromStdString(piece->name)) : 40;
-		return QSize(text + 40, 34);
+		return QSize(text + 40, big ? 56 : 34);
 	}
 
 protected:
@@ -1301,7 +1310,13 @@ protected:
 		painter.setPen(QPen(border, 1.5));
 		painter.drawRoundedRect(box, 6, 6);
 		int x = 12;
-		if (on) {
+		if (big) {
+			/* Na grade, todos têm a bolinha: vermelha no ar, cinza desligada. */
+			painter.setPen(Qt::NoPen);
+			painter.setBrush(on ? QColor(SOMUN_RED) : QColor(SOMUN_LINE2));
+			painter.drawEllipse(QRectF(18, height() / 2.0 - 5, 10, 10));
+			x = 40;
+		} else if (on) {
 			painter.setPen(Qt::NoPen);
 			painter.setBrush(QColor(SOMUN_RED));
 			painter.drawEllipse(QRectF(10, height() / 2.0 - 4, 8, 8));
@@ -1375,14 +1390,56 @@ protected:
 
 private:
 	std::string id;
+	bool big = false;
 	QPoint pressPos;
 	bool pressing = false;
 };
 
+/* O "+" da grade: um quadro tracejado do tamanho de um botão. */
+class AddTile : public QWidget {
+public:
+	explicit AddTile(QWidget *parent) : QWidget(parent)
+	{
+		setCursor(Qt::PointingHandCursor);
+		setFixedHeight(56);
+		setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+		setToolTip(msg("Artes.AddHint"));
+	}
+
+	std::function<void()> onClick;
+
+protected:
+	void paintEvent(QPaintEvent *) override
+	{
+		QPainter painter(this);
+		painter.setRenderHint(QPainter::Antialiasing);
+		QPen pen(QColor(SOMUN_LINE2), 1.2, Qt::DashLine);
+		painter.setPen(pen);
+		painter.setBrush(Qt::NoBrush);
+		painter.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), 6, 6);
+		painter.setPen(QColor(SOMUN_GRAY));
+		QFont larger = font();
+		larger.setPointSizeF(larger.pointSizeF() + 3);
+		painter.setFont(larger);
+		painter.drawText(rect(), Qt::AlignCenter, "+");
+	}
+
+	void mouseReleaseEvent(QMouseEvent *event) override
+	{
+		if (event->button() == Qt::LeftButton && rect().contains(event->position().toPoint()) && onClick) {
+			onClick();
+		}
+	}
+};
+
 class ArtsBar : public QWidget {
 public:
-	explicit ArtsBar(QWidget *parent) : QWidget(parent)
+	explicit ArtsBar(QWidget *parent, bool asGrid = false) : QWidget(parent), asGrid(asGrid)
 	{
+		if (asGrid) {
+			buildGrid();
+			return;
+		}
 		row = new QHBoxLayout(this);
 		row->setContentsMargins(0, 0, 0, 0);
 		row->setSpacing(8);
@@ -1404,9 +1461,57 @@ public:
 
 	~ArtsBar() override { bars.erase(std::remove(bars.begin(), bars.end(), this), bars.end()); }
 
+	/* A grade da mesa (desenho de 24/11): título "Artes" e os botões grandes, duas colunas, com o "+"
+	 * tracejado no fim. */
+	void buildGrid()
+	{
+		auto *outer = new QVBoxLayout(this);
+		outer->setContentsMargins(12, 10, 12, 12);
+		outer->setSpacing(10);
+		auto *title = new QLabel(msg("Artes.Title"), this);
+		title->setObjectName("somunPanelTitle");
+		title->setToolTip(msg("Artes.TitleHint"));
+		outer->addWidget(title);
+		grid = new QGridLayout();
+		grid->setContentsMargins(0, 0, 0, 0);
+		grid->setHorizontalSpacing(14);
+		grid->setVerticalSpacing(12);
+		grid->setColumnStretch(0, 1);
+		grid->setColumnStretch(1, 1);
+		outer->addLayout(grid);
+		outer->addStretch(1);
+		addTile = new AddTile(this);
+		addTile->onClick = [this]() {
+			addMenu(window(), addTile->mapToGlobal(QPoint(0, addTile->height())));
+		};
+		bars.push_back(this);
+		rebuild();
+	}
+
 	/* Refaz os botões (peça nova, apagada, renomeada, alfinete ou ordem). */
 	void rebuild()
 	{
+		if (asGrid) {
+			for (ArtButton *button : buttons) {
+				grid->removeWidget(button);
+				button->hide();
+				button->deleteLater();
+			}
+			buttons.clear();
+			grid->removeWidget(addTile);
+			int index = 0;
+			for (auto &piece : pieces) {
+				if (!piece->pinned) {
+					continue;
+				}
+				auto *button = new ArtButton(this, piece->id, true);
+				grid->addWidget(button, index / 2, index % 2);
+				buttons.push_back(button);
+				index++;
+			}
+			grid->addWidget(addTile, index / 2, index % 2);
+			return;
+		}
 		for (ArtButton *button : buttons) {
 			row->removeWidget(button);
 			button->hide();
@@ -1432,7 +1537,10 @@ public:
 	}
 
 private:
+	bool asGrid = false;
 	QHBoxLayout *row = nullptr;
+	QGridLayout *grid = nullptr;
+	AddTile *addTile = nullptr;
 	QPushButton *plus = nullptr;
 	std::vector<ArtButton *> buttons;
 };
@@ -2435,6 +2543,11 @@ void pl_artes_unload(void)
 QWidget *pl_artes_bar_create(QWidget *parent)
 {
 	return new ArtsBar(parent);
+}
+
+QWidget *pl_artes_grid_create(QWidget *parent)
+{
+	return new ArtsBar(parent, true);
 }
 
 void pl_artes_open_editor(QWidget *parent)

@@ -99,6 +99,7 @@
 #include "multistream.h"
 #include "stream-dock.h"
 #include "pl-account.h"
+#include "roteiro-strip.h"
 #include "source-row.hpp"
 #include "somun-style.h"
 #include "stats-dock.h"
@@ -555,14 +556,12 @@ public:
 		setStyleSheet(
 			"QFrame#plSources { background: #1C1C1C; border: 1px solid #2A2A2A; border-radius: 8px; }");
 		auto *layout = new QVBoxLayout(this);
-		layout->setContentsMargins(8, 6, 8, 8);
+		layout->setContentsMargins(12, 10, 12, 12);
 		layout->setSpacing(4);
 
 		auto *head = new QHBoxLayout();
 		auto *title = new QLabel(msg("Studio.Sources"), this);
-		QFont bold = title->font();
-		bold.setBold(true);
-		title->setFont(bold);
+		title->setObjectName("somunPanelTitle");
 		head->addWidget(title, 1);
 		addButton = plIconButton(this, "icon-plus", ":/res/images/plus.svg", msg("Entries.AddSource"));
 		connect(addButton, &QToolButton::clicked, this, [this]() {
@@ -1278,42 +1277,59 @@ public:
 		 * Acompanhar ligado no monitor 2, elas ficam só lá. */
 		/* Artes: a barra das peças "No programa" (logo, QR code, letterbox), por cima de tudo que vai
 		 * ao ar. Um clique liga, outro desliga; "+" cria; botão direito edita. */
-		right->addWidget(pl_artes_bar_create(this));
+		/* Com um monitor só, as Artes ficam onde sempre estiveram (a barra deitada). */
+		artesBar = pl_artes_bar_create(this);
+		right->addWidget(artesBar);
 
 		entries = pl_camera_dock_create(this);
 		right->addWidget(entries, 3);
 
-		/* Som: o mesmo painel Som do OBS (outra cópia), numa faixa fina. */
-		auto *audio = pl_audio_dock_create(this);
-		audio->setMaximumHeight(130);
-		right->addWidget(audio, 1);
+		/*
+		 * Mesa com o Acompanhar (desenho de 24/11): no meio, o Som (faders em pé) e embaixo dele as
+		 * Artes em grade de botões grandes. O Som é um só: com um monitor ele muda para a coluna da
+		 * direita (embaixo da Equipe).
+		 */
+		soundFrame = new QFrame(this);
+		soundFrame->setObjectName("somunPanel");
+		auto *soundLayout = new QVBoxLayout(soundFrame);
+		soundLayout->setContentsMargins(0, 0, 0, 0);
+		soundLayout->addWidget(pl_audio_mixer_create(soundFrame));
+
+		centerColumn = new QWidget(this);
+		centerLayout = new QVBoxLayout(centerColumn);
+		centerLayout->setContentsMargins(0, 0, 0, 0);
+		centerLayout->setSpacing(12);
+		auto *artesFrame = new QFrame(centerColumn);
+		artesFrame->setObjectName("somunPanel");
+		auto *artesLayout = new QVBoxLayout(artesFrame);
+		artesLayout->setContentsMargins(0, 0, 0, 0);
+		artesLayout->addWidget(pl_artes_grid_create(artesFrame));
+		centerLayout->addWidget(artesFrame, 6);
+		centerColumn->setVisible(false);
+		right->addWidget(centerColumn, 1);
 
 		body->addLayout(right, 1);
 
-		/* Coluna da direita: Equipe (lista pequena: nome, bolinha de quem fala, clique = recado,
-		 * segurar = falar só com a pessoa) e a Situação completa. */
-		auto *side = new QVBoxLayout();
-		side->setSpacing(10);
-		auto *team = new QFrame(this);
-		team->setObjectName("somunPanel");
-		auto *teamLayout = new QVBoxLayout(team);
-		teamLayout->setContentsMargins(10, 8, 10, 8);
-		teamLayout->addWidget(pl_team_panel_create(team));
-		side->addWidget(team);
-		auto *status = new QFrame(this);
-		status->setObjectName("somunPanel");
-		auto *statusLayout = new QVBoxLayout(status);
-		statusLayout->setContentsMargins(10, 8, 10, 10);
-		statusLayout->addWidget(pl_stats_column_create(status));
-		side->addWidget(status);
-		side->addStretch(1);
+		/* Coluna da direita: a Transmissão (destinos com Mb/s, conferir, gravando, disco, processador)
+		 * com a Equipe embaixo; com um monitor, o Som vem por último. */
+		sideLayout = new QVBoxLayout();
+		sideLayout->setSpacing(12);
+		transmissionFrame = new QFrame(this);
+		transmissionFrame->setObjectName("somunPanel");
+		auto *transmissionLayout = new QVBoxLayout(transmissionFrame);
+		transmissionLayout->setContentsMargins(14, 12, 14, 12);
+		transmissionLayout->addWidget(pl_transmission_panel_create(transmissionFrame));
+		sideLayout->addWidget(transmissionFrame, 1);
 		auto *sideHolder = new QWidget(this);
-		sideHolder->setLayout(side);
-		side->setContentsMargins(0, 0, 0, 0);
-		sideHolder->setFixedWidth(260);
+		sideHolder->setLayout(sideLayout);
+		sideLayout->setContentsMargins(0, 0, 0, 0);
+		sideHolder->setFixedWidth(300);
 		body->addWidget(sideHolder);
 
 		outer->addLayout(body, 1);
+
+		/* Embaixo de tudo, nos dois modos: o roteiro do culto, deitado. */
+		outer->addWidget(pl_roteiro_strip_create(this));
 
 		/* Os recados do diretor aparecem no canto de cima, à direita. */
 		pl_account_attach_toasts(this);
@@ -1482,8 +1498,9 @@ private:
 		}
 		/* Com o Acompanhar, a imagem fica só no monitor 2; com o modo Cor, ele cobre o meio da mesa. */
 		bool imagesAway = watching || colorHere;
-		/* No modo Cor o meio (vazio) não guarda lugar: o painel ocupa a altura toda. */
-		rightLayout->setStretchFactor(middleLayout, colorHere ? 0 : 5);
+		/* No modo Cor o meio (vazio) não guarda lugar: o painel ocupa a altura toda. Com o Acompanhar,
+		 * o meio é do Som e das Artes. */
+		rightLayout->setStretchFactor(middleLayout, (colorHere || watching) ? 0 : 5);
 		/* Com o Acompanhar, as entradas ficam só no monitor 2 (as duas telas não repetem nada). */
 		if (entries->isHidden() == !imagesAway) {
 			entries->setVisible(!imagesAway);
@@ -1520,6 +1537,7 @@ private:
 		if (sourcesColumn->isHidden() == watching) {
 			sourcesColumn->setVisible(watching);
 		}
+		placeSound(watching);
 		if (watching) {
 			sourcesColumn->refresh();
 		}
@@ -1563,6 +1581,36 @@ private:
 		}
 		if (transitionInfo->text() != info) {
 			transitionInfo->setText(info);
+		}
+	}
+
+	/*
+	 * Mesma mesa, dois endereços (decidido com ela em 24/11): com o Acompanhar, o Som e as Artes em
+	 * grade ocupam o meio; com um monitor só, o meio é das telas, o Som desce para a coluna da direita
+	 * (embaixo da Transmissão e da Equipe) e as Artes ficam na barra deitada de sempre.
+	 */
+	void placeSound(bool watching)
+	{
+		if (soundPlace == (int)watching) {
+			return;
+		}
+		soundPlace = (int)watching;
+		if (watching) {
+			sideLayout->removeWidget(soundFrame);
+			centerLayout->insertWidget(0, soundFrame, 5);
+			sideLayout->setStretchFactor(transmissionFrame, 1);
+		} else {
+			centerLayout->removeWidget(soundFrame);
+			sideLayout->addWidget(soundFrame, 1);
+			sideLayout->setStretchFactor(transmissionFrame, 0);
+		}
+		soundFrame->show();
+		centerColumn->setVisible(watching);
+		artesBar->setVisible(!watching);
+		/* Com o Acompanhar o meio (vazio) das telas não guarda lugar: a coluna do Som e das Artes ocupa. */
+		rightLayout->setStretchFactor(centerColumn, watching ? 1 : 0);
+		if (!colorHere) {
+			rightLayout->setStretchFactor(middleLayout, watching ? 0 : 5);
 		}
 	}
 
@@ -1826,6 +1874,13 @@ private:
 	SourcesPanel *sourcesColumn = nullptr;
 	QWidget *colorPanel = nullptr;
 	QWidget *panHolder = nullptr;
+	QWidget *artesBar = nullptr;
+	QFrame *soundFrame = nullptr;
+	QWidget *centerColumn = nullptr;
+	QVBoxLayout *centerLayout = nullptr;
+	QVBoxLayout *sideLayout = nullptr;
+	QFrame *transmissionFrame = nullptr;
+	int soundPlace = -1;
 	QVBoxLayout *rightLayout = nullptr;
 	QHBoxLayout *middleLayout = nullptr;
 	bool colorHere = false;

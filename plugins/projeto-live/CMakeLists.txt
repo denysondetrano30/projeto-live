@@ -91,6 +91,8 @@ target_sources(
     vertical-record.h
     webcam-source.cpp
     webcam-source.h
+    roteiro-strip.cpp
+    roteiro-strip.h
     vertical.c
     vertical.h
     watch-window.cpp

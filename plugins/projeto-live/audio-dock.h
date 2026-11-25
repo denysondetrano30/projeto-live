@@ -24,4 +24,7 @@ class QWidget;
 
 /* Mais um painel Som (para a janela do Projeto Live). Já começa ligado. */
 QWidget *pl_audio_dock_create(QWidget *parent);
+
+/* O Som da mesa do somun live: faders em pé, medidor colado, fone e "ouvir tudo" no cabeçalho. */
+QWidget *pl_audio_mixer_create(QWidget *parent);
 #endif

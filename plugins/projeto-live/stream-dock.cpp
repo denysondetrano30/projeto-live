@@ -857,6 +857,7 @@ public:
 		help->setWordWrap(true);
 		top->addWidget(help, 1);
 		auto *check = new QPushButton(moduleText("Check.Button"), this);
+		check->setObjectName("plCheckButton");
 		check->setToolTip(moduleText("Check.ButtonHelp"));
 		top->addWidget(check, 0, Qt::AlignTop);
 		layout->addLayout(top);
@@ -1365,6 +1366,18 @@ void pl_destinations_window_open(QWidget *parent)
 	}
 	destinationsWindow = new DestinationsWindow(parent);
 	destinationsWindow->show();
+}
+
+void pl_destinations_check(QWidget *parent)
+{
+	pl_destinations_window_open(parent);
+	if (destinationsWindow) {
+		if (auto *check = destinationsWindow->findChild<QPushButton *>("plCheckButton")) {
+			if (check->isEnabled()) {
+				check->click();
+			}
+		}
+	}
 }
 
 QString pl_destinations_key_problems(void)

@@ -469,12 +469,7 @@ public:
 		empty->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY));
 		outer->addWidget(empty);
 
-		auto *line = new QFrame(this);
-		line->setFixedHeight(1);
-		line->setStyleSheet(QString("background: %1;").arg(SOMUN_LINE));
-		outer->addSpacing(6);
-		outer->addWidget(line);
-		outer->addSpacing(4);
+		outer->addSpacing(8);
 
 		footer = new QLabel(this);
 		footer->setTextFormat(Qt::RichText);

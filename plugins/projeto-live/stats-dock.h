@@ -27,4 +27,8 @@ QWidget *pl_stats_dock_create(QWidget *parent);
 
 /* "Situação completa" em coluna (um item por linha, com título), para a tela Operar. */
 QWidget *pl_stats_column_create(QWidget *parent);
+
+/* A coluna "Transmissão" da mesa: destinos com Mb/s e "conferir", gravando, disco, processador e a
+ * Equipe embaixo. */
+QWidget *pl_transmission_panel_create(QWidget *parent);
 #endif

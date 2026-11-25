@@ -26,6 +26,9 @@ class QWidget;
 /* A janela "Destinos" do somun live (uma só; se já estiver aberta, vem para a frente). */
 void pl_destinations_window_open(QWidget *parent);
 
+/* O "conferir" da mesa: abre a janela Destinos e já mede a internet e o Wi-Fi dos celulares. */
+void pl_destinations_check(QWidget *parent);
+
 class QString;
 /* Parte G4: os destinos marcados com problema de chave (sem chave, velha, parece endereço), um por
  * linha; vazio = tudo certo. Usado pelo Transmitir. */

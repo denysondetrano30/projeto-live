@@ -40,6 +40,8 @@
 #include <QAction>
 #include <QLabel>
 #include <QMenu>
+#include <QMouseEvent>
+#include <QEvent>
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
@@ -57,6 +59,7 @@
 #include <vector>
 
 #include "phone-source.h"
+#include "somun-style.h"
 #include "scene-audio.h"
 
 namespace {
@@ -75,10 +78,15 @@ std::vector<AudioDock *> instances;
 
 class Meter : public QWidget {
 public:
-	explicit Meter(QWidget *parent) : QWidget(parent)
+	explicit Meter(QWidget *parent, bool upright = false) : QWidget(parent), upright(upright)
 	{
-		setFixedHeight(7);
-		setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+		if (upright) {
+			setFixedWidth(8);
+			setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+		} else {
+			setFixedHeight(7);
+			setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+		}
 	}
 
 	/* Pico em dB (0 é o máximo; -60 é o silêncio). */
@@ -98,23 +106,32 @@ protected:
 	void paintEvent(QPaintEvent *) override
 	{
 		QPainter painter(this);
-		painter.fillRect(rect(), QColor("#2b2b33"));
+		painter.setRenderHint(QPainter::Antialiasing);
+		painter.setPen(Qt::NoPen);
+		painter.setBrush(QColor(SOMUN_LINE));
+		qreal radius = upright ? width() / 2.0 : height() / 2.0;
+		painter.drawRoundedRect(QRectF(rect()), radius, radius);
 		float part = (peak + 60.0f) / 60.0f;
-		int filled = (int)(width() * part);
-		if (filled <= 0) {
-			return;
+		/*
+		 * Cinza claro no nível normal e vermelho só quando estoura (decidido por ela em 25/11): na
+		 * identidade do somun, vermelho é só "no ar, atrasado ou erro", e estourar é erro.
+		 */
+		painter.setBrush(QColor(peak > -1.0f ? SOMUN_RED : SOMUN_GRAY2));
+		if (upright) {
+			int filled = (int)(height() * part);
+			if (filled > 0) {
+				painter.drawRoundedRect(QRectF(0, height() - filled, width(), filled), radius, radius);
+			}
+		} else {
+			int filled = (int)(width() * part);
+			if (filled > 0) {
+				painter.drawRoundedRect(QRectF(0, 0, filled, height()), radius, radius);
+			}
 		}
-		/* Verde até -12 dB, amarelo até -3, vermelho acima: o som alto demais se vê de longe. */
-		QColor color("#6ddb8c");
-		if (peak > -3.0f) {
-			color = QColor("#e5352b");
-		} else if (peak > -12.0f) {
-			color = QColor("#e8a33d");
-		}
-		painter.fillRect(0, 0, filled, height(), color);
 	}
 
 private:
+	bool upright = false;
 	float peak = -60.0f;
 };
 
@@ -123,8 +140,12 @@ private:
 
 class Card : public QFrame {
 public:
-	explicit Card(QWidget *parent) : QFrame(parent)
+	explicit Card(QWidget *parent, bool upright = false) : QFrame(parent), upright(upright)
 	{
+		if (upright) {
+			buildUpright();
+			return;
+		}
 		setFrameShape(QFrame::StyledPanel);
 		setFixedWidth(CARD_WIDTH);
 
@@ -236,6 +257,149 @@ public:
 
 	~Card() override { detach(); }
 
+	/*
+	 * Canal em pé (a mesa do somun live, desenho de 24/11): o fader e o medidor colado do lado, o
+	 * nome e o valor em dB embaixo. Clicar no nome cala/volta; mudo = nome apagado e "mudo" no lugar
+	 * do dB. O resto (fone, filtros, toca nesta entrada) fica no botão direito.
+	 */
+	void buildUpright()
+	{
+		setMinimumWidth(64);
+		setMaximumWidth(128);
+		setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+		auto *outer = new QVBoxLayout(this);
+		outer->setContentsMargins(4, 4, 4, 2);
+		outer->setSpacing(4);
+
+		auto *faderRow = new QHBoxLayout();
+		faderRow->setContentsMargins(0, 0, 0, 0);
+		faderRow->setSpacing(6);
+		faderRow->addStretch(1);
+		slider = new QSlider(Qt::Vertical, this);
+		slider->setRange(0, 1000);
+		slider->setPageStep(50);
+		slider->setFocusPolicy(Qt::NoFocus);
+		slider->setMinimumHeight(70);
+		slider->setStyleSheet(
+			QString("QSlider::groove:vertical { background: %1; width: 8px; border-radius: 4px; }"
+				"QSlider::handle:vertical { background: %2; height: 14px; margin: 0 -10px;"
+				" border-radius: 3px; }"
+				"QSlider::add-page:vertical, QSlider::sub-page:vertical { background: transparent; }")
+				.arg(QString(SOMUN_LINE))
+				.arg(QString(SOMUN_WHITE)));
+		faderRow->addWidget(slider);
+		meter = new Meter(this, true);
+		faderRow->addWidget(meter);
+		faderRow->addStretch(1);
+		outer->addLayout(faderRow, 1);
+		connect(slider, &QSlider::valueChanged, this, [this](int value) {
+			if (fader && !syncing) {
+				obs_fader_set_deflection(fader, (float)value / 1000.0f);
+			}
+		});
+
+		name = new QLabel(this);
+		name->setAlignment(Qt::AlignCenter);
+		name->setCursor(Qt::PointingHandCursor);
+		name->setToolTip(QString::fromUtf8(obs_module_text("Audio.UprightHint")));
+		outer->addWidget(name);
+		volume = new QLabel(this);
+		volume->setAlignment(Qt::AlignCenter);
+		volume->setStyleSheet(QString("color: %1;").arg(SOMUN_GRAY));
+		outer->addWidget(volume);
+		name->installEventFilter(this);
+		volume->installEventFilter(this);
+
+		/* Os botões existem (o resto do código usa), mas na mesa moram no botão direito. */
+		mute = new QPushButton(this);
+		mute->setCheckable(true);
+		mute->hide();
+		phone = new QPushButton(this);
+		phone->setCheckable(true);
+		phone->hide();
+		tag = new QLabel(this);
+		tag->hide();
+		scenePlay = new QCheckBox(this);
+		scenePlay->hide();
+
+		setContextMenuPolicy(Qt::CustomContextMenu);
+		connect(this, &QWidget::customContextMenuRequested, this,
+			[this](const QPoint &pos) { uprightMenu(pos); });
+	}
+
+	void toggleMute()
+	{
+		obs_source_t *target = obs_weak_source_get_source(source);
+		if (target) {
+			obs_source_set_muted(target, !obs_source_muted(target));
+			obs_source_release(target);
+		}
+		refresh();
+	}
+
+	void uprightMenu(const QPoint &pos)
+	{
+		QMenu menu(this);
+		QAction *muteAction = menu.addAction(QString::fromUtf8(obs_module_text("Audio.Mute")));
+		muteAction->setCheckable(true);
+		muteAction->setChecked(mute->isChecked());
+		QAction *listen = menu.addAction(QString::fromUtf8(obs_module_text("Audio.ListenMenu")));
+		listen->setCheckable(true);
+		listen->setChecked(phone->isChecked());
+		QAction *inScene = nullptr;
+		if (isGlobal) {
+			inScene = menu.addAction(QString::fromUtf8(obs_module_text("Audio.InScene")));
+			inScene->setCheckable(true);
+			inScene->setChecked(scenePlay->isChecked());
+			inScene->setToolTip(QString::fromUtf8(obs_module_text("Audio.InScene.Tip")));
+		}
+		menu.addSeparator();
+		QAction *filters = menu.addAction(QString::fromUtf8(obs_module_text("AudioFilters.Menu")));
+		QAction *advanced = menu.addAction(QString::fromUtf8(obs_module_text("AudioFilters.AdvancedMenu")));
+		menu.setToolTipsVisible(true);
+		QAction *chosen = menu.exec(mapToGlobal(pos));
+		if (!chosen) {
+			return;
+		}
+		if (chosen == muteAction) {
+			toggleMute();
+		} else if (chosen == listen) {
+			setListening(listen->isChecked());
+		} else if (inScene && chosen == inScene) {
+			obs_source_t *scene = obs_frontend_get_current_scene();
+			obs_source_t *target = obs_weak_source_get_source(source);
+			if (scene && target) {
+				pl_scene_audio_set_silenced(scene, obs_source_get_name(target), !inScene->isChecked());
+			}
+			obs_source_release(target);
+			obs_source_release(scene);
+		} else if (chosen == filters) {
+			obs_source_t *target = obs_weak_source_get_source(source);
+			if (target) {
+				obs_frontend_open_source_filters(target);
+				obs_source_release(target);
+			}
+		} else if (chosen == advanced) {
+			auto *main = static_cast<QWidget *>(obs_frontend_get_main_window());
+			QAction *open = main ? main->findChild<QAction *>("actionAdvAudioProperties") : nullptr;
+			if (open) {
+				open->trigger();
+			}
+		}
+	}
+
+	bool eventFilter(QObject *watched, QEvent *event) override
+	{
+		if (upright && (watched == name || watched == volume) && event->type() == QEvent::MouseButtonRelease) {
+			auto *mouse = static_cast<QMouseEvent *>(event);
+			if (mouse->button() == Qt::LeftButton) {
+				toggleMute();
+				return true;
+			}
+		}
+		return QFrame::eventFilter(watched, event);
+	}
+
 	void attach(obs_source_t *target, bool global)
 	{
 		detach();
@@ -247,10 +411,13 @@ public:
 		fader = obs_fader_create(OBS_FADER_LOG);
 		obs_fader_attach_source(fader, target);
 		name->setText(QString::fromUtf8(obs_source_get_name(target)));
-		name->setToolTip(name->text());
+		if (!upright) {
+			name->setToolTip(name->text());
+		}
+		shownMuted = -1;
 		isGlobal = global;
 		tag->setText(QString::fromUtf8(obs_module_text(global ? "Audio.Global" : "Audio.Scene")));
-		scenePlay->setVisible(global);
+		scenePlay->setVisible(global && !upright);
 	}
 
 	void detach()
@@ -315,10 +482,28 @@ public:
 			}
 		}
 		float db = obs_mul_to_db(obs_source_get_volume(target));
-		if (!std::isfinite(db) || db < -95.0f) {
-			volume->setText(QString::fromUtf8("−∞"));
+		bool muted = obs_source_muted(target);
+		QString value;
+		if (upright && muted) {
+			value = QString::fromUtf8(obs_module_text("Audio.Muted"));
+		} else if (!std::isfinite(db) || db < -95.0f) {
+			value = QString::fromUtf8("−∞");
+		} else if (upright) {
+			/* Do jeito do desenho: vírgula e o sinal de menos tipográfico. */
+			value = QString("%1 dB").arg(
+				QString::number(db, 'f', 1).replace('.', ',').replace('-', QChar(0x2212)));
 		} else {
-			volume->setText(QString("%1 dB").arg(QString::number(db, 'f', 1)));
+			value = QString("%1 dB").arg(QString::number(db, 'f', 1));
+		}
+		if (upright && obs_source_get_monitoring_enabled(target)) {
+			value += QString::fromUtf8(" · ") + QString::fromUtf8(obs_module_text("Audio.ListenShort"));
+		}
+		if (volume->text() != value) {
+			volume->setText(value);
+		}
+		if (upright && shownMuted != (int)muted) {
+			shownMuted = (int)muted;
+			name->setStyleSheet(QString("color: %1;").arg(muted ? SOMUN_GRAY : SOMUN_TEXT));
 		}
 		obs_source_release(target);
 
@@ -347,6 +532,8 @@ private:
 		static_cast<Card *>(data)->peakDb.store(peak[0]);
 	}
 
+	bool upright = false;
+	int shownMuted = -1;
 	obs_weak_source_t *source = nullptr;
 	obs_volmeter_t *volmeter = nullptr;
 	obs_fader_t *fader = nullptr;
@@ -368,20 +555,40 @@ private:
 
 class AudioDock : public QWidget {
 public:
-	explicit AudioDock(QWidget *parent) : QWidget(parent)
+	explicit AudioDock(QWidget *parent, bool upright = false) : QWidget(parent), upright(upright)
 	{
 		auto *outer = new QVBoxLayout(this);
-		outer->setContentsMargins(8, 6, 8, 6);
+		outer->setContentsMargins(upright ? 12 : 8, upright ? 10 : 6, upright ? 12 : 8, upright ? 10 : 6);
 		outer->setSpacing(6);
 
 		auto *top = new QHBoxLayout();
 		top->setContentsMargins(0, 0, 0, 0);
 		top->setSpacing(6);
-		top->addWidget(new QLabel(QString::fromUtf8(obs_module_text("Audio.Device")), this));
+		if (upright) {
+			/* Cabeçalho do Som na mesa: o título, a escolha do fone e o "ouvir tudo". */
+			auto *title = new QLabel(QString::fromUtf8(obs_module_text("Audio.MixerTitle")), this);
+			title->setObjectName("somunPanelTitle");
+			top->addWidget(title);
+			top->addStretch(1);
+		} else {
+			top->addWidget(new QLabel(QString::fromUtf8(obs_module_text("Audio.Device")), this));
+		}
 		devices = new QComboBox(this);
-		devices->setMinimumWidth(180);
-		top->addWidget(devices, 1);
-		all = new QPushButton(QString::fromUtf8(obs_module_text("Audio.All")), this);
+		if (upright) {
+			devices->setToolTip(QString::fromUtf8(obs_module_text("Audio.Device")));
+			devices->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+			devices->setMaximumWidth(220);
+			devices->setStyleSheet(QString("QComboBox { background: transparent; border: none; color: %1;"
+						       " padding: 2px 4px; }"
+						       "QComboBox::drop-down { border: none; width: 14px; }")
+						       .arg(QString(SOMUN_GRAY2)));
+			top->addWidget(devices);
+		} else {
+			devices->setMinimumWidth(180);
+			top->addWidget(devices, 1);
+		}
+		all = new QPushButton(QString::fromUtf8(obs_module_text(upright ? "Audio.AllShort" : "Audio.All")),
+				      this);
 		all->setCheckable(true);
 		top->addWidget(all);
 		together = new QPushButton(QString::fromUtf8(obs_module_text("Audio.Together")), this);
@@ -390,9 +597,16 @@ public:
 		top->addWidget(together);
 		connect(together, &QPushButton::clicked, this, []() { pl_scene_audio_bring_back(); });
 		warning = new QLabel(this);
-		warning->setStyleSheet("color: #e8a33d;");
-		top->addWidget(warning, 2);
-		outer->addLayout(top);
+		warning->setStyleSheet(upright ? QString("color: %1;").arg(SOMUN_RED) : QString("color: #e8a33d;"));
+		if (upright) {
+			/* O aviso do fone que sumiu fica numa linha própria, embaixo do cabeçalho. */
+			warning->setWordWrap(true);
+			outer->addLayout(top);
+			outer->addWidget(warning);
+		} else {
+			top->addWidget(warning, 2);
+			outer->addLayout(top);
+		}
 
 		area = new QScrollArea(this);
 		area->setWidgetResizable(true);
@@ -400,8 +614,8 @@ public:
 		area->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 		holder = new QWidget(area);
 		row = new QHBoxLayout(holder);
-		row->setContentsMargins(0, 0, 0, 0);
-		row->setSpacing(6);
+		row->setContentsMargins(0, upright ? 8 : 0, 0, 0);
+		row->setSpacing(upright ? 18 : 6);
 		row->addStretch(1);
 		area->setWidget(holder);
 		outer->addWidget(area, 1);
@@ -547,7 +761,7 @@ private:
 	Card *card(size_t index)
 	{
 		while (cards.size() <= index) {
-			auto *created = new Card(holder);
+			auto *created = new Card(holder, upright);
 			row->insertWidget((int)cards.size(), created);
 			cards.push_back(created);
 		}
@@ -629,6 +843,7 @@ private:
 			obs_module_text(pl_scene_audio_brought_back() ? "Audio.Together.Undo" : "Audio.Together")));
 	}
 
+	bool upright = false;
 	QComboBox *devices = nullptr;
 	QPushButton *all = nullptr;
 	QPushButton *together = nullptr;
@@ -679,6 +894,14 @@ void pl_audio_dock_unload(void)
 QWidget *pl_audio_dock_create(QWidget *parent)
 {
 	auto *created = new AudioDock(parent);
+	instances.push_back(created);
+	created->start();
+	return created;
+}
+
+QWidget *pl_audio_mixer_create(QWidget *parent)
+{
+	auto *created = new AudioDock(parent, true);
 	instances.push_back(created);
 	created->start();
 	return created;
