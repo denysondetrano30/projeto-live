@@ -98,6 +98,7 @@ static void publish_client(struct pl_control *control, const struct peer *client
 	bool connected = client && client->sock != PL_INVALID_SOCKET;
 	control->status.connected = connected;
 	snprintf(control->status.camera, sizeof(control->status.camera), "%s", connected ? client->camera : "");
+	control->status.low_quality = false; /* o app sempre começa em Full HD */
 	/* Comando que ficou na fila sem celular não vale para o próximo que conectar. */
 	dstr_free(&control->outbox);
 	pthread_mutex_unlock(&control->mutex);
@@ -194,6 +195,13 @@ static bool handle_line(void *param, const char *line)
 		if (id > control->status.last_ack) {
 			control->status.last_ack = id;
 		}
+		pthread_mutex_unlock(&control->mutex);
+	}
+
+	/* Internet piorou, parte 2 (26/11): o app confirma que baixou a taxa ("QUAL LOW") ou voltou à normal. */
+	if (strcmp(line, "QUAL LOW") == 0 || strcmp(line, "QUAL MAX") == 0) {
+		pthread_mutex_lock(&control->mutex);
+		control->status.low_quality = line[5] == 'L';
 		pthread_mutex_unlock(&control->mutex);
 	}
 

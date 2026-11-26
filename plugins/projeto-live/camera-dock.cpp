@@ -796,6 +796,11 @@ public:
 					weakWifi = true;
 					info = msg("Cameras.WeakSignal");
 				}
+				/* Internet piorou, parte 2: o celular já baixou a taxa → aviso discreto (cinza). */
+				if (signal == Signal::Live && status.reduced) {
+					weakWifi = false;
+					info = msg("Cameras.Reduced");
+				}
 			}
 			obs_source_release(cam);
 		} else if (web) {

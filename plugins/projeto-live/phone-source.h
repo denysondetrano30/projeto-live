@@ -47,6 +47,7 @@ struct pl_phone_status {
 	int rtt_ms;      /* ida e volta pelo canal de controle; -1 = sem medida */
 	int recent_gaps; /* pausas na imagem nos últimos 30 s */
 	bool weak;       /* sinal fraco: ping alto ou engasgando (só no Wi-Fi, não no cabo) */
+	bool reduced;    /* internet piorou, parte 2: o celular baixou a taxa (e confirmou) */
 };
 
 /* Acima disto a imagem no ar está congelada (a miniatura fica amarela). */
@@ -55,6 +56,10 @@ struct pl_phone_status {
 #define PL_PHONE_WEAK_RTT_MS 80
 /* Parte G5: pausas na imagem em 30 s a partir das quais o Wi-Fi do celular conta como fraco. */
 #define PL_PHONE_WEAK_GAPS 2
+/* Internet piorou, parte 2 (26/11): fraco por tanto tempo → o celular manda menos dados; bom por
+ * tanto tempo → volta ao normal. */
+#define PL_PHONE_LOWER_AFTER_MS 4000
+#define PL_PHONE_RAISE_AFTER_MS 60000
 
 bool pl_phone_is_source(obs_source_t *source);
 

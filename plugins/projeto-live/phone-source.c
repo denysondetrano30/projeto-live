@@ -116,6 +116,12 @@ struct phone_source {
 
 	float refresh_timer;
 	volatile bool refresh_pending;
+
+	/* Internet piorou, parte 2 (só na thread da interface): pedido de menos dados e desde quando o sinal
+	 * está fraco/bom. */
+	bool asked_low;
+	uint64_t weak_since_ns;
+	uint64_t good_since_ns;
 };
 
 /* ------------------------------------------------------------------------- */
@@ -463,6 +469,50 @@ static void clean_command(const char *text, char *out, size_t size)
 	}
 }
 
+/* Internet piorou, parte 2 (decidido com ela em 25/11): com o Wi-Fi fraco por uns segundos, pede ao
+ * app para mandar menos dados ("QUAL LOW": 2,5 em vez de 6 Mb/s, mesmo tamanho de imagem, para a
+ * câmera não encolher nas entradas); com o sinal bom por 1 minuto, volta ("QUAL MAX"). O app confirma
+ * com a mesma linha, e só então o quadrinho mostra "Wi-Fi fraco · qualidade menor" (app antigo ignora
+ * o pedido e nada muda). Pelo cabo não mexe. */
+static void adapt_quality(struct phone_source *ps, struct pl_phone_status *status, bool confirmed_low)
+{
+	uint64_t now = os_gettime_ns();
+	if (!status->connected || ps->usb_mode) {
+		ps->asked_low = false;
+		ps->weak_since_ns = 0;
+		ps->good_since_ns = 0;
+		return;
+	}
+	status->reduced = confirmed_low;
+	if (status->weak) {
+		ps->good_since_ns = 0;
+		if (!ps->weak_since_ns) {
+			ps->weak_since_ns = now;
+		}
+		if (!ps->asked_low && now - ps->weak_since_ns >= (uint64_t)PL_PHONE_LOWER_AFTER_MS * 1000000ULL) {
+			if (pl_control_send(ps->control, "QUAL LOW")) {
+				ps->asked_low = true;
+				blog(LOG_INFO, "[projeto-live] '%s': Wi-Fi fraco, pedindo menos dados",
+				     obs_source_get_name(ps->source));
+			}
+		}
+	} else if (status->has_image) {
+		ps->weak_since_ns = 0;
+		if (!ps->good_since_ns) {
+			ps->good_since_ns = now;
+		}
+		if ((ps->asked_low || confirmed_low) &&
+		    now - ps->good_since_ns >= (uint64_t)PL_PHONE_RAISE_AFTER_MS * 1000000ULL) {
+			if (pl_control_send(ps->control, "QUAL MAX")) {
+				ps->asked_low = false;
+				ps->good_since_ns = now;
+				blog(LOG_INFO, "[projeto-live] '%s': Wi-Fi melhorou, voltando à qualidade normal",
+				     obs_source_get_name(ps->source));
+			}
+		}
+	}
+}
+
 bool pl_phone_get_status(obs_source_t *source, struct pl_phone_status *status)
 {
 	memset(status, 0, sizeof(*status));
@@ -498,6 +548,7 @@ bool pl_phone_get_status(obs_source_t *source, struct pl_phone_status *status)
 	status->recent_gaps = pl_phone_video_recent_gaps(ps->video);
 	status->weak = status->has_image && !status->usb &&
 		       (status->rtt_ms > PL_PHONE_WEAK_RTT_MS || status->recent_gaps >= PL_PHONE_WEAK_GAPS);
+	adapt_quality(ps, status, link.low_quality);
 	return true;
 }
 

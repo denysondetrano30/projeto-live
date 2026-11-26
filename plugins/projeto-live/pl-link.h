@@ -18,4 +18,5 @@ struct pl_link_status {
 	bool connected;                  /* há um celular pronto para receber comandos */
 	char camera[PL_CAMERA_NAME_MAX]; /* nome que o app mostra, como "Câmera iPhone 4F2A" */
 	uint32_t last_ack;               /* número do último comando que o operador confirmou */
+	bool low_quality;                /* o app confirmou que baixou a taxa ("QUAL LOW", 26/11) */
 };
