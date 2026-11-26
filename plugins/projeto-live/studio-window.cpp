@@ -11,7 +11,7 @@
  *   A janela do OBS fica escondida. Os painéis são cópias dos mesmos painéis do OBS (mesmo código);
  * - modo OBS: a janela original do OBS, como sempre foi. Esta fica escondida.
  *
- * O OBS lembra o último modo usado (modo.json) e abre nele.
+ * O OBS lembra o último modo usado (modo.json) e abre nele; na primeira vez, no modo somun live.
  *
  * Prévia e Programa são desenhados aqui mesmo (o OBS deixa desenhar uma cena em qualquer janela):
  * a Prévia desenha a cena da prévia; o Programa desenha a saída do OBS, a mesma que vai para a live,
@@ -143,7 +143,8 @@ std::string loadMode()
 	char *path = obs_module_config_path(MODE_FILE);
 	obs_data_t *data = path ? obs_data_create_from_json_file_safe(path, "bak") : nullptr;
 	bfree(path);
-	std::string mode = MODE_OBS;
+	/* Primeira abertura (sem modo.json): já no nosso layout. */
+	std::string mode = MODE_LIVE;
 	if (data) {
 		const char *saved = obs_data_get_string(data, "modo");
 		if (saved && *saved) {
