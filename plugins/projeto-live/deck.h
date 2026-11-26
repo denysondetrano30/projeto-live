@@ -10,6 +10,11 @@
 #pragma once
 
 #ifdef __cplusplus
+class QWidget;
+
+/* A janela "Deck no celular" (QR com o endereço e o código), no ⋯ do live. */
+void pl_deck_open(QWidget *parent);
+
 extern "C" {
 #endif
 

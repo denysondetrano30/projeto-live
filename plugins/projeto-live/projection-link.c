@@ -44,11 +44,6 @@
 /* Uma linha "TEXT <base64>" com o texto de um slide inteiro. */
 #define LINE_MAX_BYTES 24576
 #define CAPTION_MAX 16384
-/* Deck pelo celular (25/11): o estado (JSON) vai para a projeção em "DECKSTATE <base64>"; os toques
- * voltam em "DECK <base64>" e esperam numa fila até a janela do live pegar (pl_projection_take_deck). */
-#define DECK_MAX 12000
-#define DECK_QUEUE 32
-#define DECK_ACTION_MAX 512
 
 enum peer_state {
 	PEER_EMPTY,
@@ -69,7 +64,6 @@ struct peer {
 	char id[ID_MAX];
 	char name[PL_PROJECTION_NAME_MAX];
 	unsigned int ticket;
-	uint64_t deck_sent;
 };
 
 struct client {
@@ -99,10 +93,6 @@ static bool mirror_ndi_vertical;
 static uint64_t mirror_version;
 static char caption_text[CAPTION_MAX];
 static uint64_t caption_version;
-static char deck_state[DECK_MAX * 4 / 3 + 8]; /* já em base64 */
-static uint64_t deck_version;
-static char deck_queue[DECK_QUEUE][DECK_ACTION_MAX];
-static int deck_queue_used;
 
 static unsigned int next_ticket;
 static uint64_t nonce_counter;
@@ -482,89 +472,6 @@ static bool base64_decode(const char *in, char *out, size_t size)
 	return true;
 }
 
-static const char BASE64_CHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-/* Codifica em base64 (com 0 no fim); devolve false se não couber. */
-static bool base64_encode(const char *in, size_t len, char *out, size_t size)
-{
-	size_t used = 0;
-	for (size_t i = 0; i < len; i += 3) {
-		uint32_t a = (uint8_t)in[i];
-		uint32_t b = i + 1 < len ? (uint8_t)in[i + 1] : 0;
-		uint32_t c = i + 2 < len ? (uint8_t)in[i + 2] : 0;
-		uint32_t triple = (a << 16) | (b << 8) | c;
-		if (used + 4 >= size) {
-			return false;
-		}
-		out[used++] = BASE64_CHARS[(triple >> 18) & 63];
-		out[used++] = BASE64_CHARS[(triple >> 12) & 63];
-		out[used++] = i + 1 < len ? BASE64_CHARS[(triple >> 6) & 63] : '=';
-		out[used++] = i + 2 < len ? BASE64_CHARS[triple & 63] : '=';
-	}
-	out[used] = 0;
-	return true;
-}
-
-void pl_projection_set_deck(const char *json)
-{
-	if (!thread_created || !json) {
-		return;
-	}
-	static char encoded[sizeof(deck_state)];
-	if (!base64_encode(json, strlen(json), encoded, sizeof(encoded))) {
-		return;
-	}
-	pthread_mutex_lock(&mutex);
-	if (strcmp(encoded, deck_state) != 0) {
-		snprintf(deck_state, sizeof(deck_state), "%s", encoded);
-		deck_version++;
-	}
-	pthread_mutex_unlock(&mutex);
-}
-
-bool pl_projection_take_deck(char *out, size_t size)
-{
-	bool found = false;
-	pthread_mutex_lock(&mutex);
-	if (deck_queue_used > 0) {
-		snprintf(out, size, "%s", deck_queue[0]);
-		memmove(deck_queue[0], deck_queue[1], (size_t)(deck_queue_used - 1) * DECK_ACTION_MAX);
-		deck_queue_used--;
-		found = true;
-	}
-	pthread_mutex_unlock(&mutex);
-	return found;
-}
-
-static void push_deck_action(const char *json)
-{
-	pthread_mutex_lock(&mutex);
-	if (deck_queue_used < DECK_QUEUE) {
-		snprintf(deck_queue[deck_queue_used++], DECK_ACTION_MAX, "%s", json);
-	}
-	pthread_mutex_unlock(&mutex);
-}
-
-static bool send_line(struct peer *peer, const char *text);
-
-/* Manda o estado do deck se mudou desde a última vez para esta projeção. */
-static bool send_deck(struct peer *peer)
-{
-	static char line[sizeof(deck_state) + 16];
-	pthread_mutex_lock(&mutex);
-	uint64_t version = deck_version;
-	bool due = version && peer->deck_sent != version;
-	if (due) {
-		snprintf(line, sizeof(line), "DECKSTATE %s", deck_state);
-	}
-	pthread_mutex_unlock(&mutex);
-	if (!due) {
-		return true;
-	}
-	peer->deck_sent = version;
-	return send_line(peer, line);
-}
-
 static void set_caption(const char *text)
 {
 	pthread_mutex_lock(&mutex);
@@ -751,18 +658,6 @@ static bool handle_line(void *param, const char *line)
 	struct line_context *context = param;
 	struct peer *peer = context->peer;
 	if (strcmp(line, "PING") == 0) {
-		return true;
-	}
-	if (peer->state == PEER_READY && strncmp(line, "DECK ", 5) == 0) {
-		char decoded[DECK_ACTION_MAX];
-		if (base64_decode(line + 5, decoded, sizeof(decoded))) {
-			push_deck_action(decoded);
-		}
-		return true;
-	}
-	if (peer->state == PEER_READY && strcmp(line, "DECK?") == 0) {
-		/* O tela (re)abriu o deck: manda o estado de novo. */
-		peer->deck_sent = 0;
 		return true;
 	}
 	if (peer->state == PEER_READY && strncmp(line, "TEXT ", 5) == 0) {
@@ -1080,9 +975,6 @@ static void *link_thread(void *data)
 			}
 			if (ok && peer->state == PEER_HELLO && elapsed(now, peer->since_ns) > HELLO_TIMEOUT_NS) {
 				ok = false;
-			}
-			if (ok && peer->state == PEER_READY) {
-				ok = send_deck(peer);
 			}
 			if (ok && peer->state == PEER_READY) {
 				if (elapsed(now, peer->last_recv_ns) > SILENCE_TIMEOUT_NS) {

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28...3.30)
 
-find_package(Qt6 REQUIRED Widgets)
+find_package(Qt6 REQUIRED Widgets Network)
 find_package(CURL REQUIRED)
 find_package(FFmpeg REQUIRED avcodec avformat avutil)
 find_package(LibDataChannel 0.20 REQUIRED)
@@ -111,6 +111,7 @@ target_link_libraries(
     OBS::frontend-api
     OBS::libobs
     Qt::Widgets
+    Qt::Network
     CURL::libcurl
     FFmpeg::avcodec
     FFmpeg::avformat

@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#141414">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>live. deck</title>
+<!--
+  somun: o deck pelo celular (decidido com ela em 25/11). Servido pelo próprio somun live (plugins/projeto-live/deck.cpp).
+  Deitado: entradas (toque = Prévia) com o "Cortar" embaixo, artes no meio, faders do Som à direita.
+  Em pé: "vire o celular". Só entra quem leu o QR (código no endereço, depois do #).
+-->
+<style>
+@font-face{font-family:Outfit;src:url(fonts/Outfit-Regular.ttf) format("truetype");font-weight:400}
+@font-face{font-family:Outfit;src:url(fonts/Outfit-Medium.ttf) format("truetype");font-weight:500}
+@font-face{font-family:Outfit;src:url(fonts/Outfit-SemiBold.ttf) format("truetype");font-weight:600}
+@font-face{font-family:Outfit;src:url(fonts/Outfit-ExtraBold.ttf) format("truetype");font-weight:700 900}
+:root{--bg:#141414;--panel:#1c1c1c;--panel2:#232323;--line:#2a2a2a;--line2:#3a3a3a;--text:#f2f2f2;--gray:#8c8c8c;--gray2:#a8a8a8;--red:#e5483b}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:Outfit,system-ui,sans-serif;overflow:hidden;-webkit-user-select:none;user-select:none;touch-action:manipulation}
+#app{position:fixed;inset:0;display:flex;flex-direction:column;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+.tp{display:flex;align-items:center;gap:8px;padding:8px 16px 4px}
+.ic{display:inline-flex;align-items:center;height:24px;padding:0 6px;border-radius:6px;background:var(--panel2);border:1px solid var(--line2);font-weight:800;font-size:13px}
+.ic i{width:4px;height:4px;border-radius:50%;background:var(--red);margin-left:1px;align-self:flex-end;margin-bottom:7px}
+.sub{font-size:12px;color:var(--gray2)}
+#ar{font-size:12px;color:var(--gray)}
+#ar.on{color:var(--red)}
+.cols{flex:1;display:flex;gap:14px;padding:4px 16px 12px;min-height:0}
+.col{display:flex;flex-direction:column;min-width:0;min-height:0}
+.lb{font-size:11px;color:var(--gray);margin:2px 0 6px}
+.rola{overflow-y:auto;min-height:0;flex:1;-webkit-overflow-scrolling:touch}
+.gr{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.en,.at{min-height:46px;border-radius:9px;background:var(--panel2);border:1.5px solid var(--line2);display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:14px;color:var(--text);font-family:inherit;text-align:left;line-height:1.2;word-break:break-word}
+.en.ar{border-color:var(--red)}
+.en.pv{border-color:var(--text)}
+.at{border-width:1px}
+.at.on{border-color:var(--red)}
+.dt{width:8px;height:8px;border-radius:50%;background:var(--line2);flex:none}
+.at.on .dt{background:var(--red)}
+#cortar{margin-top:10px;min-height:50px;border-radius:11px;border:0;background:#fff;color:#141414;font-family:inherit;font-weight:600;font-size:17px;flex:none}
+#cortar:active,.en:active,.at:active{transform:scale(.98)}
+.som{display:flex;gap:6px;overflow-x:auto;flex:1;min-height:0}
+.fd{display:flex;flex-direction:column;align-items:center;gap:4px;width:56px;flex:none;min-height:0}
+.tk{flex:1;width:44px;position:relative;touch-action:none;min-height:80px}
+.tk .tr{position:absolute;left:20px;width:4px;top:6px;bottom:6px;background:var(--line2);border-radius:2px}
+.tk .fill{position:absolute;left:20px;width:4px;bottom:6px;background:var(--gray2);border-radius:2px}
+.tk .kn{position:absolute;left:8px;width:28px;height:12px;background:#fff;border-radius:3px;margin-bottom:-6px}
+.fn{font-size:11px;color:var(--gray2);max-width:56px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
+.fv{font-size:11px;color:var(--gray2)}
+.fv.mudo{color:var(--gray)}
+.vazio{color:var(--gray);font-size:13px;padding:6px 0}
+.cobre{position:fixed;inset:0;background:var(--bg);display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center;padding:24px;color:var(--gray2);font-size:16px;z-index:5}
+.cobre b{color:var(--text);font-weight:600;font-size:18px}
+.cobre.show{display:flex}
+@media (orientation: portrait){ #vire{display:flex} }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="tp"><span class="ic">live<i></i></span><span class="sub">deck</span><span style="flex:1"></span><span id="ar">fora do ar</span></div>
+  <div class="cols">
+    <div class="col" style="flex:1.25">
+      <div class="lb">Entradas</div>
+      <div class="rola"><div class="gr" id="entradas"></div></div>
+      <button id="cortar">Cortar</button>
+    </div>
+    <div class="col" style="flex:1">
+      <div class="lb">Artes</div>
+      <div class="rola"><div class="gr" id="artes"></div></div>
+    </div>
+    <div class="col" style="flex:none;max-width:40%">
+      <div class="lb">Som</div>
+      <div class="som" id="som"></div>
+    </div>
+  </div>
+</div>
+<div class="cobre" id="vire"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#f2f2f2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="10" rx="2"/><path d="M7 4h4M17 20h-4"/></svg>vire o celular</div>
+<div class="cobre" id="aviso"><b id="avisoT"></b><span id="avisoP"></span></div>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var esc = function (t) { return String(t == null ? '' : t).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+  var guardar = function (k, v) { try { localStorage.setItem(k, v); } catch (e) {} };
+  var lembrar = function (k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } };
+
+  var codigo = decodeURIComponent(location.hash.slice(1)).trim();
+  if (codigo) guardar('somun-deck-codigo', codigo); else codigo = lembrar('somun-deck-codigo');
+
+  function aviso(titulo, texto) {
+    if (!titulo) return $('aviso').classList.remove('show');
+    $('avisoT').textContent = titulo; $('avisoP').textContent = texto || '';
+    $('aviso').classList.add('show');
+  }
+  if (!codigo) { aviso('Leia o QR de novo', 'No somun live: ⋯ › Deck no celular.'); return; }
+
+  var estado = null, versao = 0, parado = false;
+  var mexendo = {}; // fader que o dedo está mexendo: não volta pelo estado que chega
+  var c = encodeURIComponent(codigo);
+
+  function semConexao() { aviso('Sem conexão com o somun live', 'Confira se o celular está no Wi-Fi da igreja e se o somun live está aberto.'); }
+  function trocado() { parado = true; aviso('Código trocado', 'Leia o QR de novo no somun live: ⋯ › Deck no celular.'); }
+
+  // Pergunta o estado; o live só responde quando muda (ou em 20 s). Sem resposta, tenta de novo.
+  function ouvir() {
+    if (parado) return;
+    var pronto = false;
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/estado?c=' + c + '&v=' + versao);
+    xhr.timeout = 30000;
+    xhr.onload = function () {
+      pronto = true;
+      if (xhr.status === 403) return trocado();
+      if (xhr.status !== 200) { semConexao(); return setTimeout(ouvir, 1500); }
+      var m = null;
+      try { m = JSON.parse(xhr.responseText); } catch (e) {}
+      if (m) {
+        versao = m.v || 0;
+        if (m.estado) { estado = m.estado; aviso(''); desenhar(); }
+      }
+      ouvir();
+    };
+    xhr.onerror = xhr.ontimeout = function () { if (pronto) return; pronto = true; semConexao(); setTimeout(ouvir, 1500); };
+    xhr.send();
+  }
+  ouvir();
+
+  function acao(a) {
+    if (parado) return;
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/acao?c=' + c);
+    xhr.setRequestHeader('Content-Type', 'text/plain');
+    xhr.onload = function () { if (xhr.status === 403) trocado(); };
+    xhr.send(JSON.stringify(a));
+  }
+
+  function relogio(s) {
+    s = Math.max(0, Math.floor(s || 0));
+    var h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = s % 60;
+    return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m + ':' + (x < 10 ? '0' : '') + x;
+  }
+
+  function desenhar() {
+    if (!estado) return;
+    var ar = $('ar');
+    ar.textContent = estado.noAr ? '● no ar ' + relogio(estado.segundos) : 'fora do ar';
+    ar.className = estado.noAr ? 'on' : '';
+
+    var en = estado.entradas || [];
+    $('entradas').innerHTML = en.length ? en.map(function (e) {
+      return '<button class="en' + (e.ar ? ' ar' : '') + (e.previa ? ' pv' : '') + '" data-entrada="' + esc(e.id) + '">' + esc(e.id) + '</button>';
+    }).join('') : '<div class="vazio">Sem entradas</div>';
+
+    var at = estado.artes || [];
+    $('artes').innerHTML = at.length ? at.map(function (a) {
+      return '<button class="at' + (a.on ? ' on' : '') + '" data-arte="' + esc(a.id) + '"><span class="dt"></span>' + esc(a.nome) + '</button>';
+    }).join('') : '<div class="vazio">Sem artes na grade</div>';
+
+    var som = estado.som || [];
+    var caixa = $('som');
+    // refaz só quando a lista de canais muda (para não atrapalhar o dedo)
+    var nomes = som.map(function (s) { return s.id; }).join('\n');
+    if (caixa.dataset.nomes !== nomes) {
+      caixa.dataset.nomes = nomes;
+      caixa.innerHTML = som.length ? som.map(function (s, i) {
+        return '<div class="fd"><div class="tk" data-i="' + i + '"><div class="tr"></div><div class="fill"></div><div class="kn"></div></div>' +
+          '<span class="fn" data-mudo="' + i + '">' + esc(s.id) + '</span><span class="fv" data-mudo="' + i + '"></span></div>';
+      }).join('') : '<div class="vazio">Sem som</div>';
+    }
+    som.forEach(function (s, i) {
+      var tk = caixa.querySelector('.tk[data-i="' + i + '"]'); if (!tk) return;
+      var v = mexendo[s.id] != null ? mexendo[s.id] : s.v;
+      pintar(tk, v);
+      var fv = caixa.querySelector('.fv[data-mudo="' + i + '"]');
+      fv.textContent = s.mudo ? 'mudo' : (s.db <= -99 ? '−∞' : String(s.db).replace('.', ',').replace('-', '−') + ' dB');
+      fv.className = 'fv' + (s.mudo ? ' mudo' : '');
+    });
+  }
+
+  function pintar(tk, v) {
+    var alto = tk.clientHeight - 12;
+    tk.querySelector('.fill').style.height = Math.max(0, v * alto) + 'px';
+    tk.querySelector('.kn').style.bottom = (6 + v * alto) + 'px';
+  }
+
+  // Fader: arrastar com o dedo (manda no máximo a cada 80 ms).
+  var ultimoEnvio = 0, pendente = null;
+  function valorDo(tk, y) {
+    var r = tk.getBoundingClientRect();
+    return Math.min(1, Math.max(0, (r.bottom - 6 - y) / (r.height - 12)));
+  }
+  function mandarVol(id, v, ja) {
+    var agora = Date.now();
+    if (ja || agora - ultimoEnvio > 80) { ultimoEnvio = agora; acao({ a: 'vol', id: id, v: v }); pendente = null; }
+    else pendente = { id: id, v: v };
+  }
+  setInterval(function () { if (pendente) mandarVol(pendente.id, pendente.v, true); }, 90);
+
+  $('som').addEventListener('pointerdown', function (e) {
+    var tk = e.target.closest('.tk'); if (!tk || !estado) return;
+    var s = (estado.som || [])[+tk.dataset.i]; if (!s) return;
+    tk.setPointerCapture(e.pointerId);
+    var mover = function (ev) {
+      var v = valorDo(tk, ev.clientY);
+      mexendo[s.id] = v; pintar(tk, v); mandarVol(s.id, v);
+    };
+    var soltar = function (ev) {
+      tk.removeEventListener('pointermove', mover); tk.removeEventListener('pointerup', soltar); tk.removeEventListener('pointercancel', soltar);
+      var v = valorDo(tk, ev.clientY); mandarVol(s.id, v, true);
+      setTimeout(function () { delete mexendo[s.id]; }, 700);
+    };
+    tk.addEventListener('pointermove', mover); tk.addEventListener('pointerup', soltar); tk.addEventListener('pointercancel', soltar);
+    mover(e);
+  });
+
+  document.addEventListener('click', function (e) {
+    var t = e.target;
+    var en = t.closest('[data-entrada]'); if (en) return acao({ a: 'previa', id: en.dataset.entrada });
+    var at = t.closest('[data-arte]'); if (at) return acao({ a: 'arte', id: at.dataset.arte });
+    if (t.closest('#cortar')) return acao({ a: 'cortar' });
+    var mu = t.closest('[data-mudo]');
+    if (mu && estado) { var s = (estado.som || [])[+mu.dataset.mudo]; if (s) acao({ a: 'mudo', id: s.id, on: !s.mudo }); }
+  });
+
+  // Tela cheia e tela deitada no primeiro toque (o Android deixa; o iPhone não) e a tela não apaga.
+  document.addEventListener('pointerdown', function primeiro() {
+    document.removeEventListener('pointerdown', primeiro);
+    var el = document.documentElement;
+    var pedir = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (pedir) {
+      Promise.resolve(pedir.call(el)).then(function () {
+        if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(function () {});
+      }).catch(function () {});
+    }
+  });
+  var wake = null;
+  function acordado() { if (navigator.wakeLock && document.visibilityState === 'visible') navigator.wakeLock.request('screen').then(function (w) { wake = w; }).catch(function () {}); }
+  document.addEventListener('visibilitychange', acordado); acordado();
+  window.addEventListener('resize', desenhar);
+})();
+</script>
+</body>
+</html>

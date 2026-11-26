@@ -101,6 +101,7 @@
 #include "pl-account.h"
 #include "roteiro-strip.h"
 #include "updater.h"
+#include "deck.h"
 #include "relatar.h"
 #include "source-row.hpp"
 #include "somun-style.h"
@@ -1457,6 +1458,7 @@ private:
 		QAction *destinations = menu.addAction(msg("Studio.Destinations"));
 		QAction *settings = menu.addAction(msg("Studio.Settings"));
 		QAction *toObs = menu.addAction(msg("Studio.ToObs"));
+		QAction *deck = menu.addAction(msg("Deck.Menu"));
 		menu.addSeparator();
 		QAction *report = menu.addAction(msg("Relatar.Menu"));
 		/* Os menus do OBS (Arquivo, Editar, Visualizar...): os mesmos, não uma cópia. */
@@ -1469,6 +1471,10 @@ private:
 
 		QAction *chosen = menu.exec(moreButton->mapToGlobal(QPoint(0, moreButton->height())));
 		if (!chosen) {
+			return;
+		}
+		if (chosen == deck) {
+			pl_deck_open(this);
 			return;
 		}
 		if (chosen == report) {
